@@ -1,2 +1,2 @@
 [tool.vercel]
-entrypoint = "app.fast_api_actions_session_rag:app"
+entrypoint = "AIM_RAG_service.app.fast_api_actions_session_rag:app"
