@@ -2,7 +2,7 @@ import os
 import logging
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, BackgroundTasks
 
-from lan_chain_rag_semantic_parent import (
+from AIM_RAG_service.app.lan_chain_rag_semantic_parent import (
     ingest_pdf_and_return_json_async,
     extract_dynamic_kv_from_pdf_async
 )
