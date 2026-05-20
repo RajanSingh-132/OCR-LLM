@@ -1,2 +1,0 @@
-[tool.vercel]
-entrypoint = "AIM_RAG_service.app.fast_api_actions_session_rag:app"
