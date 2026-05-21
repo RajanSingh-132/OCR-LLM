@@ -1,1 +1,7 @@
-from app.fast_api_actions_session_rag import app
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+async def home():
+    return {"message": "working"}
