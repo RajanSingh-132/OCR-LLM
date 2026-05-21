@@ -1,6 +1,7 @@
 import os
 import logging
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.lan_chain_rag_semantic_parent import (
     ingest_pdf_and_return_json_async,
@@ -11,6 +12,15 @@ logger = logging.getLogger("api")
 
 # Initialize FastAPI application
 app = FastAPI(title="ocr")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.post("/api/v1/upload/pdf_dynamic_extract")
