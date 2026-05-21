@@ -8,12 +8,11 @@ import io
 import pypdf
 from typing import List
 import numpy as np
-from langchain_ollama import OllamaLLM, OllamaEmbeddings
+from langchain_ollama import OllamaLLM
+from langchain_aws import BedrockEmbeddings
 from pymongo import MongoClient
 
 from langchain_community.document_loaders import PyPDFLoader
-
-from langchain_nomic import NomicEmbeddings
 
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
@@ -37,10 +36,13 @@ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file
 MONGO_URI = os.environ.get("MONGO_URI", "")
 MONGO_DB_NAME = os.environ.get("DB_NAME", "")
 MONGO_COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "ocr_db")
-NOMIC_EMBED_API_KEY = os.environ.get("NOMIC_EMBED_API_KEY", "")
-NOMIC_EMBED_MODEL = os.environ.get("NOMIC_EMBED_MODEL", "nomic-embed-text-v1.5")
-NOMIC_EMBED_DIMENSION = int(os.environ.get("NOMIC_EMBED_DIMENSION", 768))
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+
+# AWS Bedrock Configuration
+BEDROCK_MODEL = os.environ.get("bedrockmodel", "amazon.titan-embed-text-v2:0")
+BEDROCK_ACCESS_KEY = os.environ.get("accesskey", "")
+BEDROCK_SECRET_KEY = os.environ.get("secretaccesskey", "")
+BEDROCK_REGION = os.environ.get("awsregion", "ap-south-1")
 
 SUPPORTED_PDF_EXTENSIONS = {".pdf"}
 SUPPORTED_IMAGE_EXTENSIONS = {
@@ -52,12 +54,6 @@ SUPPORTED_IMAGE_EXTENSIONS = {
     ".tif",
     ".tiff"
 }
-
-if NOMIC_EMBED_API_KEY:
-    os.environ.setdefault(
-        "NOMIC_API_KEY",
-        NOMIC_EMBED_API_KEY
-    )
 
 
 
@@ -88,20 +84,16 @@ _llm_cache = None
 def get_models():
     global _embeddings_cache, _llm_cache
     if _embeddings_cache is None or _llm_cache is None:
-        # Optimizing: Use high-speed cloud Nomic embeddings if API key is provided.
-        # This avoids local CPU bottleneck and reduces latency from 1.5s+ to ~0.08s.
-        if NOMIC_EMBED_API_KEY:
-            try:
-                embeddings = NomicEmbeddings(
-                    model=NOMIC_EMBED_MODEL,
-                    nomic_api_key=NOMIC_EMBED_API_KEY,
-                    dimensionality=NOMIC_EMBED_DIMENSION
-                )
-            except Exception as e:
-                print(f"Error initializing NomicEmbeddings, falling back to OllamaEmbeddings: {e}")
-                embeddings = OllamaEmbeddings(model="nomic-embed-text")
-        else:
-            embeddings = OllamaEmbeddings(model="nomic-embed-text")
+        # Set AWS credentials as environment variables for Bedrock
+        os.environ["AWS_ACCESS_KEY_ID"] = BEDROCK_ACCESS_KEY
+        os.environ["AWS_SECRET_ACCESS_KEY"] = BEDROCK_SECRET_KEY
+        
+        # Use AWS Bedrock embeddings
+        embeddings = BedrockEmbeddings(
+            model_id=BEDROCK_MODEL,
+            region_name=BEDROCK_REGION,
+            model_kwargs={"dimensions": 1024}
+        )
             
         # Optimizing: Use high-speed cloud Groq LLM if API key is provided.
         # This shifts inference to Groq's hardware, reducing generation time to 200-500ms!
