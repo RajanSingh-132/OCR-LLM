@@ -42,7 +42,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 BEDROCK_MODEL = os.environ.get("bedrockmodel", "amazon.titan-embed-text-v2:0")
 BEDROCK_ACCESS_KEY = os.environ.get("accesskey", "")
 BEDROCK_SECRET_KEY = os.environ.get("secretaccesskey", "")
-BEDROCK_REGION = os.environ.get("awsregion", "ap-south-1")
+BEDROCK_REGION = os.environ.get("awsregion", "us-east-1")
 
 SUPPORTED_PDF_EXTENSIONS = {".pdf"}
 SUPPORTED_IMAGE_EXTENSIONS = {
