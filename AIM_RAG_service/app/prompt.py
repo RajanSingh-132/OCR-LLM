@@ -92,23 +92,57 @@ Present in clear, organized format.
 """
 
 DYNAMIC_EXTRACTION_PROMPT = """
-You are an expert dynamic data extractor. Analyze the document text and extract all meaningful key-value pairs as a flat JSON object.
-Look for key document metadata such as:
-- "carrier_name" or "company_name"
-- "total_amount" or "settled_amount"
-- "invoice_or_load_number"
-- "date"
-- "phone_or_email"
-- "stops" (if any stop/pickup/delivery list exists)
-- "tax_details"
+You are an expert document data extractor with zero tolerance for missed information and zero tolerance for hallucination.
 
-CRITICAL RULES:-
-- If any field is not found, return null for that field.
-- Dynamically create key-value pairs for any other relevant information found in the text.
-- DO NOT extract, include, or generate any "additional_notes" key in the JSON object under any circumstances.
-- Do Not Hallucinate.
-Return ONLY a valid JSON object. Do not include markdown formatting like ```json or any conversational text.
-TEXT:
+Your task is to perform an EXHAUSTIVE scan of the document text below and extract EVERY single piece of information into a flat JSON object.
+
+=== EXHAUSTIVE SCANNING — DO NOT SKIP ANYTHING ===
+Scan the ENTIRE document from top to bottom, multiple times if needed. Look for:
+- Every label followed by a colon (:), equals (=), dash (-), or whitespace-separated value
+- Every number, amount, code, ID, or reference that appears anywhere
+- Every name (person, company, carrier, shipper, consignee, broker)
+- Every date, time, or timestamp in any format
+- Every address, city, state, zip, or country
+- Every phone number, fax, or email address
+- Every load number, invoice number, order number, BOL, PRO, PO, or reference number
+- Every rate, charge, fee, tax, fuel surcharge, accessorial, or total amount
+- Every status, instruction, note, or term that is factual and document-specific
+- Every stop, pickup, delivery, origin, destination detail
+- Every weight, quantity, commodity, or shipment description
+
+NOTHING in the document should be left out. If it is written in the document, it must appear in the JSON.
+
+=== KEY NAMING RULES ===
+- Convert every label to lowercase_with_underscores (e.g. "Carrier Name" → "carrier_name")
+- If the document has no label but a value is clearly identifiable (e.g. a standalone phone number), create a descriptive key (e.g. "phone_number")
+- If multiple values exist for the same field (e.g. multiple stops), use a JSON array
+- Never rename, merge, or omit keys
+
+=== VALUE RULES ===
+- Copy values EXACTLY as written — do not paraphrase, shorten, or reformat
+- For obvious single-character OCR errors in numbers only (e.g. "$l,250" → "$1,250"), correct only the digit — never correct names, codes, or IDs
+- If a label exists but the value is blank or unreadable → set value to null
+- Preserve original formatting of codes, IDs, and reference numbers
+
+=== STRICT ANTI-HALLUCINATION RULES ===
+1. ONLY extract what is physically written in the document text below — nothing else
+2. NEVER use outside knowledge to fill, complete, or guess any value
+3. NEVER add a key whose label does not appear in the document text
+4. NEVER output "additional_notes", "summary", "analysis", "comments", or any editorial key
+5. If uncertain whether text belongs to a field — include it with a descriptive key rather than omit it
+6. A null value is acceptable — an invented value is NEVER acceptable
+
+=== SELF-CHECK BEFORE OUTPUT ===
+Before returning JSON, verify mentally:
+- Did I scan every line of the document?
+- Is every piece of visible information represented in at least one key?
+- Did I invent anything that is not in the text? (If yes, remove it)
+
+=== OUTPUT FORMAT ===
+Return ONLY a valid JSON object. No markdown, no ```json, no explanation, no text before or after.
+The JSON is fully dynamic — its structure depends entirely on what this specific document contains.
+
+DOCUMENT TEXT:
 {text}
 """
 
