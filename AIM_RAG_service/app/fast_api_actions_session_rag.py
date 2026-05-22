@@ -194,22 +194,17 @@ async def ask_order_question(query: OrderQuery):
         embeddings, llm = get_models()
         
         # ----------------------------------------------------------------------
-        # DYNAMIC HYBRID PIPELINE (Auto-Fallback Flow)
-        # If the local JSON file exists, we ingest it. 
-        # If it is missing (like on Vercel), we automatically fall back to the Live GET API!
+        # STRICT LIVE GET API PIPELINE
+        # Local JSON file path checking and Option A (local ingestion) are fully commented out.
+        # This pipeline strictly and exclusively calls the live GET API.
         # ----------------------------------------------------------------------
-        order_file_path = GETORDERLIST_PATH
-        local_file_exists = os.path.exists(order_file_path)
+        # order_file_path = GETORDERLIST_PATH
+        # local_file_exists = os.path.exists(order_file_path)
         
-        # 1. Determine active source name and print a loud console log for Vercel
-        if local_file_exists:
-            source_name = os.path.basename(order_file_path)
-            print(f">>> [AIM RAG SYSTEM] Found local JSON file: '{source_name}'. Using Local Ingestion Pipeline.")
-            logger.info(f"Selected Local Ingestion Pipeline (Source: {source_name})")
-        else:
-            source_name = "live_api_orders.json"
-            print(">>> [AIM RAG SYSTEM] LOCAL JSON FILE NOT FOUND! Automatically falling back to Live GET API Pipeline.")
-            logger.info(f"Selected Live GET API Pipeline (Source: {source_name})")
+        # 1. Force the GET API source name and print a loud console log for Vercel
+        source_name = "live_api_orders.json"
+        print(">>> [AIM RAG SYSTEM] STRICT LIVE GET API PIPELINE ACTIVE. Local files bypassed.")
+        logger.info(f"Selected Strictly Live GET API Pipeline (Source: {source_name})")
         
         # 2. Check if the active source data is already ingested in MongoDB
         collection = get_mongo_collection()
@@ -222,49 +217,49 @@ async def ask_order_question(query: OrderQuery):
             print(f">>> [AIM RAG SYSTEM] Data already indexed in MongoDB (Source: {source_name}). Skipping ingestion.")
             logger.info(f"Source {source_name} already indexed. Proceeding to search.")
         else:
-            print(f">>> [AIM RAG SYSTEM] DB is empty for source: '{source_name}'. Starting dynamic ingestion...")
+            print(f">>> [AIM RAG SYSTEM] DB is empty for source: '{source_name}'. Starting live API ingestion...")
             logger.info(f"Starting ingestion for {source_name}...")
             success = False
 
-            if local_file_exists:
-                # ==================================================================
-                # LOCAL JSON FILE INGESTION
-                # ==================================================================
-                print(f">>> [AIM RAG SYSTEM] Reading and ingesting from local file path: {order_file_path}")
-                logger.info(f"Ingesting from local file: {order_file_path}")
-                success = await ingest_order_file_async(order_file_path, query.collection_name)
-            else:
-                # ==================================================================
-                # LIVE GET API INGESTION FALLBACK
-                # ==================================================================
-                print(">>> [AIM RAG SYSTEM] Calling external Live GET API...")
-                logger.info("Calling external Live GET API...")
-                
-                # Fetch data from GET API live
-                live_orders_json = await fetch_orders_from_api()
-                json_bytes = json.dumps(live_orders_json).encode("utf-8")
-                
-                print(">>> [AIM RAG SYSTEM] Received live JSON data from GET API. Ingesting to MongoDB...")
-                logger.info("Received live API data. Starting MongoDB in-memory ingestion...")
-                
-                success = await asyncio.to_thread(
-                    data_ingestion,
-                    base_dir=None,
-                    file_paths=None,
-                    collection_name=query.collection_name,
-                    file_bytes=json_bytes,
-                    filename=source_name  # Triggers JSON list parsing in-memory
-                )
+            # ==================================================================
+            # OPTION A: LOCAL JSON FILE INGESTION (NOW FULLY COMMENTED OUT)
+            # ==================================================================
+            # if local_file_exists:
+            #     print(f">>> [AIM RAG SYSTEM] Reading and ingesting from local file path: {order_file_path}")
+            #     logger.info(f"Ingesting from local file: {order_file_path}")
+            #     success = await ingest_order_file_async(order_file_path, query.collection_name)
+            
+            # ==================================================================
+            # OPTION B: STRICT LIVE GET API INGESTION (ACTIVE)
+            # ==================================================================
+            print(">>> [AIM RAG SYSTEM] Calling external Live GET API...")
+            logger.info("Calling external Live GET API...")
+            
+            # Fetch data from GET API live
+            live_orders_json = await fetch_orders_from_api()
+            json_bytes = json.dumps(live_orders_json).encode("utf-8")
+            
+            print(">>> [AIM RAG SYSTEM] Received live JSON data from GET API. Ingesting to MongoDB...")
+            logger.info("Received live API data. Starting MongoDB in-memory ingestion...")
+            
+            success = await asyncio.to_thread(
+                data_ingestion,
+                base_dir=None,
+                file_paths=None,
+                collection_name=query.collection_name,
+                file_bytes=json_bytes,
+                filename=source_name  # Triggers JSON list parsing in-memory
+            )
             
             if success:
-                print(f">>> [AIM RAG SYSTEM] Ingestion COMPLETED SUCCESSFULLY for source: '{source_name}'.")
+                print(f">>> [AIM RAG SYSTEM] Live API Ingestion COMPLETED SUCCESSFULLY for source: '{source_name}'.")
                 logger.info(f"Ingestion successful for {source_name}")
             else:
-                print(f">>> [AIM RAG SYSTEM] ERROR: Ingestion FAILED for source: '{source_name}'.")
+                print(f">>> [AIM RAG SYSTEM] ERROR: Live API Ingestion FAILED for source: '{source_name}'.")
                 logger.error(f"Ingestion failed for {source_name}")
                 raise HTTPException(
                     status_code=500,
-                    detail="Failed to ingest order data. Please check logs, local file presence, or API endpoints."
+                    detail="Failed to ingest order data from Live GET API. Please check logs or API endpoint."
                 )
         
         # Get vectorstore for the order collection
