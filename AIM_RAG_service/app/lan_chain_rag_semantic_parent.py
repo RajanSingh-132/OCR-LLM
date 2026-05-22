@@ -184,38 +184,81 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
         else:
             file_bytes_local = file_bytes
 
-        # --- Text layer extraction (pypdf) ---
+        # --- TIER 1: Text layer extraction (pypdf, pure Python) ---
         reader = pypdf.PdfReader(io.BytesIO(file_bytes_local))
         page_texts = []
         for page in reader.pages:
             page_texts.append(page.extract_text() or "")
 
-        # --- Vision OCR fallback (pypdfium2) for image-based pages ---
-        # Any page with < 50 chars of text is treated as image-only and OCR'd.
-        MIN_TEXT_LEN = 50
-        try:
-            pdf_doc = pypdfium2.PdfDocument(io.BytesIO(file_bytes_local))
-            for i, page_text in enumerate(page_texts):
-                if len(page_text.strip()) < MIN_TEXT_LEN:
-                    try:
-                        pdf_page = pdf_doc[i]
-                        # Render at 150 DPI (scale 150/72 ≈ 2.08)
-                        bitmap = pdf_page.render(scale=2.08, rotation=0)
-                        pil_image = bitmap.to_pil()
-                        img_bytes_io = io.BytesIO()
-                        pil_image.save(img_bytes_io, format="PNG")
-                        img_bytes = img_bytes_io.getvalue()
-                        ocr_text = _extract_text_from_image(
-                            image_bytes=img_bytes,
-                            filename=f"{source_name}_page{i}.png",
-                            llm=llm
-                        )
+        # --- TIER 2 & 3: Dynamic OCR — no fixed threshold ---
+        # Strategy: for EVERY page, check if embedded images exist.
+        # If images exist → OCR them and compare with text layer → keep the richer result.
+        # This is fully dynamic: we don't guess based on character count.
+        # A page with 200 chars of text but a full-page embedded photo still gets OCR'd.
+
+        for i, page in enumerate(reader.pages):
+            text_layer = page_texts[i].strip()
+
+            # --- TIER 2: pypdf embedded image extraction (pure Python, Vercel-safe) ---
+            # Photo-based PDFs (camera shot → PDF) store the image directly inside
+            # the PDF as an embedded XObject. pypdf can extract those bytes without
+            # any native binary, making this path fully compatible with Vercel.
+            tier2_ocr_text = ""
+            try:
+                embedded_images = page.images  # list of ImageFile objects (pypdf 3+)
+                if embedded_images:
+                    page_ocr_parts = []
+                    for idx, img_obj in enumerate(embedded_images):
+                        try:
+                            img_data = img_obj.data           # raw image bytes
+                            img_name = getattr(img_obj, "name", None) or \
+                                       f"{source_name}_p{i}_img{idx}.png"
+                            ocr_text = _extract_text_from_image(
+                                image_bytes=img_data,
+                                filename=img_name,
+                                llm=llm
+                            )
+                            if ocr_text and "NO_TEXT_FOUND" not in ocr_text.upper():
+                                page_ocr_parts.append(ocr_text)
+                        except Exception as img_err:
+                            print(f"Embedded image OCR error page {i} img {idx}: {img_err}")
+                    if page_ocr_parts:
+                        tier2_ocr_text = "\n".join(page_ocr_parts)
+            except Exception as emb_err:
+                print(f"pypdf embedded image extraction failed page {i}: {emb_err}")
+
+            if tier2_ocr_text:
+                # Dynamically pick the richer result: OCR text vs text layer
+                # More content = more extracted information from the invoice
+                if len(tier2_ocr_text.strip()) >= len(text_layer):
+                    page_texts[i] = tier2_ocr_text
+                # else: text layer was already richer, keep it
+                continue  # page resolved, skip Tier 3
+
+            # --- TIER 3: pypdfium2 page rendering (local fallback, may fail on Vercel) ---
+            # Only reached when page has NO embedded images (not a photo PDF).
+            # Useful for PDFs where content is drawn as vector/path graphics.
+            # Trigger only if text layer is also sparse (dynamic: fewer than 30 real words).
+            real_words = [w for w in text_layer.split() if len(w) > 1]
+            if len(real_words) < 30:
+                try:
+                    pdf_doc = pypdfium2.PdfDocument(io.BytesIO(file_bytes_local))
+                    pdf_page = pdf_doc[i]
+                    bitmap = pdf_page.render(scale=2.08, rotation=0)  # ~150 DPI
+                    pil_image = bitmap.to_pil()
+                    img_bytes_io = io.BytesIO()
+                    pil_image.save(img_bytes_io, format="PNG")
+                    img_bytes = img_bytes_io.getvalue()
+                    ocr_text = _extract_text_from_image(
+                        image_bytes=img_bytes,
+                        filename=f"{source_name}_page{i}.png",
+                        llm=llm
+                    )
+                    if ocr_text and len(ocr_text.strip()) > len(text_layer):
                         page_texts[i] = ocr_text
-                    except Exception as ocr_err:
-                        print(f"OCR failed for page {i} of {source_name}: {ocr_err}")
-            pdf_doc.close()
-        except Exception as render_err:
-            print(f"pypdfium2 rendering failed for {source_name}: {render_err}")
+                    pdf_doc.close()
+                except Exception as render_err:
+                    print(f"pypdfium2 render fallback failed page {i} of {source_name}: {render_err}")
 
         docs = []
         for i, text in enumerate(page_texts):
@@ -229,6 +272,7 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
                 )
             )
         return docs
+
 
     if file_ext in SUPPORTED_IMAGE_EXTENSIONS:
         if file_bytes is not None:
