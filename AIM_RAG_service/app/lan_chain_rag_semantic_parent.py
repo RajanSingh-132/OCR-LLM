@@ -6,7 +6,12 @@ import base64
 import mimetypes
 import io
 import pypdf
-import pypdfium2
+try:
+    import pypdfium2          # native binary — works locally, may fail on Vercel
+    _PYPDFIUM2_AVAILABLE = True
+except Exception:
+    pypdfium2 = None          # Tier 3 rendering disabled; Tiers 1/2/2.5 still work
+    _PYPDFIUM2_AVAILABLE = False
 from typing import List
 import numpy as np
 from langchain_ollama import OllamaLLM
@@ -165,6 +170,32 @@ def _extract_text_from_image(image_path: str = None, image_bytes: bytes = None, 
         print(f"Image text extraction error: {str(e)}")
         return f"Image file {source_name}"
 
+def _carve_jpeg_from_pdf_bytes(pdf_bytes: bytes) -> list:
+    """Pure Python JPEG byte carving from raw PDF bytes.
+    Phone-photo PDFs embed the camera JPEG directly in the file content stream.
+    pypdf's page.images only finds XObject images; this finds ALL JPEGs including
+    inline image streams, which is the common format for mobile-app PDFs.
+    No native binary needed — works on Vercel, Railway, everywhere.
+    """
+    images = []
+    JPEG_SOI = b'\xff\xd8\xff'   # JPEG Start Of Image marker
+    JPEG_EOI = b'\xff\xd9'       # JPEG End Of Image marker
+    MIN_JPEG_SIZE = 10_000       # real photos are > 10 KB
+
+    pos = 0
+    while pos < len(pdf_bytes) - 3:
+        start = pdf_bytes.find(JPEG_SOI, pos)
+        if start == -1:
+            break
+        end = pdf_bytes.find(JPEG_EOI, start + 3)
+        if end == -1:
+            break
+        jpeg_data = pdf_bytes[start: end + 2]  # include EOI marker
+        if len(jpeg_data) >= MIN_JPEG_SIZE:
+            images.append(jpeg_data)
+        pos = end + 2
+
+    return images
 
 def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: str = None, llm = None):
     if file_path:
@@ -227,6 +258,27 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
             except Exception as emb_err:
                 print(f"pypdf embedded image extraction failed page {i}: {emb_err}")
 
+            # --- TIER 2.5: JPEG byte carving (pure Python, Vercel-safe) ---
+            # Handles phone-photo PDFs that use inline image streams instead of
+            # XObject images. Scans raw PDF bytes for JPEG SOI/EOI markers.
+            if not tier2_ocr_text:
+                try:
+                    carved_jpegs = _carve_jpeg_from_pdf_bytes(file_bytes_local)
+                    if carved_jpegs:
+                        carve_ocr_parts = []
+                        for idx, jpeg_data in enumerate(carved_jpegs):
+                            ocr_text = _extract_text_from_image(
+                                image_bytes=jpeg_data,
+                                filename=f"{source_name}_carved{idx}.jpg",
+                                llm=llm
+                            )
+                            if ocr_text and "NO_TEXT_FOUND" not in ocr_text.upper():
+                                carve_ocr_parts.append(ocr_text)
+                        if carve_ocr_parts:
+                            tier2_ocr_text = "\n".join(carve_ocr_parts)
+                except Exception as carve_err:
+                    print(f"JPEG carving failed page {i}: {carve_err}")
+
             if tier2_ocr_text:
                 # Dynamically pick the richer result: OCR text vs text layer
                 # More content = more extracted information from the invoice
@@ -238,9 +290,9 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
             # --- TIER 3: pypdfium2 page rendering (local fallback, may fail on Vercel) ---
             # Only reached when page has NO embedded images (not a photo PDF).
             # Useful for PDFs where content is drawn as vector/path graphics.
-            # Trigger only if text layer is also sparse (dynamic: fewer than 30 real words).
+            # Trigger only if pypdfium2 loaded AND text layer is sparse (< 30 real words).
             real_words = [w for w in text_layer.split() if len(w) > 1]
-            if len(real_words) < 30:
+            if _PYPDFIUM2_AVAILABLE and len(real_words) < 30:
                 try:
                     pdf_doc = pypdfium2.PdfDocument(io.BytesIO(file_bytes_local))
                     pdf_page = pdf_doc[i]
@@ -604,67 +656,43 @@ async def ingest_pdf_and_return_json_async(
 # ---------------- DYNAMIC PDF & IMAGE JSON EXTRACTION ----------------
 
 def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = None, filename: str = None):
+    """Extract key-value pairs from a PDF or image as JSON.
+    Reads text DIRECTLY from the file — does NOT trigger embedding or MongoDB.
+    Embedding/storage is handled separately by the background task.
+    This makes the function fast and Vercel-compatible.
+    """
     import json
     try:
         if file_bytes is not None and filename is not None:
             source_name = filename
-            pwd = ""
         else:
             source_name = os.path.basename(file_path)
-            pwd = os.path.dirname(os.path.realpath(file_path))
 
-        collection = get_mongo_collection()
-        
-        # 1. Check if the document already exists in MongoDB
-        query_filter = {
-            "namespace": "legal_documents",
-            "metadata.source_document": source_name
-        }
-        exists = collection.find_one(query_filter)
-        
-        if not exists:
-            # Dynamically ingest the document (supports both PDFs and Images) to populate the database
-            data_ingestion(
-                base_dir=pwd,
-                file_paths=[file_path] if file_path else None,
-                collection_name="legal_documents",
-                file_bytes=file_bytes,
-                filename=filename
-            )
-            
-        # 2. Retrieve all stored chunk texts dynamically from MongoDB
-        docs = list(collection.find(query_filter).sort("metadata.chunk_id", 1))
-        full_text = "\n".join([doc.get("page_content", "") for doc in docs]).strip()
-
-        # If DB is empty OR stale (all-blank chunks from before OCR fix), fall back to direct load
-        if not full_text:
-            if exists:
-                collection.delete_many(query_filter)
-            _, llm = get_models()
-            pages = _load_file_pages(
-                file_path=file_path,
-                file_bytes=file_bytes,
-                filename=filename,
-                llm=llm
-            )
-            full_text = "\n".join([p.page_content for p in pages if p.page_content]).strip()
-
-        if not full_text:
-            # Nothing could be extracted — return an informative error instead of all-null JSON
-            return {"error": f"No text could be extracted from '{source_name}'. The file may be corrupted or empty."}
-            
-        # 3. Use Groq Cloud Llama 3.3 to dynamically extract all key-value pairs as a flat JSON object
+        # Get text directly from the file — no database, no embedding dependency.
+        # Tier 1: pypdf text layer
+        # Tier 2: pypdf XObject images → vision LLM OCR
+        # Tier 2.5: JPEG byte carving → vision LLM OCR  (Vercel-safe for phone-photo PDFs)
+        # Tier 3: pypdfium2 render (local fallback)
         _, llm = get_models()
-        
+        pages = _load_file_pages(
+            file_path=file_path,
+            file_bytes=file_bytes,
+            filename=filename,
+            llm=llm
+        )
+        full_text = "\n".join([p.page_content for p in pages if p.page_content]).strip()
+
+        if not full_text:
+            return {"error": f"No text could be extracted from '{source_name}'. The file may be corrupted or empty."}
+
+        # Use Groq LLM to dynamically extract all key-value pairs as a flat JSON object
+        _, llm = get_models()
         prompt = PromptTemplate.from_template(DYNAMIC_EXTRACTION_PROMPT)
         chain = prompt | llm
-        
-        # Use full text to perform complete dynamic extraction
         response = chain.invoke({"text": full_text[:12000]})
-        
-        # Extract string content from response
+
         text_response = response.content if hasattr(response, "content") else str(response)
-        
+
         cleaned = text_response.strip()
         if cleaned.startswith("```json"):
             cleaned = cleaned[7:]
@@ -672,12 +700,11 @@ def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = 
             cleaned = cleaned[3:]
         if cleaned.endswith("```"):
             cleaned = cleaned[:-3]
-        
+
         try:
             return json.loads(cleaned.strip())
         except json.JSONDecodeError:
             try:
-                # Try parsing as JSON lines (multiple JSON objects separated by newlines)
                 result = []
                 for line in cleaned.strip().split('\n'):
                     line = line.strip()
