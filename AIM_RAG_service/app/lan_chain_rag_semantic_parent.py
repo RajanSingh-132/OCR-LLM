@@ -6,6 +6,7 @@ import base64
 import mimetypes
 import io
 import pypdf
+import pypdfium2
 from typing import List
 import numpy as np
 from langchain_ollama import OllamaLLM
@@ -75,7 +76,7 @@ SUPPORTED_DATA_EXTENSIONS = {".json", ".txt"}
 
 #     # return embeddings, llm
 
-from app.embedding_client import get_models
+from app.embedding_client import get_models, get_vision_llm
 from app.mongo_client import get_mongo_collection, _to_python_types
 from app.rag_retrieval import get_vectorstore
 from app.prompt import DYNAMIC_EXTRACTION_PROMPT
@@ -144,8 +145,10 @@ def _extract_text_from_image(image_path: str = None, image_bytes: bytes = None, 
         #         print(f"Error initializing vision ChatGroq: {e}")
         # -------------------------------------------------------------------
 
-        # Use Anthropic Claude directly for vision OCR
-        vision_llm = llm
+        # Always use the dedicated vision LLM (llama-4-scout) for multimodal image input.
+        # The generic `llm` parameter is text-only (llama-3.3-70b) and does not accept
+        # list-style content, which would raise: "messages[0].content must be a string".
+        vision_llm = get_vision_llm()
 
         response = vision_llm.invoke([message])
         extracted = response.content if hasattr(response, "content") else str(response)
@@ -174,28 +177,58 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
         raise ValueError("Either file_path or filename must be provided.")
 
     if file_ext in SUPPORTED_PDF_EXTENSIONS:
-        if file_bytes is not None:
-            reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-            docs = []
-            for i, page in enumerate(reader.pages):
-                text = page.extract_text() or ""
-                docs.append(
-                    Document(
-                        page_content=text,
-                        metadata={
-                            "source_document": source_name,
-                            "page": i
-                        }
-                    )
-                )
-            return docs
+        # Resolve bytes whether the file came in-memory or from disk
+        if file_bytes is None:
+            with open(file_path, "rb") as f:
+                file_bytes_local = f.read()
         else:
-            loader = PyPDFLoader(file_path)
-            docs = loader.load()
-            for doc in docs:
-                if "source_document" not in doc.metadata:
-                    doc.metadata["source_document"] = os.path.basename(doc.metadata.get("source", file_path))
-            return docs
+            file_bytes_local = file_bytes
+
+        # --- Text layer extraction (pypdf) ---
+        reader = pypdf.PdfReader(io.BytesIO(file_bytes_local))
+        page_texts = []
+        for page in reader.pages:
+            page_texts.append(page.extract_text() or "")
+
+        # --- Vision OCR fallback (pypdfium2) for image-based pages ---
+        # Any page with < 50 chars of text is treated as image-only and OCR'd.
+        MIN_TEXT_LEN = 50
+        try:
+            pdf_doc = pypdfium2.PdfDocument(io.BytesIO(file_bytes_local))
+            for i, page_text in enumerate(page_texts):
+                if len(page_text.strip()) < MIN_TEXT_LEN:
+                    try:
+                        pdf_page = pdf_doc[i]
+                        # Render at 150 DPI (scale 150/72 ≈ 2.08)
+                        bitmap = pdf_page.render(scale=2.08, rotation=0)
+                        pil_image = bitmap.to_pil()
+                        img_bytes_io = io.BytesIO()
+                        pil_image.save(img_bytes_io, format="PNG")
+                        img_bytes = img_bytes_io.getvalue()
+                        ocr_text = _extract_text_from_image(
+                            image_bytes=img_bytes,
+                            filename=f"{source_name}_page{i}.png",
+                            llm=llm
+                        )
+                        page_texts[i] = ocr_text
+                    except Exception as ocr_err:
+                        print(f"OCR failed for page {i} of {source_name}: {ocr_err}")
+            pdf_doc.close()
+        except Exception as render_err:
+            print(f"pypdfium2 rendering failed for {source_name}: {render_err}")
+
+        docs = []
+        for i, text in enumerate(page_texts):
+            docs.append(
+                Document(
+                    page_content=text,
+                    metadata={
+                        "source_document": source_name,
+                        "page": i
+                    }
+                )
+            )
+        return docs
 
     if file_ext in SUPPORTED_IMAGE_EXTENSIONS:
         if file_bytes is not None:
@@ -557,9 +590,12 @@ def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = 
             
         # 2. Retrieve all stored chunk texts dynamically from MongoDB
         docs = list(collection.find(query_filter).sort("metadata.chunk_id", 1))
-        
-        if not docs:
-            # Fallback to direct file loading using our unified load pages method if DB is empty
+        full_text = "\n".join([doc.get("page_content", "") for doc in docs]).strip()
+
+        # If DB is empty OR stale (all-blank chunks from before OCR fix), fall back to direct load
+        if not full_text:
+            if exists:
+                collection.delete_many(query_filter)
             _, llm = get_models()
             pages = _load_file_pages(
                 file_path=file_path,
@@ -567,9 +603,11 @@ def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = 
                 filename=filename,
                 llm=llm
             )
-            full_text = "\n".join([p.page_content for p in pages if p.page_content])
-        else:
-            full_text = "\n".join([doc.get("page_content", "") for doc in docs])
+            full_text = "\n".join([p.page_content for p in pages if p.page_content]).strip()
+
+        if not full_text:
+            # Nothing could be extracted — return an informative error instead of all-null JSON
+            return {"error": f"No text could be extracted from '{source_name}'. The file may be corrupted or empty."}
             
         # 3. Use Groq Cloud Llama 3.3 to dynamically extract all key-value pairs as a flat JSON object
         _, llm = get_models()

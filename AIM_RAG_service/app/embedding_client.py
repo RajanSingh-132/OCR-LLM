@@ -5,6 +5,7 @@ from langchain_aws import BedrockEmbeddings
 
 _embeddings_cache = None
 _llm_cache = None
+_vision_llm_cache = None
 
 # Read env vars
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
@@ -57,3 +58,18 @@ def get_models():
         _llm_cache = llm
 
     return _embeddings_cache, _llm_cache
+
+
+def get_vision_llm():
+    """Return a vision-capable Groq LLM (llama-4-scout) for image OCR.
+    Uses a separate cache from the main text LLM."""
+    global _vision_llm_cache
+    if _vision_llm_cache is None:
+        if not GROQ_API_KEY:
+            raise ValueError("GROQ_API_KEY is not set. Please add it to your .env file.")
+        _vision_llm_cache = ChatGroq(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            groq_api_key=GROQ_API_KEY,
+            temperature=0.0,
+        )
+    return _vision_llm_cache
