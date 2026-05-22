@@ -7,11 +7,11 @@ from app.embedding_client import get_models
 logger = logging.getLogger("api")
 
 # Absolute path to getorderlist.txt
-GETORDERLIST_PATH = r"C:\Users\singh\Desktop\AIM_RAG_service2\AIM_RAG_service\getorderlist.txt"
+GETORDERLIST_PATH = r"C:\Users\singh\Desktop\AIM_RAG_service2\AIM_RAG_service\structured_output.json"
 if not os.path.exists(GETORDERLIST_PATH):
     GETORDERLIST_PATH = os.path.join(
         os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-        "getorderlist.txt"
+        "structured_output.json"
     )
 
 def store_user_question(question: str, embeddings) -> bool:

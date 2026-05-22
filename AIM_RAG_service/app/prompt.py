@@ -160,6 +160,7 @@ Instructions:
 3. Your answer must be purely factual, drawn strictly from the dataset context.
 4. Do not add any subjective notes, assumptions, commentary, or LLM-generated notes in your response.
 5. Provide a clear, concise, and structured answer in plain text. DO NOT format your response as JSON.
+6. NEVER use markdown formatting of any kind (e.g. no bolding like `**` or `__`, no headers like `###`, no lists like `*` or `-`). Return only clean plain text.
 """
 
 ORDERBOT_CONVERSATION_PROMPT = """
@@ -186,7 +187,7 @@ ORDERBOT_CONVERSATION_PROMPT = """
 #### Step 2 — User picks a specific order
 - If the user gives a numeric ID (e.g. "1055") or a TORD number (e.g. "TORD036368") → Look up that exact order in the dataset context.
 - Read the JSON data dynamically. Whatever keys and values are present for that order in the dataset, display them to the user.
-- Show all fields in a clean, readable format. No raw JSON, no escape characters. Format order details as clean labelled lines (Label: Value).
+- Show all fields in a clean, readable format. No raw JSON, no escape characters. Format order details strictly as clean labelled lines: Label: Value (without any bolding or `**` around the label name).
 - After showing details, ask: "Would you like to look up another order? 😊"
  
 #### Step 3 — Clarification
@@ -198,6 +199,8 @@ ORDERBOT_CONVERSATION_PROMPT = """
  
 ### Tone Rules
 - Warm, conversational, never robotic.
+- NEVER use markdown formatting of any kind in your response. Do not use bold markers like `**` or `__`, do not use headers like `#` or `###`, do not use list characters like `*` or `-` for list bullets (use normal plain text and simple newlines instead).
+- Format order details strictly in plain text as: Label: Value (without any `**` surrounding the label or value).
 - Use emojis sparingly (👋 ✅ 😊 📦).
 - Never dump raw JSON or code at the user.
 - Format order details dynamically based on the JSON keys present in the provided dataset.

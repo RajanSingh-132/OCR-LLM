@@ -123,11 +123,10 @@ async def ask_order_question(query: OrderQuery):
     Query order data using RAG with embeddings.
     
     Process:
-    1. Ingest getorderlist.txt with embeddings if not already ingested
+    1. Auto Ingest getorderlist.json with embeddings
     2. Retrieve relevant orders based on the question
     3. Use LLM to generate intelligent response
-    
-    Example query: "What are all carriers in the database?"
+
     """
     try:
         logger.info(f"Received order query: {query.question}")

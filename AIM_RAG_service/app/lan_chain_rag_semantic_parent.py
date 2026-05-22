@@ -356,25 +356,83 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
                 with open(file_path, "r", encoding="utf-8") as f:
                     content = f.read()
             
-            if file_ext == ".json":
-                try:
-                    data = json.loads(content)
-                    formatted_text = json.dumps(data, indent=2)
-                except json.JSONDecodeError:
-                    formatted_text = content
-            else:
-                formatted_text = content
-            
-            return [
-                Document(
-                    page_content=formatted_text,
-                    metadata={
+            # Check if text content can be parsed as JSON
+            is_json = False
+            try:
+                data = json.loads(content.strip())
+                is_json = True
+            except json.JSONDecodeError:
+                pass
+                
+            if is_json:
+                records = []
+                # Extract records from data (handle lists, details arrays, or serialized nested strings)
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and "details" in item:
+                            details_val = item["details"]
+                            if isinstance(details_val, str):
+                                try:
+                                    details_val = json.loads(details_val)
+                                except Exception:
+                                    pass
+                            if isinstance(details_val, list):
+                                records.extend(details_val)
+                            else:
+                                records.append(item)
+                        else:
+                            records.append(item)
+                elif isinstance(data, dict):
+                    if "details" in data:
+                        details_val = data["details"]
+                        if isinstance(details_val, str):
+                            try:
+                                details_val = json.loads(details_val)
+                            except Exception:
+                                pass
+                        if isinstance(details_val, list):
+                            records.extend(details_val)
+                        else:
+                            records.append(data)
+                    else:
+                        records.append(data)
+                else:
+                    records.append(data)
+                
+                # Create a separate Document for each record to prevent fragmenting fields during chunking
+                docs = []
+                for idx, record in enumerate(records):
+                    record_text = json.dumps(record, indent=2)
+                    metadata = {
                         "source_document": source_name,
-                        "page": 0,
-                        "file_type": file_ext
+                        "page": idx,
+                        "file_type": file_ext,
+                        "no_split": True
                     }
-                )
-            ]
+                    if isinstance(record, dict):
+                        if "ordernumber" in record:
+                            metadata["ordernumber"] = record["ordernumber"]
+                        if "orderid" in record:
+                            metadata["orderid"] = record["orderid"]
+                    docs.append(
+                        Document(
+                            page_content=record_text,
+                            metadata=metadata
+                        )
+                    )
+                return docs
+            else:
+                # Fallback to loading the file as a single plain text Document
+                return [
+                    Document(
+                        page_content=content,
+                        metadata={
+                            "source_document": source_name,
+                            "page": 0,
+                            "file_type": file_ext
+                        }
+                    )
+                ]
         except Exception as e:
             print(f"Error loading {file_ext} file: {str(e)}")
             raise ValueError(f"Failed to load {file_ext} file: {str(e)}")
@@ -449,26 +507,30 @@ def data_ingestion(
 
         for page_num, p in enumerate(pages):
 
-            # --------------------------------
-            # STEP 1: RECURSIVE SPLITTING
-            # --------------------------------
+            # Skip splitting if the Document is flagged as no_split (e.g. structured JSON records)
+            if p.metadata.get("no_split"):
+                chunks = [p.page_content]
+            else:
+                # --------------------------------
+                # STEP 1: RECURSIVE SPLITTING
+                # --------------------------------
 
-            initial_chunks = recursive_splitter.split_text(
-                p.page_content
-            )
+                initial_chunks = recursive_splitter.split_text(
+                    p.page_content
+                )
 
-            # --------------------------------
-            # STEP 2: SEMANTIC SPLITTING
-            # --------------------------------
+                # --------------------------------
+                # STEP 2: SEMANTIC SPLITTING
+                # --------------------------------
 
-            semantic_docs = semantic_splitter.create_documents(
-                initial_chunks
-            )
+                semantic_docs = semantic_splitter.create_documents(
+                    initial_chunks
+                )
 
-            chunks = [
-                d.page_content
-                for d in semantic_docs
-            ]
+                chunks = [
+                    d.page_content
+                    for d in semantic_docs
+                ]
 
             prev_chunk_id = None
 
