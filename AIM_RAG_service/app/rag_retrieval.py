@@ -166,11 +166,13 @@ def get_vectorstore(
         embeddings,
         _unused_url,
         collection_name,
-        _docs=None
+        _docs=None,
+        mongo_collection_name=None,
+        replace_namespace=True
 ):
     """Get or create a MongoDB vector store for a given collection"""
     try:
-        collection = get_mongo_collection()
+        collection = get_mongo_collection(mongo_collection_name)
 
         vectorstore = MongoVectorStore(
             collection=collection,
@@ -194,7 +196,8 @@ def get_vectorstore(
         # RECREATE NAMESPACE DATA
         # --------------------------------
 
-        collection.delete_many({"namespace": collection_name})
+        if replace_namespace:
+            collection.delete_many({"namespace": collection_name})
 
         vectorstore.add_documents(_docs)
 

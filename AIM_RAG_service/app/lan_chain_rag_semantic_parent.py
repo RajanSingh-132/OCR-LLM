@@ -449,7 +449,10 @@ def data_ingestion(
         file_paths: list = None,
         collection_name: str = 'legal_documents',
         file_bytes: bytes = None,
-        filename: str = None
+        filename: str = None,
+        mongo_collection_name: str = None,
+        replace_namespace: bool = True,
+        extra_metadata: dict = None
 ):
     embeddings, llm = get_models()
 
@@ -562,6 +565,9 @@ def data_ingestion(
                         "next_chunk_id": None
                     })
 
+                    if extra_metadata:
+                        meta.update(extra_metadata)
+
                     # --------------------------------
                     # LINK CHUNKS
                     # --------------------------------
@@ -605,7 +611,9 @@ def data_ingestion(
         embeddings,
         None,
         collection_name,
-        _docs=all_chunks
+        _docs=all_chunks,
+        mongo_collection_name=mongo_collection_name,
+        replace_namespace=replace_namespace
     )
 
     return vectorstore is not None
@@ -619,7 +627,10 @@ def ingest_pdf_and_return_json_sync(
         collection_name: str = "legal_documents",
         preview_limit: int = 5,
         file_bytes: bytes = None,
-        filename: str = None
+        filename: str = None,
+        mongo_collection_name: str = None,
+        replace_namespace: bool = True,
+        extra_metadata: dict = None
 ):
     if file_bytes is not None and filename is not None:
         file_ext = os.path.splitext(filename)[1].lower()
@@ -640,7 +651,10 @@ def ingest_pdf_and_return_json_sync(
         file_paths=[file_path] if file_path else None,
         collection_name=collection_name,
         file_bytes=file_bytes,
-        filename=filename
+        filename=filename,
+        mongo_collection_name=mongo_collection_name,
+        replace_namespace=replace_namespace,
+        extra_metadata=extra_metadata
     )
 
     if not success:
@@ -649,7 +663,7 @@ def ingest_pdf_and_return_json_sync(
             "error": "Ingestion failed for the PDF file."
         }
 
-    collection = get_mongo_collection()
+    collection = get_mongo_collection(mongo_collection_name)
 
     query_filter = {
         "namespace": collection_name,
@@ -702,7 +716,10 @@ async def ingest_pdf_and_return_json_async(
         collection_name: str = "legal_documents",
         preview_limit: int = 5,
         file_bytes: bytes = None,
-        filename: str = None
+        filename: str = None,
+        mongo_collection_name: str = None,
+        replace_namespace: bool = True,
+        extra_metadata: dict = None
 ):
     return await asyncio.to_thread(
         ingest_pdf_and_return_json_sync,
@@ -711,7 +728,10 @@ async def ingest_pdf_and_return_json_async(
         collection_name,
         preview_limit,
         file_bytes,
-        filename
+        filename,
+        mongo_collection_name,
+        replace_namespace,
+        extra_metadata
     )
 
 
