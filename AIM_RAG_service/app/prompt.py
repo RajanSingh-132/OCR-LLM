@@ -209,6 +209,8 @@ Return this exact structure and these exact keys only:
 3. Keep the top-level sections exactly as: customerinfo, shipment, Revenue.
 4. If a value belongs to one of the required keys, place it under that key even if the document label uses different wording.
 5. If a required field is not found in the document, keep its value as null, except Revenue.fluecurrencyTypes[].ratemethode which must default to "Flat".
+6. Always extract the Company Name from the invoice issuer (top header/logo/supplier/vendor section) and the Customer Name only from the "Bill To", "Buyer", "Customer", "Sold To", or "Ship To" section—never interchange them.
+6.1.  If either value is not explicitly present or confidence is below 90%, return null instead of guessing.
 
 === FIELD MAPPING GUIDANCE ===
 Use these mappings to understand document labels:

@@ -81,7 +81,7 @@ SUPPORTED_DATA_EXTENSIONS = {".json", ".txt"}
 
 #     # return embeddings, llm
 
-from app.embedding_client import get_models, get_vision_llm
+from app.embedding_client import get_models, get_vision_llm, get_vision_model_names
 from app.mongo_client import get_mongo_collection, _to_python_types
 from app.rag_retrieval import get_vectorstore
 from app.prompt import DYNAMIC_EXTRACTION_PROMPT
@@ -136,26 +136,23 @@ def _extract_text_from_image(image_path: str = None, image_bytes: bytes = None, 
             ]
         )
 
-        # --- Groq vision LLM (commented out, replaced by Anthropic) ---
-        # vision_llm = None
-        # if GROQ_API_KEY:
-        #     try:
-        #         from langchain_groq import ChatGroq
-        #         vision_llm = ChatGroq(
-        #             model="meta-llama/llama-4-scout-17b-16e-instruct",
-        #             groq_api_key=GROQ_API_KEY,
-        #             temperature=0.0
-        #         )
-        #     except Exception as e:
-        #         print(f"Error initializing vision ChatGroq: {e}")
-        # -------------------------------------------------------------------
-
-        # Always use the dedicated vision LLM (llama-4-scout) for multimodal image input.
+        # Always use a dedicated vision LLM for multimodal image input.
         # The generic `llm` parameter is text-only (llama-3.3-70b) and does not accept
         # list-style content, which would raise: "messages[0].content must be a string".
-        vision_llm = get_vision_llm()
+        last_error = None
+        response = None
+        for model_name in get_vision_model_names():
+            try:
+                vision_llm = get_vision_llm(model_name)
+                response = vision_llm.invoke([message])
+                break
+            except Exception as model_error:
+                last_error = model_error
+                print(f"Image OCR failed with Groq vision model '{model_name}': {model_error}")
 
-        response = vision_llm.invoke([message])
+        if response is None:
+            raise last_error or RuntimeError("No Groq vision model could extract image text.")
+
         extracted = response.content if hasattr(response, "content") else str(response)
         extracted = (extracted or "").strip()
 
