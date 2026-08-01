@@ -15,7 +15,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
 GROQ_VISION_FALLBACK_MODELS = os.environ.get(
     "GROQ_VISION_FALLBACK_MODELS",
-    "meta-llama/llama-4-scout-17b-16e-instruct"
+    ""
 )
 # ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # Commented out
 # LLM_MODEL = os.environ.get("LLM_MODEL", "claude-sonnet-4-5")  # Commented out
