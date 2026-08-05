@@ -49,7 +49,7 @@ def _to_python_types(value):
     return value
 
 
-def get_mongo_collection():
+def get_mongo_collection(collection_name: str = None):
     """Get MongoDB collection with proper indexes"""
     if not MONGO_URI or not MONGO_DB_NAME:
         raise ValueError(
@@ -63,7 +63,7 @@ def get_mongo_collection():
     )
 
     db = client[MONGO_DB_NAME]
-    collection = db[MONGO_COLLECTION_NAME]
+    collection = db[collection_name or MONGO_COLLECTION_NAME]
 
     # Indexes for fast namespace and source-document filtering.
     collection.create_index([("namespace", 1)])

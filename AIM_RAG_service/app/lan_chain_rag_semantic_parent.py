@@ -81,7 +81,7 @@ SUPPORTED_DATA_EXTENSIONS = {".json", ".txt"}
 
 #     # return embeddings, llm
 
-from app.embedding_client import get_models, get_vision_llm
+from app.embedding_client import get_models, get_vision_llm, get_vision_model_names
 from app.mongo_client import get_mongo_collection, _to_python_types
 from app.rag_retrieval import get_vectorstore
 from app.prompt import DYNAMIC_EXTRACTION_PROMPT
@@ -136,26 +136,23 @@ def _extract_text_from_image(image_path: str = None, image_bytes: bytes = None, 
             ]
         )
 
-        # --- Groq vision LLM (commented out, replaced by Anthropic) ---
-        # vision_llm = None
-        # if GROQ_API_KEY:
-        #     try:
-        #         from langchain_groq import ChatGroq
-        #         vision_llm = ChatGroq(
-        #             model="meta-llama/llama-4-scout-17b-16e-instruct",
-        #             groq_api_key=GROQ_API_KEY,
-        #             temperature=0.0
-        #         )
-        #     except Exception as e:
-        #         print(f"Error initializing vision ChatGroq: {e}")
-        # -------------------------------------------------------------------
-
-        # Always use the dedicated vision LLM (llama-4-scout) for multimodal image input.
+        # Always use a dedicated vision LLM for multimodal image input.
         # The generic `llm` parameter is text-only (llama-3.3-70b) and does not accept
         # list-style content, which would raise: "messages[0].content must be a string".
-        vision_llm = get_vision_llm()
+        last_error = None
+        response = None
+        for model_name in get_vision_model_names():
+            try:
+                vision_llm = get_vision_llm(model_name)
+                response = vision_llm.invoke([message])
+                break
+            except Exception as model_error:
+                last_error = model_error
+                print(f"Image OCR failed with Groq vision model '{model_name}': {model_error}")
 
-        response = vision_llm.invoke([message])
+        if response is None:
+            raise last_error or RuntimeError("No Groq vision model could extract image text.")
+
         extracted = response.content if hasattr(response, "content") else str(response)
         extracted = (extracted or "").strip()
 
@@ -449,7 +446,10 @@ def data_ingestion(
         file_paths: list = None,
         collection_name: str = 'legal_documents',
         file_bytes: bytes = None,
-        filename: str = None
+        filename: str = None,
+        mongo_collection_name: str = None,
+        replace_namespace: bool = True,
+        extra_metadata: dict = None
 ):
     embeddings, llm = get_models()
 
@@ -562,6 +562,9 @@ def data_ingestion(
                         "next_chunk_id": None
                     })
 
+                    if extra_metadata:
+                        meta.update(extra_metadata)
+
                     # --------------------------------
                     # LINK CHUNKS
                     # --------------------------------
@@ -605,7 +608,9 @@ def data_ingestion(
         embeddings,
         None,
         collection_name,
-        _docs=all_chunks
+        _docs=all_chunks,
+        mongo_collection_name=mongo_collection_name,
+        replace_namespace=replace_namespace
     )
 
     return vectorstore is not None
@@ -619,7 +624,10 @@ def ingest_pdf_and_return_json_sync(
         collection_name: str = "legal_documents",
         preview_limit: int = 5,
         file_bytes: bytes = None,
-        filename: str = None
+        filename: str = None,
+        mongo_collection_name: str = None,
+        replace_namespace: bool = True,
+        extra_metadata: dict = None
 ):
     if file_bytes is not None and filename is not None:
         file_ext = os.path.splitext(filename)[1].lower()
@@ -640,7 +648,10 @@ def ingest_pdf_and_return_json_sync(
         file_paths=[file_path] if file_path else None,
         collection_name=collection_name,
         file_bytes=file_bytes,
-        filename=filename
+        filename=filename,
+        mongo_collection_name=mongo_collection_name,
+        replace_namespace=replace_namespace,
+        extra_metadata=extra_metadata
     )
 
     if not success:
@@ -649,7 +660,7 @@ def ingest_pdf_and_return_json_sync(
             "error": "Ingestion failed for the PDF file."
         }
 
-    collection = get_mongo_collection()
+    collection = get_mongo_collection(mongo_collection_name)
 
     query_filter = {
         "namespace": collection_name,
@@ -702,7 +713,10 @@ async def ingest_pdf_and_return_json_async(
         collection_name: str = "legal_documents",
         preview_limit: int = 5,
         file_bytes: bytes = None,
-        filename: str = None
+        filename: str = None,
+        mongo_collection_name: str = None,
+        replace_namespace: bool = True,
+        extra_metadata: dict = None
 ):
     return await asyncio.to_thread(
         ingest_pdf_and_return_json_sync,
@@ -711,7 +725,10 @@ async def ingest_pdf_and_return_json_async(
         collection_name,
         preview_limit,
         file_bytes,
-        filename
+        filename,
+        mongo_collection_name,
+        replace_namespace,
+        extra_metadata
     )
 
 

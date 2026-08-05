@@ -2,6 +2,8 @@ import os
 import logging
 import json
 import asyncio
+import uuid
+from typing import List
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -16,8 +18,18 @@ from app.lan_chain_rag_semantic_parent import (
 )
 from app.prompt import ORDER_ANALYSIS_PROMPT
 from app.semanticstore import GETORDERLIST_PATH
+from app.invoice_extractor import (
+    INVOICE_MONGO_COLLECTION,
+    allowed_invoice_extensions_text,
+    extract_and_store_invoice_async,
+    ingest_invoice_file_async,
+    is_supported_invoice_file,
+    clean_empty_fields,
+)
 
 logger = logging.getLogger("api")
+
+from fastapi.openapi.utils import get_openapi
 
 # Initialize FastAPI application
 app = FastAPI(title="ocr")
@@ -30,6 +42,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="ocr",
+        version="0.1.0",
+        routes=app.routes,
+    )
+    # Fix Swagger UI not showing file upload inputs for OpenAPI 3.1.0+
+    for schema in openapi_schema.get("components", {}).get("schemas", {}).values():
+        properties = schema.get("properties", {})
+        for prop in properties.values():
+            if prop.get("type") == "array":
+                items = prop.get("items", {})
+                if items.get("contentMediaType") == "application/octet-stream":
+                    items["format"] = "binary"
+            elif prop.get("contentMediaType") == "application/octet-stream":
+                prop["format"] = "binary"
+    app.openapi_schema = openapi_schema
+    return openapi_schema
+
+app.openapi = custom_openapi
 
 
 @app.post("/api/v1/upload/pdf_dynamic_extract")
@@ -94,6 +130,116 @@ async def upload_pdf_dynamic_extract(
 
     return {
         "extracted_json": parsed_json
+    }
+
+
+@app.post("/api/v1/invoices/extract")
+async def upload_invoice_extract(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        files: List[UploadFile] = File(...),
+):
+    """
+    Extract one or more invoice documents into a common invoice JSON schema.
+
+    This endpoint stores invoice extraction records and invoice embeddings in
+    the separate MongoDB collection named `invoice_json`.
+    """
+    _ = request
+
+    if not files:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one invoice file is required."
+        )
+
+    batch_id = str(uuid.uuid4())
+    base_dir = os.path.dirname(os.path.realpath(__file__))
+    results = []
+    failed_files = []
+
+    for file in files:
+        logger.info(
+            f"Received invoice upload: {file.filename} "
+            f"(content_type={file.content_type}, batch_id={batch_id})"
+        )
+
+        try:
+            if not is_supported_invoice_file(file.filename):
+                raise ValueError(
+                    f"Only invoice PDF or image files "
+                    f"({allowed_invoice_extensions_text()}) are allowed."
+                )
+
+            content_type = file.content_type or ""
+            if (
+                    content_type
+                    and content_type != "application/octet-stream"
+                    and content_type != "application/pdf"
+                    and not content_type.startswith("image/")
+            ):
+                raise ValueError(
+                    "Invalid content-type. Expected application/pdf or an image type."
+                )
+
+            file_bytes = await file.read()
+            if not file_bytes:
+                raise ValueError(f"Uploaded file '{file.filename}' is empty.")
+
+            result = await extract_and_store_invoice_async(
+                batch_id=batch_id,
+                file_bytes=file_bytes,
+                filename=file.filename
+            )
+            results.append(result)
+
+            background_tasks.add_task(
+                ingest_invoice_file_async,
+                base_dir=base_dir,
+                batch_id=batch_id,
+                file_bytes=file_bytes,
+                filename=file.filename
+            )
+
+        except Exception as exc:
+            logger.error(
+                f"Invoice extraction failed for {file.filename}: {exc}",
+                exc_info=True
+            )
+            failed_files.append({
+                "file_name": file.filename,
+                "error": str(exc)
+            })
+        finally:
+            await file.close()
+
+    if not results:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Invoice extraction failed for all uploaded files.",
+                "failed_files": failed_files
+            }
+        )
+
+    # Calculate common fields across all extracted invoices
+    all_invoices = []
+    for item in results:
+        all_invoices.extend(item.get("extracted_json", {}).get("invoices", []))
+
+    common_fields = []
+    if all_invoices:
+        invoice_keys = [set(inv.keys()) for inv in all_invoices]
+        common_keys = set.intersection(*invoice_keys)
+        common_fields = [k for k in all_invoices[0].keys() if k in common_keys]
+
+    return {
+        "status": "success" if not failed_files else "partial_success",
+        "total_files": len(files),
+        "processed_files": len(results),
+        "failed_files": failed_files,
+        "invoices": all_invoices,
+        "common_fields": common_fields
     }
 
 
@@ -321,5 +467,3 @@ async def ask_order_question(query: OrderQuery):
             status_code=500,
             detail=f"Failed to process order query: {str(e)}"
         )
-
-
