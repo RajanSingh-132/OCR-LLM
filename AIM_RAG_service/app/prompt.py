@@ -240,6 +240,153 @@ DOCUMENT TEXT:
 {text}
 """
 
+DYNAMIC_EXTRACTION_PROMPT = """
+You are a strict logistics document data extractor with zero tolerance for missed information and zero tolerance for hallucination.
+
+Your task is to scan the complete document text and map extracted values into the EXACT JSON structure provided below.
+
+=== REQUIRED OUTPUT JSON STRUCTURE ===
+Return this exact structure and these exact keys only:
+
+{{
+  "customerinfo": {{
+    "comapny": null,
+    "customer": null,
+    "customer_order": null,
+    "salesman": null,
+    "order_notes": null,
+    "shipment_types": null,
+    "shipment_for": null,
+    "custome_broker": null,
+    "shipmetControlNo.": null,
+    "importer": null,
+    "return": null
+  }},
+  "shipment": {{
+    "commodity": null,
+    "pickup_location": null,
+    "pickup_date": null,
+    "pickup_time": null,
+    "pickup_refrence_no": null,
+    "distance": null,
+    "delivery_location": null,
+    "delivery_date": null,
+    "delivery_time": null,
+    "delivery_refrence_no": null,
+    "ValueOfgoods": null,
+    "Equipment": null,
+    "No.OfPackage": null,
+    "weight": null,
+    "temperature": null,
+    "dimention": null,
+    "pickupNote": null,
+    "DeliveryNotes": null,
+    "Copmliancehandling": null
+  }},
+  "Revenue": {{
+    "fluecurrencyTypes": [
+      {{
+        "ratemethode": null,
+        "flue_value": null,
+        "flue_subcharge": null,
+        "extra_charge": null,
+        "ratemathod2": null,
+        "remarks": null
+      }}
+    ]
+  }}
+}}
+
+=== KEY RULES ===
+1. Use ONLY the keys shown in the required JSON structure.
+2. Do not rename keys, fix spelling, change case, remove dots, or create extra keys.
+3. Keep the top-level sections exactly as: customerinfo, shipment, Revenue.
+4. If a value belongs to one of the required keys, place it under that key even if the document label uses different wording.
+5. If a required field is not found in the document, keep its value as null.
+
+=== FIELD MAPPING GUIDANCE ===
+Use these mappings to understand document labels:
+- comapny may appear as company, bill to company, shipper company, customer company, corporate name, or carrier company.
+- customer may appear as customer, customer name, client, bill to, consignee, shipper, or account.
+- customer_order may appear as customer order, order no, order number, PO, PO number, customer ref, or reference number.
+- salesman may appear as salesman, sales person, sales rep, representative, account manager, or agent.
+- order_notes may appear as notes, order notes, instructions, special instructions, remarks, or comments.
+- shipment_types may appear as shipment type, service type, mode, load type, FTL, LTL, import, export, domestic, or cross-border.
+- shipment_for may appear as shipment for, booked for, service for, department, or purpose.
+- custome_broker may appear as customs broker, broker, brokerage, customs contact, custom broker, or customs.
+- shipmetControlNo. may appear as shipment control no, shipment control number, control no, cargo control number, CCN, shipment no, or load no.
+- importer may appear as importer, importer of record, IOR, buyer, or consignee importer.
+- return may appear as return, return shipment, return load, return required, round trip, or backhaul.
+- commodity may appear as commodity, goods, product, item, material, freight, description, cargo, or contents.
+- pickup_location may appear as pickup, pick up, origin, shipper, pickup address, ship from, stop 1, collection point, or loading location.
+- pickup_date may appear as pickup date, pick date, ship date, origin date, loading date, stop 1 date, or appointment date near pickup.
+- pickup_time may appear as pickup time, pick time, origin time, loading time, stop 1 time, or appointment time near pickup.
+- pickup_refrence_no may appear as pickup reference, pickup ref, PU ref, pickup number, BOL, pickup appointment, or shipper reference.
+- distance may appear as distance, miles, mileage, mi, km, kilometers, total miles, or trip distance.
+- delivery_location may appear as delivery, destination, consignee, delivery address, ship to, stop 2, drop location, or unloading location.
+- delivery_date may appear as delivery date, drop date, destination date, unloading date, stop 2 date, or appointment date near delivery.
+- delivery_time may appear as delivery time, drop time, destination time, unloading time, stop 2 time, or appointment time near delivery.
+- delivery_refrence_no may appear as delivery reference, delivery ref, drop ref, delivery number, POD, delivery appointment, or consignee reference.
+- ValueOfgoods may appear as value of goods, declared value, cargo value, goods value, insured value, or customs value.
+- Equipment may appear as equipment, trailer, truck type, vehicle type, container type, reefer, dry van, flatbed, chassis, van, or temperature controlled equipment.
+- No.OfPackage may appear as packages, no of packages, pieces, pallets, skids, cartons, cases, quantity, package count, or pcs.
+- weight may appear as weight, gross weight, net weight, lbs, kg, kilograms, pounds, or shipment weight.
+- temperature may appear as temperature, temp, reefer temp, set point, frozen, chilled, temperature controlled, or degrees.
+- dimention may appear as dimension, dimensions, length, width, height, L x W x H, cube, volume, or size.
+- pickupNote may appear as pickup note, pickup instruction, origin note, shipper note, loading instruction, or pickup remarks.
+- DeliveryNotes may appear as delivery note, delivery instruction, consignee note, receiving instruction, POD instruction, or delivery remarks.
+- Copmliancehandling may appear as compliance handling, handling, hazmat, dangerous goods, DG, customs compliance, special handling, safety requirement, or temperature compliance.
+
+=== REVENUE AND FUEL/RATE RULES ===
+1. Revenue.fluecurrencyTypes must always be an array.
+2. Add one object inside Revenue.fluecurrencyTypes for each detected fuel, currency, rate, surcharge, accessorial, or extra charge line.
+3. ratemethode should contain the rate type or method when present, such as percentage, rate/miles, rate/mile, rate/hours, rate/hour, flat, fixed, per load, per mile, hourly, or the exact method written in the document.
+4. flue_value should contain the fuel value, rate value, percentage, amount, currency value, or numeric rate exactly as written.
+5. flue_subcharge should contain fuel surcharge or surcharge value exactly as written.
+6. extra_charge should contain accessorial charges, additional charges, detention, layover, lumper, toll, waiting charge, or any other extra charge values.
+7. ratemathod2 should contain a second rate method if the same revenue line has another method or unit.
+8. remarks should contain only factual revenue remarks written in the document.
+9. If no revenue, fuel, currency, rate, surcharge, or extra charge information exists, return "fluecurrencyTypes": [].
+
+=== ARRAY RULES ===
+1. If a field has only one value, return a single string value.
+2. If the same field has multiple values, return an array of strings for that field.
+3. For multiple pickup or delivery stops, put all matching locations, dates, times, and reference numbers into arrays under their matching keys.
+4. Do not merge different values into one long string when an array is more accurate.
+
+=== VALUE RULES ===
+1. Copy values exactly as written in the document whenever possible.
+2. Preserve original formatting of IDs, codes, dates, times, amounts, currencies, percentages, and reference numbers.
+3. Do not paraphrase, summarize, calculate, normalize, translate, or reformat values.
+4. For obvious single-character OCR errors in numbers only, you may correct the digit. Never correct names, codes, addresses, or IDs.
+5. If a label exists but the value is blank or unreadable, set the value to null.
+
+=== STRICT ANTI-HALLUCINATION RULES ===
+1. Only extract information physically present in the document text.
+2. Never use outside knowledge.
+3. Never guess missing values.
+4. Never invent a value just because a key exists in the schema.
+5. Never output explanation, markdown, comments, summary, analysis, or raw text.
+
+=== SELF-CHECK BEFORE OUTPUT ===
+Before returning JSON, verify:
+- The output is valid JSON.
+- The output contains only the required keys.
+- Missing fields are null.
+- Repeated field values are arrays.
+- Revenue.fluecurrencyTypes is an array.
+- Nothing was invented.
+
+=== OUTPUT FORMAT ===
+Return ONLY a valid JSON object.
+Do not include markdown.
+Do not include ```json.
+Do not include any text before or after the JSON.
+
+DOCUMENT TEXT:
+{text}
+"""
+
 ORDER_ASK_PROMPT = """
 You are a highly accurate and intelligent data assistant. Your task is to analyze the provided dataset context and answer the user's question dynamically and correctly.
 
