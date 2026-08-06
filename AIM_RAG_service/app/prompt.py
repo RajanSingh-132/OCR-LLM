@@ -89,7 +89,8 @@ Calculate and provide:
 Present in clear, organized format.
 """
 
-DYNAMIC_EXTRACTION_PROMPT = """
+# Preserved previous prompt (not used by code). Active prompt is DYNAMIC_EXTRACTION_PROMPT below.
+OLD_DYNAMIC_EXTRACTION_PROMPT = """
 You are a strict logistics document data extractor with zero tolerance for missed information and zero tolerance for hallucination.
 
 Your task is to scan the complete document text and map extracted values into the EXACT JSON structure provided below.
@@ -180,7 +181,7 @@ Use these mappings to understand document labels:
 - No.OfPackage may appear as packages, no of packages, pieces, pallets, skids, cartons, cases, quantity, package count, or pcs.
 - weight may appear as weight, gross weight, net weight, lbs, kg, kilograms, pounds, or shipment weight.
 - temperature may appear as temperature, temp, reefer temp, set point, frozen, chilled, temperature controlled, or degrees.
-- dimention may appear as dimension, dimensions, length, width, height, L x W x H, cube, volume, or size.
+- dimention may appear as dimension, dimensions, length, width, height, L x W x H, DIMS, or size. Extract ONLY the LxWxH numbers (e.g. from "1PLT@32X48X24" return "32X48X24" only).
 - pickupNote may appear as pickup note, pickup instruction, origin note, shipper note, loading instruction, or pickup remarks.
 - DeliveryNotes may appear as delivery note, delivery instruction, consignee note, receiving instruction, POD instruction, or delivery remarks.
 - Copmliancehandling may appear as compliance handling, handling, hazmat, dangerous goods, DG, customs compliance, special handling, safety requirement, or temperature compliance.
@@ -241,9 +242,10 @@ DOCUMENT TEXT:
 """
 
 DYNAMIC_EXTRACTION_PROMPT = """
-You are a strict logistics document data extractor with zero tolerance for missed information and zero tolerance for hallucination.
+You are a strict logistics document data extractor.
+Documents may be any order format (carrier confirmation, rate confirmation, load confirmation, pickup order, BOL, multi-stop shipment). Map whatever labels appear into the FIXED JSON schema below.
 
-Your task is to scan the complete document text and map extracted values into the EXACT JSON structure provided below.
+Zero hallucination. Prefer null over guessing. Never invent names, addresses, weights, dates, amounts, or cubes-as-weight.
 
 === REQUIRED OUTPUT JSON STRUCTURE ===
 Return this exact structure and these exact keys only:
@@ -286,102 +288,141 @@ Return this exact structure and these exact keys only:
   "Revenue": {{
     "fluecurrencyTypes": [
       {{
-        "ratemethode": null,
-        "flue_value": null,
-        "flue_subcharge": null,
-        "extra_charge": null,
-        "ratemathod2": null,
-        "remarks": null
+        "ratemethod": "Flat",
+        "rate_method_value": null,
+        "total_value": null
       }}
     ]
   }}
 }}
 
 === KEY RULES ===
-1. Use ONLY the keys shown in the required JSON structure.
-2. Do not rename keys, fix spelling, change case, remove dots, or create extra keys.
-3. Keep the top-level sections exactly as: customerinfo, shipment, Revenue.
-4. If a value belongs to one of the required keys, place it under that key even if the document label uses different wording.
-5. If a required field is not found in the document, keep its value as null.
+1. Use ONLY the keys shown above. Do not rename, fix spelling, change case, remove dots, or add keys.
+2. Keep top-level sections exactly: customerinfo, shipment, Revenue.
+3. Keep intentional key spellings exactly: comapny, custome_broker, shipmetControlNo., dimention, Copmliancehandling, fluecurrencyTypes.
+4. If a required field is not clearly present, set it to null.
+5. Copy values exactly as written. Do not paraphrase, normalize, translate, or invent.
 
-=== FIELD MAPPING GUIDANCE ===
-Use these mappings to understand document labels:
-- comapny may appear as company, bill to company, shipper company, customer company, corporate name, or carrier company.
-- customer may appear as customer, customer name, client, bill to, consignee, shipper, or account.
-- customer_order may appear as customer order, order no, order number, PO, PO number, customer ref, or reference number.
-- salesman may appear as salesman, sales person, sales rep, representative, account manager, or agent.
-- order_notes may appear as notes, order notes, instructions, special instructions, remarks, or comments.
-- shipment_types may appear as shipment type, service type, mode, load type, FTL, LTL, import, export, domestic, or cross-border.
-- shipment_for may appear as shipment for, booked for, service for, department, or purpose.
-- custome_broker may appear as customs broker, broker, brokerage, customs contact, custom broker, or customs.
-- shipmetControlNo. may appear as shipment control no, shipment control number, control no, cargo control number, CCN, shipment no, or load no.
-- importer may appear as importer, importer of record, IOR, buyer, or consignee importer.
-- return may appear as return, return shipment, return load, return required, round trip, or backhaul.
-- commodity may appear as commodity, goods, product, item, material, freight, description, cargo, or contents.
-- pickup_location may appear as pickup, pick up, origin, shipper, pickup address, ship from, stop 1, collection point, or loading location.
-- pickup_date may appear as pickup date, pick date, ship date, origin date, loading date, stop 1 date, or appointment date near pickup.
-- pickup_time may appear as pickup time, pick time, origin time, loading time, stop 1 time, or appointment time near pickup.
-- pickup_refrence_no may appear as pickup reference, pickup ref, PU ref, pickup number, BOL, pickup appointment, or shipper reference.
-- distance may appear as distance, miles, mileage, mi, km, kilometers, total miles, or trip distance.
-- delivery_location may appear as delivery, destination, consignee, delivery address, ship to, stop 2, drop location, or unloading location.
-- delivery_date may appear as delivery date, drop date, destination date, unloading date, stop 2 date, or appointment date near delivery.
-- delivery_time may appear as delivery time, drop time, destination time, unloading time, stop 2 time, or appointment time near delivery.
-- delivery_refrence_no may appear as delivery reference, delivery ref, drop ref, delivery number, POD, delivery appointment, or consignee reference.
-- ValueOfgoods may appear as value of goods, declared value, cargo value, goods value, insured value, or customs value.
-- Equipment may appear as equipment, trailer, truck type, vehicle type, container type, reefer, dry van, flatbed, chassis, van, or temperature controlled equipment.
-- No.OfPackage may appear as packages, no of packages, pieces, pallets, skids, cartons, cases, quantity, package count, or pcs.
-- weight may appear as weight, gross weight, net weight, lbs, kg, kilograms, pounds, or shipment weight.
-- temperature may appear as temperature, temp, reefer temp, set point, frozen, chilled, temperature controlled, or degrees.
-- dimention may appear as dimension, dimensions, length, width, height, L x W x H, cube, volume, or size.
-- pickupNote may appear as pickup note, pickup instruction, origin note, shipper note, loading instruction, or pickup remarks.
-- DeliveryNotes may appear as delivery note, delivery instruction, consignee note, receiving instruction, POD instruction, or delivery remarks.
-- Copmliancehandling may appear as compliance handling, handling, hazmat, dangerous goods, DG, customs compliance, special handling, safety requirement, or temperature compliance.
+=== COMPANY vs CUSTOMER (CRITICAL — NEVER SWAP) ===
+comapny (issuer / forwarder / confirmation company):
+- Who ISSUED this document: letterhead, broker/forwarder name, "Arranged By" company, dispatch company on the header.
+- On a Pickup Order, the forwarder/logistics company that issued the pickup order (e.g. Expeditors Canada, Inc.) belongs in comapny when they are the document issuer — NOT the shipper warehouse name alone.
+- NEVER put pickup warehouse, consignee, or delivery warehouse into comapny.
+- NEVER put the hired highway carrier into comapny unless that same company also issued the document.
 
-=== REVENUE AND FUEL/RATE RULES ===
-1. Revenue.fluecurrencyTypes must always be an array.
-2. Add one object inside Revenue.fluecurrencyTypes for each detected fuel, currency, rate, surcharge, accessorial, or extra charge line.
-3. ratemethode should contain the rate type or method when present, such as percentage, rate/miles, rate/mile, rate/hours, rate/hour, flat, fixed, per load, per mile, hourly, or the exact method written in the document.
-4. flue_value should contain the fuel value, rate value, percentage, amount, currency value, or numeric rate exactly as written.
-5. flue_subcharge should contain fuel surcharge or surcharge value exactly as written.
-6. extra_charge should contain accessorial charges, additional charges, detention, layover, lumper, toll, waiting charge, or any other extra charge values.
-7. ratemathod2 should contain a second rate method if the same revenue line has another method or unit.
-8. remarks should contain only factual revenue remarks written in the document.
-9. If no revenue, fuel, currency, rate, surcharge, or extra charge information exists, return "fluecurrencyTypes": [].
+customer (shipper / customer — NOT the truck carrier):
+- Shipper / customer the load is for ONLY when clearly labeled as Customer, Bill To, Sold To, Owner, Shipper, Client, Account, or Arranged-With party that is explicitly the shipper/customer (not the carrier).
+- NEVER derive, copy, or infer customer from pickup_location or delivery_location (including facility names inside those addresses).
+- Even if pickup says "Redwood Warehouse - Perfection Pet Foods" or delivery says "H.E.B GROCERY..." / "DHL SUPPLY CHAIN...", do NOT put those names into customer just because they appear in locations.
+- On carrier rate confirmations, "Arranged With" is often the CARRIER company/contact (e.g. EK NAAM SHIPPING CORP). Do NOT put the carrier into customer unless the document also clearly labels that same party as Customer / Bill To / Shipper.
+- NEVER put the issuing broker/forwarder into customer.
+- NEVER use consignee / delivery warehouse as customer unless explicitly labeled Customer / Bill To / Sold To (as its own party field — not merely because it is the delivery_location).
+- If a true customer/shipper label is missing → customer MUST be null. Prefer null over borrowing from locations.
+- If comapny and customer would be the same string, re-check roles. If still unclear, set the uncertain one to null.
+
+custome_broker:
+- Use ONLY when the document explicitly labels customs broker / brokerage.
+- Do NOT move the document issuer into custome_broker just to free comapny.
+- If a party is clearly the issuer, keep them in comapny; leave custome_broker null unless a separate customs broker is named.
+
+If either name is not explicit or confidence is low, return null. Do not guess.
+
+=== SALESMAN vs IMPORTER (CRITICAL — DO NOT GUESS) ===
+salesman:
+- Prefer an explicit label: Salesman, Sales Person, Sales Rep, Account Manager, Agent.
+- If no such label exists, you MAY use the BROKER/ISSUER side dispatcher or arrange person only when clearly on the issuer's side (e.g. Hawks contact "Arranged By" / Carrier Information contact with issuer email like @hawkstrans.com → HARJEET DHILLON).
+- salesman must be a PERSON name, never a company (not EK NAAM SHIPPING CORP, not Hawks Transportation, not Redwood).
+- Do NOT put the carrier-side contact into salesman when a broker-side contact exists (e.g. prefer Harjeet Dhillon over Charanjit Singh on a Hawks confirmation).
+- Do NOT put Attention:/driver name from carrier block into salesman unless that person is clearly the broker sales/dispatcher.
+- If only carrier contacts exist and no broker sales/dispatcher person is clear → salesman = null.
+
+importer:
+- Fill ONLY when the document explicitly says Importer / Importer of Record / IOR.
+- Cross-border alone (US→Canada, etc.) is NOT enough to invent an importer.
+- Do NOT copy Consignee / Deliver To / DHL warehouse into importer just because freight enters another country.
+- Do NOT copy customer, carrier, or broker into importer.
+- If not explicitly labeled → importer MUST be null.
+
+return:
+- Only when explicitly labeled return / return load / round trip / backhaul. Otherwise null.
+
+=== LOCATION RULES (NO DUPLICATE ADDRESSES) ===
+- pickup_location = Pick / Stop #1 / Origin / Pickup From / ship-from facility + full address when present.
+- delivery_location = Deliver / Drop / Stop #2+ / Consignee / Deliver To facility + full address when present.
+- Put name and street/city/region together as ONE location string per stop.
+- Never output the same address twice in one field.
+- Never repeat a location because OCR repeated a header/footer.
+- Multiple DISTINCT stops only → array. One stop → single string.
+- City-only duplicates of a fuller address must be dropped; keep the fuller address.
+
+=== WEIGHT vs CUBES vs VALUE (CRITICAL — DO NOT CONFUSE) ===
+weight:
+- ONLY true mass/weight: Weight, Gross Weight, Total Weight, lbs, LB, kg, kilograms, pounds, or cargo lines like "4 pcs, 4624 lbs" / "44,000.00 LB".
+- On pickup orders, values beside Pieces/Weight (e.g. pieces=1 and weight=362 with unit L/lbs) go to No.OfPackage and weight.
+- NEVER put CF / CFT / cu ft / cubes / cubic volume into weight.
+- NEVER put DIMS-only numbers into weight.
+- If no clear weight unit/label, leave weight null rather than guessing.
+
+ValueOfgoods:
+- ONLY declared value / goods value / insured value / cargo value with money meaning.
+- NEVER put cubes (CF), dimensions, piece counts, or weight into ValueOfgoods.
+- If no money value is present, ValueOfgoods must be null.
+
+dimention:
+- Extract ONLY the L x W x H size numbers, normalized like "32X48X24" (or as written: 32x48x24 / 32 X 48 X 24 → prefer "32X48X24").
+- From strings like "DIMS (INS): 1PLT@32X48X24" or "1PLT@32X48X24", keep ONLY "32X48X24". Drop prefixes such as 1PLT@, PLT@, pallet count, DIMS labels, and units like INS.
+- Do NOT put piece/pallet counts into dimention (those go to No.OfPackage when applicable).
+- Cubes/CF/volume are NOT LxWxH — do not put CF into dimention unless no LxWxH exists and the document only has cube/volume as size; prefer null over mixing CF into LxWxH style.
+- dimention may appear as dimension, dimensions, length, width, height, L x W x H, DIMS, or size.
+
+=== OTHER FIELD MAPPING ===
+- customer_order: Cust Order #, customer order, PO, PO number, customer ref (e.g. POFB...). If a PO is clearly the customer/shipper PO, put it here.
+- order_notes: operational notes / special instructions only (short). Not full legal T&Cs.
+- shipment_types: GEN, FTL, LTL, import, export, mode, load type, service type when labeled (e.g. "GEN").
+- shipment_for: shipment for / booked for / purpose.
+- shipmetControlNo.: load #, shipment #, AWB/BL/shipment control, carrier confirmation no, trip #, PRO, F-numbers used as shipment id.
+- commodity: goods description (e.g. COSMETICS, pet food).
+- pickup_date / pickup_time / pickup_refrence_no: pickup side only.
+- delivery_date / delivery_time / delivery_refrence_no: delivery/consignee side; delivery refs may include consignee PO/DA when clearly for delivery.
+- Equipment: trailer / reefer / van / flatbed / equipment type / truck type (e.g. Van). Trailer length like "53.00 Feet" may go with Equipment if no better field; do not invent dimention LxWxH from trailer length.
+- No.OfPackage: pieces, pallets, skids, qty, packages, pcs.
+- temperature: temp / reefer set point only.
+- pickupNote / DeliveryNotes: stop-specific notes only.
+- Copmliancehandling: ONLY real handling requirements stated as yes/required (hazmat DG, food grade, continuous reefer, straps/load bars, etc.).
+  - Do NOT copy a column label like "HAZRD" / "Hazrd Pcs" into Copmliancehandling.
+  - If hazmat pieces are 0 / blank / not indicated as hazardous, leave Copmliancehandling null.
+
+=== REVENUE RULES ===
+1. Revenue.fluecurrencyTypes must always be an array of objects.
+2. Add one object for EVERY charge line (line haul, offered amount, addition, deduction, toll, accessorial, fuel, on-time bonus, total rate, etc.). Do not keep only the settled total if line items exist.
+3. Each object uses ONLY:
+   - ratemethod: one of "rate/miles", "rate/hour", "rate/item", "rate/package", "rate/weight", "MBF", otherwise "Flat". Never null. Never put charge names here.
+   - rate_method_value: numeric unit rate only, or null. Never charge-name strings. If unit rate equals the line total, set rate_method_value to null.
+   - total_value: exact line amount with currency when present (e.g. "900.00 CAD", "$2,160.00").
+4. If no money/rate info exists, return exactly: [{{"ratemethod": "Flat", "rate_method_value": null, "total_value": null}}]. Never [].
 
 === ARRAY RULES ===
-1. If a field has only one value, return a single string value.
-2. If the same field has multiple values, return an array of strings for that field.
-3. For multiple pickup or delivery stops, put all matching locations, dates, times, and reference numbers into arrays under their matching keys.
-4. Do not merge different values into one long string when an array is more accurate.
+1. One value → string. Multiple distinct values → array of strings.
+2. Multi-stop deliveries → arrays for matching location/date/time/ref fields.
+3. Do not merge different stops into one long string.
 
-=== VALUE RULES ===
-1. Copy values exactly as written in the document whenever possible.
-2. Preserve original formatting of IDs, codes, dates, times, amounts, currencies, percentages, and reference numbers.
-3. Do not paraphrase, summarize, calculate, normalize, translate, or reformat values.
-4. For obvious single-character OCR errors in numbers only, you may correct the digit. Never correct names, codes, addresses, or IDs.
-5. If a label exists but the value is blank or unreadable, set the value to null.
-
-=== STRICT ANTI-HALLUCINATION RULES ===
-1. Only extract information physically present in the document text.
-2. Never use outside knowledge.
-3. Never guess missing values.
-4. Never invent a value just because a key exists in the schema.
-5. Never output explanation, markdown, comments, summary, analysis, or raw text.
+=== ANTI-HALLUCINATION ===
+1. Only use text physically present in DOCUMENT TEXT.
+2. No outside knowledge. No guessing. No invented fields.
+3. Unreadable / blank labeled fields → null.
+4. Output JSON only. No markdown. No ```json. No commentary.
 
 === SELF-CHECK BEFORE OUTPUT ===
-Before returning JSON, verify:
-- The output is valid JSON.
-- The output contains only the required keys.
-- Missing fields are null.
-- Repeated field values are arrays.
-- Revenue.fluecurrencyTypes is an array.
-- Nothing was invented.
-
-=== OUTPUT FORMAT ===
-Return ONLY a valid JSON object.
-Do not include markdown.
-Do not include ```json.
-Do not include any text before or after the JSON.
+1. comapny is issuer/forwarder; customer is shipper/customer — not swapped; customer is NOT the truck carrier; customer was NOT copied from pickup_location or delivery_location.
+2. salesman is a person on the broker/issuer side when used; never a company; null if unclear.
+3. importer is null unless explicitly labeled Importer/IOR — never invent from consignee alone.
+4. weight is mass only — never CF/cubes; ValueOfgoods is money only — never CF/cubes/weight.
+5. Copmliancehandling is not a bare "HAZRD" label.
+6. shipment_types includes GEN/FTL/LTL when present; customer_order includes PO when present.
+7. pickup_location / delivery_location have no near-duplicate repeats.
+8. dimention is only LxWxH like "32X48X24" — no 1PLT@ / DIMS prefix.
+9. Keys match the template exactly; missing values are null.
+10. Valid JSON only.
 
 DOCUMENT TEXT:
 {text}
