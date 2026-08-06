@@ -101,20 +101,67 @@ def extract_metadata(
     return metadata
 
 
+def _normalize_image_bytes_for_vision(image_bytes: bytes, filename: str = None):
+    """
+    Convert raw/embedded PDF image bytes into a Groq-safe PNG.
+    pypdf often returns raw streams that are not valid JPEG/PNG files.
+    """
+    if not image_bytes:
+        raise ValueError("Empty image bytes")
+
+    # Already a normal JPEG/PNG — keep as-is when Pillow can open it.
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError(
+            "pillow is required to do image extraction. Install with: pip install pillow"
+        ) from exc
+
+    bio = io.BytesIO(image_bytes)
+    try:
+        with Image.open(bio) as img:
+            img.load()
+            # Groq accepts common RGB/RGBA PNG reliably.
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGB")
+            out = io.BytesIO()
+            img.save(out, format="PNG")
+            return out.getvalue(), "image/png", (filename or "image.png")
+    except Exception:
+        # Last chance: if bytes already look like JPEG/PNG, pass through.
+        if image_bytes.startswith(b"\xff\xd8\xff"):
+            name = filename or "image.jpg"
+            if not name.lower().endswith((".jpg", ".jpeg")):
+                name = f"{os.path.splitext(name)[0]}.jpg"
+            return image_bytes, "image/jpeg", name
+        if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            name = filename or "image.png"
+            if not name.lower().endswith(".png"):
+                name = f"{os.path.splitext(name)[0]}.png"
+            return image_bytes, "image/png", name
+        raise ValueError("Could not decode image bytes into a valid image")
+
+
 def _extract_text_from_image(image_path: str = None, image_bytes: bytes = None, filename: str = None, llm = None) -> str:
+    source_name = filename or (os.path.basename(image_path) if image_path else "image.jpg")
     try:
         if image_bytes is not None:
-            image_data = base64.b64encode(image_bytes).decode("utf-8")
-            source_name = filename or "image.jpg"
+            raw_bytes = image_bytes
         else:
             with open(image_path, "rb") as image_file:
-                image_data = base64.b64encode(
-                    image_file.read()
-                ).decode("utf-8")
-            source_name = os.path.basename(image_path)
+                raw_bytes = image_file.read()
 
-        mime_type, _ = mimetypes.guess_type(image_path or source_name)
-        mime_type = mime_type or "image/jpeg"
+        try:
+            normalized_bytes, mime_type, source_name = _normalize_image_bytes_for_vision(
+                raw_bytes,
+                filename=source_name,
+            )
+        except Exception as norm_err:
+            print(f"Image normalize skipped/failed for {source_name}: {norm_err}")
+            # Avoid sending clearly invalid bytes to Groq.
+            raise ValueError(f"invalid image data: {norm_err}") from norm_err
+
+        image_data = base64.b64encode(normalized_bytes).decode("utf-8")
 
         prompt = (
             "Extract readable text from this image exactly as present. "

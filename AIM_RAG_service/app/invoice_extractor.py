@@ -60,7 +60,6 @@ def clean_empty_fields(data):
         ]
     return data
 
-
 def normalize_invoice_payload(payload) -> Dict[str, object]:
     if isinstance(payload, list):
         invoices = payload
