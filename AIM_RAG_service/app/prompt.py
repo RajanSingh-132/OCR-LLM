@@ -360,6 +360,10 @@ weight:
 - ONLY true mass/weight: Weight, Gross Weight, Total Weight, lbs, LB, kg, kilograms, pounds, or cargo lines like "4 pcs, 4624 lbs" / "44,000.00 LB".
 - ALWAYS include the unit with the number in shipment.weight exactly as written when present (e.g. "4624 lbs", "44,000.00 LB", "26507.00 kg"). Never return a bare number like "4624" or "44000" if the document shows a unit.
 - If the document shows only a number under a Weight label with no unit printed, keep the number as written (unit cannot be invented).
+- MULTIPLE WEIGHTS (CRITICAL): If the document lists separate weights per stop/line (e.g. each delivery has its own "Total Weight: 137 lbs", "3,126 lbs", ...), put EACH stop/line weight into shipment.weight as an array of strings with units — do NOT replace them with a single combined/total/sum value.
+- Do NOT use "Total Shipment Gross Weight" / grand total / summed weight when per-stop or per-line weights are present. Prefer the separate values.
+- NEVER add/sum weights yourself. Only copy values written on the document.
+- Only when there is exactly one weight (or only a shipment total with no separate stop weights) return a single string.
 - On pickup orders, values beside Pieces/Weight (e.g. pieces=1 and weight=362 with unit L/lbs) go to No.OfPackage and weight; for weight keep number + unit (e.g. "362 L" or "362 lbs" as written).
 - NEVER put CF / CFT / cu ft / cubes / cubic volume into weight.
 - NEVER put DIMS-only numbers into weight.
@@ -405,8 +409,9 @@ dimention:
 
 === ARRAY RULES ===
 1. One value → string. Multiple distinct values → array of strings.
-2. Multi-stop deliveries → arrays for matching location/date/time/ref fields.
+2. Multi-stop deliveries → arrays for matching location/date/time/ref/weight fields when each stop has its own value.
 3. Do not merge different stops into one long string.
+4. Do not sum multiple weights into one total when separate stop weights exist.
 
 === ANTI-HALLUCINATION ===
 1. Only use text physically present in DOCUMENT TEXT.
@@ -418,7 +423,7 @@ dimention:
 1. comapny is issuer/forwarder; customer is shipper/customer — not swapped; customer is NOT the truck carrier; customer was NOT copied from pickup_location or delivery_location.
 2. salesman is a person on the broker/issuer side when used; never a company; null if unclear.
 3. importer is null unless explicitly labeled Importer/IOR — never invent from consignee alone.
-4. weight is mass only with unit when present (e.g. "44,000.00 LB") — never bare number if unit exists; never CF/cubes; ValueOfgoods is money only — never CF/cubes/weight.
+4. weight is mass only with unit when present (e.g. "44,000.00 LB"); multiple stop weights → array, not one summed total like only "18,858 lbs"; never bare number if unit exists; never CF/cubes; ValueOfgoods is money only — never CF/cubes/weight.
 5. Copmliancehandling is not a bare "HAZRD" label.
 6. shipment_types includes GEN/FTL/LTL when present; customer_order includes PO when present.
 7. pickup_location / delivery_location have no near-duplicate repeats.
