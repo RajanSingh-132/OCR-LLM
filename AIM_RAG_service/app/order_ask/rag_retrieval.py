@@ -287,10 +287,24 @@ def extract_order_token(question: str) -> Optional[str]:
     )
     if m:
         tok = m.group(1)
-        return tok.upper() if tok.upper().startswith("MRP") else tok
-    m = re.search(r"\b(\d{4,})\b", q)
-    if m:
-        return m.group(1)
+        # Ignore bare years mistaken from dates
+        if re.fullmatch(r"20\d{2}", tok):
+            pass
+        else:
+            return tok.upper() if tok.upper().startswith("MRP") else tok
+    # Digits: skip years and date fragments (2026-08-06 / 07/13/2026)
+    for m in re.finditer(r"\b(\d{4,})\b", q):
+        tok = m.group(1)
+        if re.fullmatch(r"20\d{2}", tok):
+            continue
+        # skip if this number sits inside a date pattern
+        start, end = m.span()
+        window = q[max(0, start - 3) : min(len(q), end + 3)]
+        if re.search(r"\d{1,4}[-/]\d{1,2}[-/]\d{1,4}", window) or re.search(
+            rf"{re.escape(tok)}[-/]\d", q[start : end + 6]
+        ):
+            continue
+        return tok
     return None
 
 

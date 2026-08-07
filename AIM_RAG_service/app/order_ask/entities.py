@@ -65,7 +65,7 @@ def extract_entities(
         q,
         re.I,
     )
-    if m:
+    if m and not re.search(r"\bbest\b.*\bcustomer\b|\bcustomer\b.*\bbest\b|\bhow many\b.*\bcustomer", ql):
         name = m.group(1).strip(" .,")
         name = re.sub(r"^(?:customer|code)\s+", "", name, flags=re.I).strip()
         if name.lower() not in STATUS_MAP and len(name) >= 2:
@@ -84,24 +84,50 @@ def extract_entities(
     )
     if m:
         entities["pickup_location"] = m.group(1).strip(" .,")
-    m = re.search(
-        r"\b(?:delivery|deliver(?:y)?|drop)\s*(?:location|to)?\s*[:#]?\s*['\"]?([A-Za-z0-9][A-Za-z0-9 &\-./,]{1,50})",
-        q,
-        re.I,
-    )
-    if m:
-        entities["delivery_location"] = m.group(1).strip(" .,")
+    # Avoid matching status word "delivered" as a delivery location
+    if not re.search(r"\bdelivered\b", ql):
+        m = re.search(
+            r"\b(?:delivery|deliver(?:y)?|drop)\s*(?:location|to)?\s*[:#]?\s*['\"]?([A-Za-z0-9][A-Za-z0-9 &\-./,]{1,50})",
+            q,
+            re.I,
+        )
+        if m:
+            loc = m.group(1).strip(" .,")
+            if loc.lower() not in STATUS_MAP and not re.match(r"^(ed|y)\b", loc, re.I):
+                entities["delivery_location"] = loc
 
-    # Dates: YYYY-MM-DD or YYYY/MM/DD
-    m = re.search(r"\b(20\d{2}[-/]\d{1,2}[-/]\d{1,2})\b", q)
-    if m:
-        date_val = m.group(1).replace("/", "-")
-        if re.search(r"\b(pickup|pick\s*up)\b", ql):
+    # Dates: YYYY-MM-DD, YYYY/MM/DD, MM/DD/YYYY (Order Sheet style)
+    from app.order_ask.analytics import (
+        detect_date_field,
+        extract_date_from_question,
+        is_date_activity_question,
+        normalize_date_prefix,
+    )
+
+    date_val = extract_date_from_question(q)
+    if not date_val:
+        m = re.search(r"\b(20\d{2}[-/]\d{1,2}[-/]\d{1,2})\b", q)
+        if m:
+            date_val = normalize_date_prefix(m.group(1))
+        else:
+            m = re.search(r"\b(\d{1,2}[-/]\d{1,2}[-/]20\d{2})\b", q)
+            if m:
+                date_val = normalize_date_prefix(m.group(1))
+
+    if date_val:
+        date_field = detect_date_field(q)
+        entities["analytics_date"] = date_val
+        entities["date_field"] = date_field
+        if date_field == "pickupdate":
             entities["pickupdate"] = date_val
-        elif re.search(r"\b(delivery|deliver)\b", ql):
+        elif date_field == "deliverydate":
             entities["deliverydate"] = date_val
         else:
             entities["orderdate"] = date_val
+        if is_date_activity_question(q) or re.search(
+            r"\b(customer|kitne|kitna|how many|count|ordered)\b", ql
+        ):
+            entities["analytics"] = "activity_on_date"
 
     # Sort / best / highest amount
     if re.search(r"\b(best|highest|max|top|largest|most)\b.*\b(amount|freight|revenue|tax|distance)\b", ql) or re.search(
@@ -135,6 +161,32 @@ def extract_entities(
         entities["limit"] = min(50, max(1, int(m.group(1))))
     elif re.search(r"\b(all|every)\b.*\border", ql):
         entities["limit"] = 25
+
+    # Country + pickup/delivery side (for customer geo analytics)
+    from app.order_ask.analytics import detect_country, detect_location_side
+
+    country = detect_country(q)
+    if country:
+        entities["country"] = country
+        entities["location_side"] = detect_location_side(q)
+
+    if re.search(r"\bbest\b.*\bcustomer\b|\bcustomer\b.*\bbest\b", ql):
+        entities["analytics"] = "best_customer"
+        if re.search(r"\b(revenue|freight|amount|sales)\b", ql):
+            entities["best_customer_metric"] = "revenue"
+        else:
+            entities["best_customer_metric"] = "orders"
+
+    if re.search(r"\bstatus\b.*\b(summary|break|count|how many)\b|\b(summary)\b.*\bstatus\b", ql):
+        entities["analytics"] = "status_summary"
+    elif re.search(
+        r"\b(how many|count)\b.*\b(quoted|cancelled|canceled|confirmed|dispatched|delivered|invoiced)\b",
+        ql,
+    ) or re.search(
+        r"\b(quoted|cancelled|canceled|confirmed|dispatched|delivered|invoiced)\b.*\b(how many|count)\b",
+        ql,
+    ):
+        entities["analytics"] = "status_summary"
 
     # Follow-up pronouns → reuse session
     sticky = session_entities or {}

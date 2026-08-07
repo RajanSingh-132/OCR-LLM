@@ -5,9 +5,14 @@ Planner picks tools from intent + entities; tools hit Mongo / calculation engine
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List
 
 from app.embedding_client import get_models
+from app.order_ask.analytics import (
+    format_analytics_for_context,
+    run_analytics,
+)
 from app.order_ask.calculation_engine import (
     execute_formulas,
     format_calculation_result_for_context,
@@ -31,6 +36,7 @@ TOOL_GET_ORDER = "get_order"
 TOOL_SEARCH_ORDERS = "search_orders"
 TOOL_LIST_RECENT = "list_recent"
 TOOL_RUN_CALCULATION = "run_calculation"
+TOOL_RUN_ANALYTICS = "run_analytics"
 TOOL_COMPARE_ORDERS = "compare_orders"
 TOOL_SEMANTIC_RAG = "semantic_rag"
 
@@ -43,17 +49,35 @@ def plan_tools(intent: str, entities: Dict[str, Any], intent_info: Dict[str, Any
     if intent in ("greeting", "thanks", "chitchat", "empty"):
         return []
 
+    if (
+        intent == "analytics"
+        or intent_info.get("needs_analytics")
+        or entities.get("analytics")
+        or entities.get("country")
+    ):
+        tools.append(TOOL_RUN_ANALYTICS)
+
     if intent == "calculation" or intent_info.get("needs_calculation"):
-        tools.append(TOOL_RUN_CALCULATION)
+        if TOOL_RUN_ANALYTICS not in tools:
+            tools.append(TOOL_RUN_CALCULATION)
 
     if intent == "order_lookup" or intent_info.get("needs_exact_order") or entities.get("order_token"):
-        # Always try exact lookup when token exists (MRP / TORD / numeric id)
-        if entities.get("order_token") or intent_info.get("order_token"):
+        token = entities.get("order_token") or intent_info.get("order_token")
+        # Skip fake tokens from years in dates when doing analytics
+        if token and not (
+            TOOL_RUN_ANALYTICS in tools and re.fullmatch(r"20\d{2}", str(token))
+        ):
             if not entities.get("order_token") and intent_info.get("order_token"):
                 entities["order_token"] = intent_info["order_token"]
-            tools.append(TOOL_GET_ORDER)
+            if entities.get("order_token") or (
+                intent_info.get("order_token")
+                and not re.fullmatch(r"20\d{2}", str(intent_info.get("order_token")))
+            ):
+                tools.append(TOOL_GET_ORDER)
 
-    if intent in ("list_filter", "list_orders", "filter") or entities.get("sort_by"):
+    if intent in ("list_filter", "list_orders", "filter") or (
+        entities.get("sort_by") and intent != "analytics"
+    ):
         tools.append(TOOL_SEARCH_ORDERS)
 
     if intent == "list_recent":
@@ -63,14 +87,16 @@ def plan_tools(intent: str, entities: Dict[str, Any], intent_info: Dict[str, Any
         tools.append(TOOL_COMPARE_ORDERS)
 
     if intent_info.get("needs_rag") or intent == "open_qa":
-        # Prefer structured list when filters present
         filters = entities_to_mongo_filters(entities)
         if filters and TOOL_SEARCH_ORDERS not in tools:
             tools.append(TOOL_SEARCH_ORDERS)
-        elif TOOL_GET_ORDER not in tools and TOOL_SEARCH_ORDERS not in tools:
+        elif (
+            TOOL_GET_ORDER not in tools
+            and TOOL_SEARCH_ORDERS not in tools
+            and TOOL_RUN_ANALYTICS not in tools
+        ):
             tools.append(TOOL_SEMANTIC_RAG)
 
-    # Deduplicate preserve order
     seen = set()
     ordered = []
     for t in tools:
@@ -86,11 +112,10 @@ def _compare_tokens(entities: Dict[str, Any], question: str) -> List[str]:
     tokens = []
     if entities.get("order_token"):
         tokens.append(str(entities["order_token"]))
-    # second numeric / MRP token in question
-    import re
-
     for m in re.finditer(r"\b(MRP\d+|TORD\d+|\d{4,})\b", question or "", re.I):
         tok = m.group(1)
+        if re.fullmatch(r"20\d{2}", tok):
+            continue
         if tok not in tokens:
             tokens.append(tok)
         if len(tokens) >= 2:
@@ -112,6 +137,7 @@ def execute_tools(
     matches: List[Dict[str, Any]] = []
     calc_payload = None
     list_payload = None
+    analytics_payload = None
     tools_run: List[str] = []
     active_order_token = entities.get("order_token")
 
@@ -183,7 +209,6 @@ def execute_tools(
                     "total_freight",
                     "total_taxes",
                 ]
-            # Prefer entity filters; fall back to question-detected filters inside engine
             if filters:
                 calc_payload = execute_formulas(formula_ids, filters=filters)
                 calc_payload["matched_formula_ids"] = formula_ids
@@ -191,6 +216,11 @@ def execute_tools(
             else:
                 calc_payload = run_calculation_engine(question)
             context_blocks.append(format_calculation_result_for_context(calc_payload))
+            tools_run.append(name)
+
+        elif name == TOOL_RUN_ANALYTICS:
+            analytics_payload = run_analytics(question, entities=entities)
+            context_blocks.append(format_analytics_for_context(analytics_payload))
             tools_run.append(name)
 
         elif name == TOOL_COMPARE_ORDERS:
@@ -239,6 +269,7 @@ def execute_tools(
         "context_blocks": context_blocks,
         "matches": matches,
         "calculation": calc_payload,
+        "analytics": analytics_payload,
         "list_result": list_payload,
         "tools_run": tools_run,
         "active_order_token": active_order_token,
