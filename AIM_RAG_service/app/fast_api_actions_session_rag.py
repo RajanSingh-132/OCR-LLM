@@ -271,10 +271,74 @@ class OrderQuery(BaseModel):
 #         return response.json()
 
 
+# ==============================================================================
+# PLACE TO PUT YOUR GET API:
+# Update the URL, query parameters, and authentication headers here as needed.
+# ==============================================================================
+import httpx
+async def fetch_orders_from_api() -> list:
+    """
+    Fetch order data live from an external GET API.
+    Configure this function with your actual external API endpoint.
+    """
+    # 1. PLACE YOUR GET API URL HERE:
+    api_url = "http://192.168.1.22:2090/api/Order/listorder" 
+    
+    # 2. PLACE YOUR HEADERS / AUTHENTICATION TOKEN HERE (If needed):
+    # Note: If your local API does not require Authorization, you can comment this out.
+    headers = {
+        "corporateid":"AFMQA",
+        "Content-Type": "application/json"
+    }
+    
+    # 3. HTTP GET request to pull the orders JSON payload:
+    try:
+        # We set verify=False because local IP HTTPS endpoints (e.g. 192.168.x.x)
+        # usually use self-signed SSL certificates.
+        async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+            response = await client.get(api_url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+    except httpx.ConnectError as ce:
+        logger.error(f"Failed to connect to API at {api_url}: {ce}")
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Could not connect to your GET API link ({api_url}). "
+                "This usually means your local server is offline, the port is wrong, "
+                "or there is a local firewall block. "
+                "If running on this same computer, please try changing '192.168.1.22' to 'localhost' or '127.0.0.1', or check if it uses HTTP instead of HTTPS."
+            )
+        )
+    except httpx.ConnectTimeout as ct:
+        logger.error(f"Timeout connecting to API at {api_url}: {ct}")
+        raise HTTPException(
+            status_code=504,
+            detail=f"Connection timed out while trying to reach your GET API link ({api_url}). Check if the server is running."
+        )
+    except httpx.HTTPStatusError as hse:
+        logger.error(f"API returned HTTP error: {hse.response.status_code} - {hse.response.text}")
+        raise HTTPException(
+            status_code=hse.response.status_code,
+            detail=f"Your GET API link returned an HTTP error: {hse.response.status_code}. Response: {hse.response.text[:200]}"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error fetching orders from API: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred while fetching from your GET API link: {str(e)}"
+        )
+
+
 @app.post("/api/v1/orders/ask")
 async def ask_order_question(query: OrderQuery):
     """
-    Ask questions over Avaal orders (conversation + accurate lists + tools).
+    Query order data using RAG with embeddings.
+    
+    Process:
+    1. Auto Ingest getorderlist.json or live GET API with embeddings
+    2. Retrieve relevant orders based on the question
+    3. Use LLM to generate intelligent response
 
     Send the same session_id on follow-up turns to keep memory
     (e.g. "uska status?" after looking up an order).
