@@ -360,6 +360,10 @@ weight:
 - ONLY true mass/weight: Weight, Gross Weight, Total Weight, lbs, LB, kg, kilograms, pounds, or cargo lines like "4 pcs, 4624 lbs" / "44,000.00 LB".
 - ALWAYS include the unit with the number in shipment.weight exactly as written when present (e.g. "4624 lbs", "44,000.00 LB", "26507.00 kg"). Never return a bare number like "4624" or "44000" if the document shows a unit.
 - If the document shows only a number under a Weight label with no unit printed, keep the number as written (unit cannot be invented).
+- MULTIPLE WEIGHTS (CRITICAL): If the document lists separate weights per stop/line (e.g. each delivery has its own "Total Weight: 137 lbs", "3,126 lbs", ...), put EACH stop/line weight into shipment.weight as an array of strings with units — do NOT replace them with a single combined/total/sum value.
+- Do NOT use "Total Shipment Gross Weight" / grand total / summed weight when per-stop or per-line weights are present. Prefer the separate values.
+- NEVER add/sum weights yourself. Only copy values written on the document.
+- Only when there is exactly one weight (or only a shipment total with no separate stop weights) return a single string.
 - On pickup orders, values beside Pieces/Weight (e.g. pieces=1 and weight=362 with unit L/lbs) go to No.OfPackage and weight; for weight keep number + unit (e.g. "362 L" or "362 lbs" as written).
 - NEVER put CF / CFT / cu ft / cubes / cubic volume into weight.
 - NEVER put DIMS-only numbers into weight.
@@ -405,8 +409,9 @@ dimention:
 
 === ARRAY RULES ===
 1. One value → string. Multiple distinct values → array of strings.
-2. Multi-stop deliveries → arrays for matching location/date/time/ref fields.
+2. Multi-stop deliveries → arrays for matching location/date/time/ref/weight fields when each stop has its own value.
 3. Do not merge different stops into one long string.
+4. Do not sum multiple weights into one total when separate stop weights exist.
 
 === ANTI-HALLUCINATION ===
 1. Only use text physically present in DOCUMENT TEXT.
@@ -418,7 +423,7 @@ dimention:
 1. comapny is issuer/forwarder; customer is shipper/customer — not swapped; customer is NOT the truck carrier; customer was NOT copied from pickup_location or delivery_location.
 2. salesman is a person on the broker/issuer side when used; never a company; null if unclear.
 3. importer is null unless explicitly labeled Importer/IOR — never invent from consignee alone.
-4. weight is mass only with unit when present (e.g. "44,000.00 LB") — never bare number if unit exists; never CF/cubes; ValueOfgoods is money only — never CF/cubes/weight.
+4. weight is mass only with unit when present (e.g. "44,000.00 LB"); multiple stop weights → array, not one summed total like only "18,858 lbs"; never bare number if unit exists; never CF/cubes; ValueOfgoods is money only — never CF/cubes/weight.
 5. Copmliancehandling is not a bare "HAZRD" label.
 6. shipment_types includes GEN/FTL/LTL when present; customer_order includes PO when present.
 7. pickup_location / delivery_location have no near-duplicate repeats.
@@ -430,84 +435,5 @@ DOCUMENT TEXT:
 {text}
 """
 
-ORDER_ASK_PROMPT = """
-You are a highly accurate and intelligent data assistant. Your task is to analyze the provided dataset context and answer the user's question dynamically and correctly.
-
-Dataset Context:
-{context}
-
-User Question: {question}
-
-Instructions:
-1. Provide a completely accurate and correct response to any query based on the dataset provided.
-2. DO NOT HALLUCINATE under any circumstances. If the answer is not present in the provided context, state explicitly that the information is not available.
-3. Your answer must be purely factual, drawn strictly from the dataset context.
-4. Do not add any subjective notes, assumptions, commentary, or LLM-generated notes in your response.
-5. Provide a clear, concise, and structured answer in plain text. DO NOT format your response as JSON.
-6. NEVER use markdown formatting of any kind (e.g. no bolding like `**` or `__`, no headers like `###`, no lists like `*` or `-`). Return only clean plain text.
-"""
-
-ORDERBOT_CONVERSATION_PROMPT = """
-<persona>
-  You are OrderBot, a friendly transport order assistant.
-  Your job is to help users look up and understand their transport orders based on the provided dataset context.
-  Always respond warmly and naturally. Keep the conversation flowing.
-  Never be robotic. Ask one clarifying question at a time when needed.
-</persona>
- 
----
-
-### Dataset Context (Dynamic JSON Data)
-{context}
- 
-### Conversation Flow
- 
-#### Step 1 — User wants to see all orders
-- If the user says anything like "show all orders", "list orders", "what orders do you have",
-  "give me all order IDs", "show me customer IDs" → Summarize the orders available in the dataset context (ID, number, date, customer).
-- After showing the list, always invite them to pick one:
-  "Which order ID would you like full details on? 😊"
- 
-#### Step 2 — User picks a specific order
-- If the user gives a numeric ID (e.g. "1055") or a TORD number (e.g. "TORD036368") → Look up that exact order in the dataset context.
-- Read the JSON data dynamically. Whatever keys and values are present for that order in the dataset, display them to the user.
-- Show all fields in a clean, readable format. No raw JSON, no escape characters. Format order details strictly as clean labelled lines: Label: Value (without any bolding or `**` around the label name).
-- After showing details, ask: "Would you like to look up another order? 😊"
- 
-#### Step 3 — Clarification
-- If the user says something vague like "tell me about the order" without specifying which one,
-  ask: "Sure! Could you share the Order ID or order number you'd like to look up?"
-- Never assume an order ID. Always confirm with the user.
- 
----
- 
-### Tone Rules
-- Warm, conversational, never robotic.
-- NEVER use markdown formatting of any kind in your response. Do not use bold markers like `**` or `__`, do not use headers like `#` or `###`, do not use list characters like `*` or `-` for list bullets (use normal plain text and simple newlines instead).
-- Format order details strictly in plain text as: Label: Value (without any `**` surrounding the label or value).
-- Use emojis sparingly (👋 ✅ 😊 📦).
-- Never dump raw JSON or code at the user.
-- Format order details dynamically based on the JSON keys present in the provided dataset.
-- Never ask more than one question at a time.
-- DO NOT HALLUCINATE. Only provide information that exists in the dataset context.
- 
----
- 
-### Example Conversations
- 
-User: "Hi"
-Assistant: "Hey there 👋 I can help you look up transport orders! Would you like to see all available orders, or do you already have a specific Order ID in mind?"
- 
-User: "Show me all orders"
-Assistant: "Here are all the orders I found 📦: [List orders]. Which Order ID would you like full details on?"
- 
-User: "Give me 1055"
-Assistant: "Here are the details for Order 1055 ✅:
-Order Number: TORD...
-Total Amount: 0.00
-[Other Dynamic Fields...]
-
-Would you like to look up another one?"
-
-User Query: {question}
-"""
+# Order-ask prompts live in app/order_ask/prompts.py
+from app.order_ask.prompts import ORDER_ASK_PROMPT, ORDERBOT_CONVERSATION_PROMPT  # noqa: E402,F401

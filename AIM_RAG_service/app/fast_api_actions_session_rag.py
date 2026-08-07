@@ -2,8 +2,8 @@ import os
 import logging
 import json
 import asyncio
-import uuid
-from typing import List
+# import uuid  # used only by commented /api/v1/invoices/extract
+# from typing import List  # used only by commented /api/v1/invoices/extract
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -11,21 +11,17 @@ from pydantic import BaseModel
 from app.lan_chain_rag_semantic_parent import (
     ingest_pdf_and_return_json_async,
     extract_dynamic_kv_from_pdf_async,
-    data_ingestion,
-    get_vectorstore,
-    get_models,
-    get_mongo_collection
 )
-from app.prompt import ORDER_ANALYSIS_PROMPT
-from app.semanticstore import GETORDERLIST_PATH
-from app.invoice_extractor import (
-    INVOICE_MONGO_COLLECTION,
-    allowed_invoice_extensions_text,
-    extract_and_store_invoice_async,
-    ingest_invoice_file_async,
-    is_supported_invoice_file,
-    clean_empty_fields,
-)
+# from app.prompt import ORDER_ANALYSIS_PROMPT  # unused after Avaal ask rewrite
+# Invoice extract API temporarily disabled
+# from app.invoice_extractor import (
+#     INVOICE_MONGO_COLLECTION,
+#     allowed_invoice_extensions_text,
+#     extract_and_store_invoice_async,
+#     ingest_invoice_file_async,
+#     is_supported_invoice_file,
+#     clean_empty_fields,
+# )
 
 logger = logging.getLogger("api")
 
@@ -133,134 +129,146 @@ async def upload_pdf_dynamic_extract(
     }
 
 
-@app.post("/api/v1/invoices/extract")
-async def upload_invoice_extract(
-        request: Request,
-        background_tasks: BackgroundTasks,
-        files: List[UploadFile] = File(...),
-):
-    """
-    Extract one or more invoice documents into a common invoice JSON schema.
+# Invoice extract API temporarily disabled
+# @app.post("/api/v1/invoices/extract")
+# async def upload_invoice_extract(
+#         request: Request,
+#         background_tasks: BackgroundTasks,
+#         files: List[UploadFile] = File(...),
+# ):
+#     """
+#     Extract one or more invoice documents into a common invoice JSON schema.
+#
+#     This endpoint stores invoice extraction records and invoice embeddings in
+#     the separate MongoDB collection named `invoice_json`.
+#     """
+#     _ = request
+#
+#     if not files:
+#         raise HTTPException(
+#             status_code=400,
+#             detail="At least one invoice file is required."
+#         )
+#
+#     batch_id = str(uuid.uuid4())
+#     base_dir = os.path.dirname(os.path.realpath(__file__))
+#     results = []
+#     failed_files = []
+#
+#     for file in files:
+#         logger.info(
+#             f"Received invoice upload: {file.filename} "
+#             f"(content_type={file.content_type}, batch_id={batch_id})"
+#         )
+#
+#         try:
+#             if not is_supported_invoice_file(file.filename):
+#                 raise ValueError(
+#                     f"Only invoice PDF or image files "
+#                     f"({allowed_invoice_extensions_text()}) are allowed."
+#                 )
+#
+#             content_type = file.content_type or ""
+#             if (
+#                     content_type
+#                     and content_type != "application/octet-stream"
+#                     and content_type != "application/pdf"
+#                     and not content_type.startswith("image/")
+#             ):
+#                 raise ValueError(
+#                     "Invalid content-type. Expected application/pdf or an image type."
+#                 )
+#
+#             file_bytes = await file.read()
+#             if not file_bytes:
+#                 raise ValueError(f"Uploaded file '{file.filename}' is empty.")
+#
+#             result = await extract_and_store_invoice_async(
+#                 batch_id=batch_id,
+#                 file_bytes=file_bytes,
+#                 filename=file.filename
+#             )
+#             results.append(result)
+#
+#             background_tasks.add_task(
+#                 ingest_invoice_file_async,
+#                 base_dir=base_dir,
+#                 batch_id=batch_id,
+#                 file_bytes=file_bytes,
+#                 filename=file.filename
+#             )
+#
+#         except Exception as exc:
+#             logger.error(
+#                 f"Invoice extraction failed for {file.filename}: {exc}",
+#                 exc_info=True
+#             )
+#             failed_files.append({
+#                 "file_name": file.filename,
+#                 "error": str(exc)
+#             })
+#         finally:
+#             await file.close()
+#
+#     if not results:
+#         raise HTTPException(
+#             status_code=400,
+#             detail={
+#                 "message": "Invoice extraction failed for all uploaded files.",
+#                 "failed_files": failed_files
+#             }
+#         )
+#
+#     # Calculate common fields across all extracted invoices
+#     all_invoices = []
+#     for item in results:
+#         all_invoices.extend(item.get("extracted_json", {}).get("invoices", []))
+#
+#     common_fields = []
+#     if all_invoices:
+#         invoice_keys = [set(inv.keys()) for inv in all_invoices]
+#         common_keys = set.intersection(*invoice_keys)
+#         common_fields = [k for k in all_invoices[0].keys() if k in common_keys]
+#
+#     return {
+#         "status": "success" if not failed_files else "partial_success",
+#         "total_files": len(files),
+#         "processed_files": len(results),
+#         "failed_files": failed_files,
+#         "invoices": all_invoices,
+#         "common_fields": common_fields
+#     }
 
-    This endpoint stores invoice extraction records and invoice embeddings in
-    the separate MongoDB collection named `invoice_json`.
-    """
-    _ = request
 
-    if not files:
-        raise HTTPException(
-            status_code=400,
-            detail="At least one invoice file is required."
-        )
-
-    batch_id = str(uuid.uuid4())
-    base_dir = os.path.dirname(os.path.realpath(__file__))
-    results = []
-    failed_files = []
-
-    for file in files:
-        logger.info(
-            f"Received invoice upload: {file.filename} "
-            f"(content_type={file.content_type}, batch_id={batch_id})"
-        )
-
-        try:
-            if not is_supported_invoice_file(file.filename):
-                raise ValueError(
-                    f"Only invoice PDF or image files "
-                    f"({allowed_invoice_extensions_text()}) are allowed."
-                )
-
-            content_type = file.content_type or ""
-            if (
-                    content_type
-                    and content_type != "application/octet-stream"
-                    and content_type != "application/pdf"
-                    and not content_type.startswith("image/")
-            ):
-                raise ValueError(
-                    "Invalid content-type. Expected application/pdf or an image type."
-                )
-
-            file_bytes = await file.read()
-            if not file_bytes:
-                raise ValueError(f"Uploaded file '{file.filename}' is empty.")
-
-            result = await extract_and_store_invoice_async(
-                batch_id=batch_id,
-                file_bytes=file_bytes,
-                filename=file.filename
-            )
-            results.append(result)
-
-            background_tasks.add_task(
-                ingest_invoice_file_async,
-                base_dir=base_dir,
-                batch_id=batch_id,
-                file_bytes=file_bytes,
-                filename=file.filename
-            )
-
-        except Exception as exc:
-            logger.error(
-                f"Invoice extraction failed for {file.filename}: {exc}",
-                exc_info=True
-            )
-            failed_files.append({
-                "file_name": file.filename,
-                "error": str(exc)
-            })
-        finally:
-            await file.close()
-
-    if not results:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "message": "Invoice extraction failed for all uploaded files.",
-                "failed_files": failed_files
-            }
-        )
-
-    # Calculate common fields across all extracted invoices
-    all_invoices = []
-    for item in results:
-        all_invoices.extend(item.get("extracted_json", {}).get("invoices", []))
-
-    common_fields = []
-    if all_invoices:
-        invoice_keys = [set(inv.keys()) for inv in all_invoices]
-        common_keys = set.intersection(*invoice_keys)
-        common_fields = [k for k in all_invoices[0].keys() if k in common_keys]
-
-    return {
-        "status": "success" if not failed_files else "partial_success",
-        "total_files": len(files),
-        "processed_files": len(results),
-        "failed_files": failed_files,
-        "invoices": all_invoices,
-        "common_fields": common_fields
-    }
-
-
-# ==================== ORDER MANAGEMENT API ====================
+# ==================== ORDER MANAGEMENT API (Avaal_db + Anthropic) ====================
 
 class OrderQuery(BaseModel):
     question: str
-    collection_name: str = "orders"
+    # Kept for API compatibility; Avaal ask always uses Avaal_db / avaal_orders.
+    collection_name: str = "avaal_orders"
+    # Pass back session_id from previous response to continue conversation.
+    session_id: str | None = None
 
 
-async def ingest_order_file_async(file_path: str, collection_name: str):
-    """Ingest order data from file to MongoDB with embeddings"""
-    base_dir = os.path.dirname(os.path.realpath(__file__))
-    pwd = os.path.dirname(base_dir)
-    
-    return await asyncio.to_thread(
-        data_ingestion,
-        base_dir=pwd,
-        file_paths=[file_path],
-        collection_name=collection_name
-    )
+# Legacy live-API helpers kept commented for reference (not used by Avaal ask flow).
+# async def ingest_order_file_async(file_path: str, collection_name: str):
+#     base_dir = os.path.dirname(os.path.realpath(__file__))
+#     pwd = os.path.dirname(base_dir)
+#     return await asyncio.to_thread(
+#         data_ingestion,
+#         base_dir=pwd,
+#         file_paths=[file_path],
+#         collection_name=collection_name
+#     )
+#
+# import httpx
+# async def fetch_orders_from_api() -> list:
+#     api_url = "http://192.168.1.22:2090/api/Order/listorder"
+#     headers = {"corporateid": "AFMQA", "Content-Type": "application/json"}
+#     async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+#         response = await client.get(api_url, headers=headers)
+#         response.raise_for_status()
+#         return response.json()
 
 
 # ==============================================================================
@@ -332,133 +340,27 @@ async def ask_order_question(query: OrderQuery):
     2. Retrieve relevant orders based on the question
     3. Use LLM to generate intelligent response
 
+    Send the same session_id on follow-up turns to keep memory
+    (e.g. "uska status?" after looking up an order).
+
+    Watch the server terminal for [CHECKPOINT] logs.
     """
     try:
-        logger.info(f"Received order query: {query.question}")
-        
-        # Get models (embeddings + LLM)
-        embeddings, llm = get_models()
-        
-        # ----------------------------------------------------------------------
-        # STRICT LIVE GET API PIPELINE
-        # Local JSON file path checking and Option A (local ingestion) are fully commented out.
-        # This pipeline strictly and exclusively calls the live GET API.
-        # ----------------------------------------------------------------------
-        # order_file_path = GETORDERLIST_PATH
-        # local_file_exists = os.path.exists(order_file_path)
-        
-        # 1. Force the GET API source name and print a loud console log for Vercel
-        source_name = "live_api_orders.json"
-        print(">>> [AIM RAG SYSTEM] STRICT LIVE GET API PIPELINE ACTIVE. Local files bypassed.")
-        logger.info(f"Selected Strictly Live GET API Pipeline (Source: {source_name})")
-        
-        # 2. Check if the active source data is already ingested in MongoDB
-        collection = get_mongo_collection()
-        existing_count = collection.count_documents({
-            "namespace": query.collection_name,
-            "metadata.source_document": source_name
-        }, limit=1)
-        
-        if existing_count > 0:
-            print(f">>> [AIM RAG SYSTEM] Data already indexed in MongoDB (Source: {source_name}). Skipping ingestion.")
-            logger.info(f"Source {source_name} already indexed. Proceeding to search.")
-        else:
-            print(f">>> [AIM RAG SYSTEM] DB is empty for source: '{source_name}'. Starting live API ingestion...")
-            logger.info(f"Starting ingestion for {source_name}...")
-            success = False
+        logger.info(
+            "Received Avaal order query: %s | session_id=%s",
+            query.question,
+            query.session_id,
+        )
+        from app.order_ask.rag_engine import answer_order_question
 
-            # ==================================================================
-            # OPTION A: LOCAL JSON FILE INGESTION (NOW FULLY COMMENTED OUT)
-            # ==================================================================
-            # if local_file_exists:
-            #     print(f">>> [AIM RAG SYSTEM] Reading and ingesting from local file path: {order_file_path}")
-            #     logger.info(f"Ingesting from local file: {order_file_path}")
-            #     success = await ingest_order_file_async(order_file_path, query.collection_name)
-            
-            # ==================================================================
-            # OPTION B: STRICT LIVE GET API INGESTION (ACTIVE)
-            # ==================================================================
-            print(">>> [AIM RAG SYSTEM] Calling external Live GET API...")
-            logger.info("Calling external Live GET API...")
-            
-            # Fetch data from GET API live
-            live_orders_json = await fetch_orders_from_api()
-            json_bytes = json.dumps(live_orders_json).encode("utf-8")
-            
-            print(">>> [AIM RAG SYSTEM] Received live JSON data from GET API. Ingesting to MongoDB...")
-            logger.info("Received live API data. Starting MongoDB in-memory ingestion...")
-            
-            success = await asyncio.to_thread(
-                data_ingestion,
-                base_dir=None,
-                file_paths=None,
-                collection_name=query.collection_name,
-                file_bytes=json_bytes,
-                filename=source_name  # Triggers JSON list parsing in-memory
-            )
-            
-            if success:
-                print(f">>> [AIM RAG SYSTEM] Live API Ingestion COMPLETED SUCCESSFULLY for source: '{source_name}'.")
-                logger.info(f"Ingestion successful for {source_name}")
-            else:
-                print(f">>> [AIM RAG SYSTEM] ERROR: Live API Ingestion FAILED for source: '{source_name}'.")
-                logger.error(f"Ingestion failed for {source_name}")
-                raise HTTPException(
-                    status_code=500,
-                    detail="Failed to ingest order data from Live GET API. Please check logs or API endpoint."
-                )
-        
-        # Get vectorstore for the order collection
-        vectorstore = get_vectorstore(
-            embeddings,
-            None,
-            query.collection_name,
-            _docs=None  # Load existing documents
+        result = await asyncio.to_thread(
+            answer_order_question,
+            query.question,
+            True,
+            10,
+            query.session_id,
         )
-        
-        if not vectorstore:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to access order database"
-            )
-        
-        # Retrieve relevant orders using similarity search
-        retrieved_docs = vectorstore.similarity_search(
-            query=query.question,
-            k=10
-        )
-        
-        if not retrieved_docs:
-            return {
-                "question": query.question,
-                "answer": "No relevant order data found matching your query.",
-                "matches": [],
-                "collection": query.collection_name
-            }
-        
-        # Combine retrieved context
-        context = "\n\n".join([doc.page_content[:1000] for doc in retrieved_docs])
-        
-        # Use LLM to generate answer with prompt template
-        from langchain_core.prompts import PromptTemplate
-        from app.prompt import ORDERBOT_CONVERSATION_PROMPT
-        
-        prompt_template = PromptTemplate.from_template(ORDERBOT_CONVERSATION_PROMPT)
-        
-        chain = prompt_template | llm
-        
-        response = chain.invoke({
-            "context": context,
-            "question": query.question
-        })
-        
-        # Extract text content from response
-        answer_text = response.content if hasattr(response, "content") else str(response)
-        
-        return {
-            "answer": answer_text
-        }
-        
+        return result
     except HTTPException:
         raise
     except Exception as e:
