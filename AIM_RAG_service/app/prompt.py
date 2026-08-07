@@ -334,7 +334,11 @@ If either name is not explicit or confidence is low, return null. Do not guess.
 salesman:
 - Prefer an explicit label: Salesman, Sales Person, Sales Rep, Account Manager, Agent.
 - If no such label exists, you MAY use the BROKER/ISSUER side dispatcher or arrange person only when clearly on the issuer's side (e.g. Hawks contact "Arranged By" / Carrier Information contact with issuer email like @hawkstrans.com → HARJEET DHILLON).
-- salesman must be a PERSON name, never a company (not EK NAAM SHIPPING CORP, not Hawks Transportation, not Redwood).
+- salesman must be a PERSON name, never a company (not EK NAAM SHIPPING CORP, not Hawks Transportation, not Redwood, not "Avaal QA", not letterhead company names).
+- NEVER use the document issuer / letterhead company (e.g. "Avaal QA") as salesman.
+- NEVER invent suffixes like "Sr.", "Jr.", "Ltd.", "Inc." — only keep them if they are clearly part of a written person name on the document.
+- NEVER treat document titles like "Order Sheet" / "Order" as salesman text (do not invent "Sr." from "Sheet" or similar OCR noise).
+- A "Sales:" field that is only a code/ID (e.g. "85674S540L") is NOT a salesman person name → salesman = null (put nothing in salesman).
 - Do NOT put the carrier-side contact into salesman when a broker-side contact exists (e.g. prefer Harjeet Dhillon over Charanjit Singh on a Hawks confirmation).
 - Do NOT put Attention:/driver name from carrier block into salesman unless that person is clearly the broker sales/dispatcher.
 - If only carrier contacts exist and no broker sales/dispatcher person is clear → salesman = null.
@@ -429,7 +433,7 @@ dimention:
 
 === SELF-CHECK BEFORE OUTPUT ===
 1. comapny is issuer/forwarder; customer is shipper/customer/Bill To — not swapped; customer is NOT the truck carrier; customer was NOT copied from pickup_location or delivery_location; customer is NOT a commodity code (e.g. ws65).
-2. salesman is a person on the broker/issuer side when used; never a company; null if unclear.
+2. salesman is a real person name on the broker/issuer side when used; never a company/letterhead (e.g. not "Avaal QA"); never invent "Sr."/"Jr."; Sales codes/IDs are not salesman; null if unclear.
 3. importer is null unless explicitly labeled Importer/IOR — never invent from consignee alone.
 4. weight is mass only with unit when present (e.g. "44,000.00 LB"); multiple stop weights → array, not one summed total like only "18,858 lbs"; never bare number if unit exists; never CF/cubes; ValueOfgoods is money only — never CF/cubes/weight.
 5. Copmliancehandling is not a bare "HAZRD" label.
