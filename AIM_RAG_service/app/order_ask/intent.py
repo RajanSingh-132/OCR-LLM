@@ -73,6 +73,34 @@ def classify_intent_local(
             "reason": "greeting_or_thanks",
         }
 
+    token = extract_order_token(q)
+    # Any explicit MRP / TORD / order number request → full order details
+    if token and (
+        re.search(
+            r"\b(give|get|show|find|lookup|look\s*up|detail|details|info|information|fetch|pull|order\s*number|ordernumber)\b",
+            q,
+            re.I,
+        )
+        or re.match(r"^(MRP\d+|TORD\d+|\d{4,})\s*$", q, re.I)
+        or len(q.split()) <= 8
+    ):
+        # Prefer lookup over list when a specific token is present (unless clear multi-list)
+        if not re.search(r"\b(all|list|filter|compare|vs)\b", q, re.I) or re.search(
+            r"\b(detail|details|give|get|show)\b", q, re.I
+        ):
+            if not LIST_RE.search(q) or token:
+                return {
+                    "intent": "order_lookup",
+                    "needs_rag": False,
+                    "needs_calculation": False,
+                    "needs_exact_order": True,
+                    "response_style": "detailed",
+                    "max_tokens_hint": 1200,
+                    "retrieve_k": 0,
+                    "order_token": token,
+                    "reason": "explicit_order_token",
+                }
+
     if COMPARE_RE.search(q) and re.search(r"\b(MRP\d+|TORD\d+|\d{4,})\b", q, re.I):
         return {
             "intent": "compare",
@@ -83,6 +111,23 @@ def classify_intent_local(
             "max_tokens_hint": 700,
             "retrieve_k": 0,
             "reason": "compare_orders",
+        }
+
+    # Best / highest amount / top by freight etc.
+    if re.search(
+        r"\b(best|highest|top|largest|most|lowest|smallest)\b.*\b(order|amount|freight|tax|distance|revenue)\b",
+        q,
+        re.I,
+    ):
+        return {
+            "intent": "list_filter",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "response_style": "medium",
+            "max_tokens_hint": 500,
+            "retrieve_k": 0,
+            "reason": "ranked_list",
         }
 
     if RECENT_RE.search(q) and not is_calculation_question(q):
@@ -97,18 +142,30 @@ def classify_intent_local(
             "reason": "list_recent",
         }
 
-    # Accurate filtered lists: status / customer / currency + list words
+    # Accurate filtered lists: status / customer / currency / date / location + list words
     if (
         LIST_RE.search(q)
-        or re.search(r"\borderstatus\b|\bstatus\s+(confirmed|delivered|dispatched|cancelled|quoted)\b", q, re.I)
+        or re.search(
+            r"\borderstatus\b|\bstatus\s+(confirmed|delivered|dispatched|cancelled|quoted)\b",
+            q,
+            re.I,
+        )
         or re.search(r"\borders?\s+(with|for|by|in)\b", q, re.I)
+        or re.search(r"\b(on|dated|date|pickup|delivery)\b.*\b20\d{2}\b", q, re.I)
     ) and not re.search(r"\b(total|sum|average|avg|how many|count)\b", q, re.I):
-        # If a single explicit order id with "show details", prefer lookup
-        token = extract_order_token(q)
-        if token and re.search(r"\b(detail|details|info|information)\b", q, re.I) and not LIST_RE.search(q):
+        token2 = extract_order_token(q)
+        if token2 and re.search(r"\b(detail|details|info|information)\b", q, re.I) and not LIST_RE.search(q):
             pass
         else:
-            if not (token and len(q.split()) <= 5 and not re.search(r"\b(status|customer|currency|confirmed|delivered)\b", q, re.I)):
+            if not (
+                token2
+                and len(q.split()) <= 5
+                and not re.search(
+                    r"\b(status|customer|currency|confirmed|delivered|date|location)\b",
+                    q,
+                    re.I,
+                )
+            ):
                 return {
                     "intent": "list_filter",
                     "needs_rag": False,
@@ -120,9 +177,9 @@ def classify_intent_local(
                     "reason": "filtered_list",
                 }
 
-    token = extract_order_token(q)
+    # (token already handled above)
     if token and re.search(
-        r"\b(detail|details|show|get|find|lookup|look\s*up|info|information)\b",
+        r"\b(detail|details|show|get|find|lookup|look\s*up|info|information|give)\b",
         q,
         re.I,
     ):
@@ -132,7 +189,7 @@ def classify_intent_local(
             "needs_calculation": False,
             "needs_exact_order": True,
             "response_style": "detailed",
-            "max_tokens_hint": 900,
+            "max_tokens_hint": 1200,
             "retrieve_k": 0,
             "order_token": token,
             "reason": "explicit_order_lookup",
@@ -145,7 +202,7 @@ def classify_intent_local(
             "needs_calculation": False,
             "needs_exact_order": True,
             "response_style": "detailed",
-            "max_tokens_hint": 900,
+            "max_tokens_hint": 1200,
             "retrieve_k": 0,
             "order_token": token,
             "reason": "short_order_token",

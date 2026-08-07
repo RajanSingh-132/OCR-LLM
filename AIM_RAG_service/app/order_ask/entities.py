@@ -57,7 +57,7 @@ def extract_entities(
     if m:
         entities["customercode"] = m.group(1).upper()
 
-    # Customer name (prefer phrases with "customer" / "for" / "of")
+    # Customer name
     m = re.search(
         r"\b(?:for\s+customer|customer\s*name|orders?\s+for\s+customer|orders?\s+of\s+customer|"
         r"orders?\s+for|orders?\s+of|customer)\s+['\"]?"
@@ -67,19 +67,67 @@ def extract_entities(
     )
     if m:
         name = m.group(1).strip(" .,")
-        # If matcher ate leading "customer ", strip it
         name = re.sub(r"^(?:customer|code)\s+", "", name, flags=re.I).strip()
-        if name.lower().startswith("code "):
-            pass
-        elif name.lower() in STATUS_MAP:
-            pass
-        elif len(name) >= 2:
+        if name.lower() not in STATUS_MAP and len(name) >= 2:
             entities["customername"] = name
 
     # Company code
     m = re.search(r"\bcompany(?:\s*code)?\s*[:=]?\s*([A-Za-z0-9_-]+)\b", q, re.I)
     if m:
         entities["companycode"] = m.group(1).upper()
+
+    # Locations
+    m = re.search(
+        r"\b(?:pickup|pick\s*up)\s*(?:location|from)?\s*[:#]?\s*['\"]?([A-Za-z0-9][A-Za-z0-9 &\-./,]{1,50})",
+        q,
+        re.I,
+    )
+    if m:
+        entities["pickup_location"] = m.group(1).strip(" .,")
+    m = re.search(
+        r"\b(?:delivery|deliver(?:y)?|drop)\s*(?:location|to)?\s*[:#]?\s*['\"]?([A-Za-z0-9][A-Za-z0-9 &\-./,]{1,50})",
+        q,
+        re.I,
+    )
+    if m:
+        entities["delivery_location"] = m.group(1).strip(" .,")
+
+    # Dates: YYYY-MM-DD or YYYY/MM/DD
+    m = re.search(r"\b(20\d{2}[-/]\d{1,2}[-/]\d{1,2})\b", q)
+    if m:
+        date_val = m.group(1).replace("/", "-")
+        if re.search(r"\b(pickup|pick\s*up)\b", ql):
+            entities["pickupdate"] = date_val
+        elif re.search(r"\b(delivery|deliver)\b", ql):
+            entities["deliverydate"] = date_val
+        else:
+            entities["orderdate"] = date_val
+
+    # Sort / best / highest amount
+    if re.search(r"\b(best|highest|max|top|largest|most)\b.*\b(amount|freight|revenue|tax|distance)\b", ql) or re.search(
+        r"\b(amount|freight|revenue|tax|distance)\b.*\b(best|highest|max|top|largest|most)\b",
+        ql,
+    ):
+        entities["limit"] = entities.get("limit") or 5
+        if "tax" in ql:
+            entities["sort_by"] = "taxes"
+        elif "distance" in ql:
+            entities["sort_by"] = "distance"
+        elif "revenue" in ql or "gross" in ql:
+            entities["sort_by"] = "grosstotalfreight"
+        else:
+            entities["sort_by"] = "totalfreight"
+        entities["ascending"] = False
+
+    if re.search(r"\b(lowest|smallest|least|cheapest|min)\b.*\b(amount|freight|tax|distance)\b", ql):
+        entities["limit"] = entities.get("limit") or 5
+        if "tax" in ql:
+            entities["sort_by"] = "taxes"
+        elif "distance" in ql:
+            entities["sort_by"] = "distance"
+        else:
+            entities["sort_by"] = "totalfreight"
+        entities["ascending"] = True
 
     # Limit / top N
     m = re.search(r"\b(?:top|last|recent|show|list)\s+(\d{1,3})\b", ql)
@@ -99,14 +147,22 @@ def extract_entities(
     if follow_up or (not entities.get("order_token") and session_order_token):
         if not entities.get("order_token") and session_order_token:
             if follow_up or re.search(
-                r"\b(status|tax|freight|detail|details|info|amount|customer|delivery|pickup)\b",
+                r"\b(status|tax|freight|detail|details|info|amount|customer|delivery|pickup|distance|location)\b",
                 ql,
             ):
                 entities["order_token"] = session_order_token
                 entities["from_session"] = True
 
     if follow_up:
-        for key in ("customername", "customercode", "orderstatus", "currencycode", "companycode"):
+        for key in (
+            "customername",
+            "customercode",
+            "orderstatus",
+            "currencycode",
+            "companycode",
+            "pickup_location",
+            "delivery_location",
+        ):
             if key not in entities and sticky.get(key):
                 entities[key] = sticky[key]
                 entities["from_session"] = True
@@ -116,16 +172,20 @@ def extract_entities(
 
 
 def entities_to_mongo_filters(entities: Dict[str, Any]) -> Dict[str, Any]:
-    """Map entities → Mongo filter fields (excluding order_token / limit)."""
+    """Map entities → Mongo filter fields (excluding order_token / limit / sort)."""
     filters: Dict[str, Any] = {}
-    if entities.get("orderstatus"):
-        filters["orderstatus"] = entities["orderstatus"]
-    if entities.get("currencycode"):
-        filters["currencycode"] = entities["currencycode"]
-    if entities.get("customercode"):
-        filters["customercode"] = entities["customercode"]
-    if entities.get("companycode"):
-        filters["companycode"] = entities["companycode"]
-    if entities.get("customername"):
-        filters["customername"] = entities["customername"]
+    for key in (
+        "orderstatus",
+        "currencycode",
+        "customercode",
+        "companycode",
+        "customername",
+        "pickup_location",
+        "delivery_location",
+        "orderdate",
+        "pickupdate",
+        "deliverydate",
+    ):
+        if entities.get(key):
+            filters[key] = entities[key]
     return filters

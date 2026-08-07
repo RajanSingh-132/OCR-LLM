@@ -434,6 +434,3 @@ dimention:
 DOCUMENT TEXT:
 {text}
 """
-
-# Order-ask prompts live in app/order_ask/prompts.py
-from app.order_ask.prompts import ORDER_ASK_PROMPT, ORDERBOT_CONVERSATION_PROMPT  # noqa: E402,F401

@@ -100,9 +100,34 @@ def _base_order_match(filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any
             "$options": "i",
         }
     if filters.get("customername"):
-        # Accurate list: case-insensitive partial match on customer name
         match["customername"] = {
             "$regex": re.escape(str(filters["customername"])),
+            "$options": "i",
+        }
+    if filters.get("pickup_location"):
+        match["pickuplocationname"] = {
+            "$regex": re.escape(str(filters["pickup_location"])),
+            "$options": "i",
+        }
+    if filters.get("delivery_location"):
+        match["deliverylocationname"] = {
+            "$regex": re.escape(str(filters["delivery_location"])),
+            "$options": "i",
+        }
+    # Date prefix match on ISO-like strings (e.g. 2026-08-06)
+    if filters.get("orderdate"):
+        match["orderdate"] = {
+            "$regex": f"^{re.escape(str(filters['orderdate']))}",
+            "$options": "i",
+        }
+    if filters.get("pickupdate"):
+        match["pickupdate"] = {
+            "$regex": f"^{re.escape(str(filters['pickupdate']))}",
+            "$options": "i",
+        }
+    if filters.get("deliverydate"):
+        match["deliverydate"] = {
+            "$regex": f"^{re.escape(str(filters['deliverydate']))}",
             "$options": "i",
         }
     return match
@@ -119,6 +144,24 @@ def search_orders(
     Returns count + compact order rows (not embeddings).
     """
     limit = max(1, min(int(limit or 15), 50))
+    allowed_sort = {
+        "orderid",
+        "ordernumber",
+        "totalfreight",
+        "grosstotalfreight",
+        "taxes",
+        "totaltaxamount",
+        "offeredamount",
+        "distance",
+        "orderdate",
+        "pickupdate",
+        "deliverydate",
+        "customername",
+        "orderstatus",
+    }
+    if sort_by not in allowed_sort:
+        sort_by = "orderid"
+
     collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
     match = _base_order_match(filters)
     total = collection.count_documents(match)
@@ -137,11 +180,16 @@ def search_orders(
                 "orderstatus": doc.get("orderstatus"),
                 "currencycode": doc.get("currencycode"),
                 "totalfreight": doc.get("totalfreight"),
-                "taxes": doc.get("taxes"),
                 "grosstotalfreight": doc.get("grosstotalfreight"),
+                "taxes": doc.get("taxes"),
+                "distance": doc.get("distance"),
+                "distanceunit": doc.get("distanceunit"),
                 "pickuplocationname": doc.get("pickuplocationname"),
                 "deliverylocationname": doc.get("deliverylocationname"),
                 "orderdate": doc.get("orderdate"),
+                "pickupdate": doc.get("pickupdate"),
+                "deliverydate": doc.get("deliverydate"),
+                "companycode": doc.get("companycode"),
             }
         )
     checkpoint(
@@ -151,9 +199,13 @@ def search_orders(
         total=total,
         returned=len(rows),
         limit=limit,
+        sort_by=sort_by,
+        ascending=ascending,
     )
     return {
         "filters": filters or {},
+        "sort_by": sort_by,
+        "ascending": ascending,
         "total_matching": total,
         "returned": len(rows),
         "orders": rows,
@@ -219,32 +271,88 @@ def find_order_by_id_or_number(token: str) -> Optional[Dict[str, Any]]:
 
 
 def extract_order_token(question: str) -> Optional[str]:
+    """Extract order number / id tokens including MRP#### and TORD####."""
     q = question or ""
+    # Avaal order numbers like MRP3301 / MRP3298
+    m = re.search(r"\b(MRP\d+)\b", q, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
     m = re.search(r"\b(TORD\d+)\b", q, flags=re.IGNORECASE)
     if m:
-        return m.group(1)
+        return m.group(1).upper()
     m = re.search(
-        r"\border(?:\s*(?:id|number|no\.?|#))?\s*[:#]?\s*(\d+)\b",
+        r"\border(?:\s*(?:id|number|no\.?|#))?\s*[:#]?\s*([A-Za-z]*\d+)\b",
         q,
         flags=re.IGNORECASE,
     )
     if m:
-        return m.group(1)
+        tok = m.group(1)
+        return tok.upper() if tok.upper().startswith("MRP") else tok
     m = re.search(r"\b(\d{4,})\b", q)
     if m:
         return m.group(1)
     return None
 
 
-def format_order_doc_for_context(doc: Dict[str, Any], max_fields: int = 80) -> str:
+# Preferred field order so full order details are useful in LLM context
+_ORDER_DETAIL_PRIORITY = [
+    "orderid",
+    "ordernumber",
+    "tempordernumber",
+    "orderstatus",
+    "orderdate",
+    "customername",
+    "customercode",
+    "companycode",
+    "salesmanname",
+    "currencycode",
+    "totalfreight",
+    "grosstotalfreight",
+    "freightcharges",
+    "fuelcharges",
+    "othercharges",
+    "taxes",
+    "totaltaxamount",
+    "pretaxamount",
+    "offeredamount",
+    "distance",
+    "distanceunit",
+    "weight",
+    "weightunit",
+    "pickuplocationname",
+    "pickupfulladdress",
+    "pickupdate",
+    "deliverylocationname",
+    "deliveryfulladdress",
+    "deliverydate",
+    "commodityname",
+    "ordernotes",
+    "allcarriersname",
+]
+
+
+def format_order_doc_for_context(doc: Dict[str, Any], max_fields: int = 120) -> str:
     skip = {"_id", "embedding", "page_content", "metadata", "namespace"}
     lines = []
-    for key, value in doc.items():
-        if key in skip:
-            continue
+    seen = set()
+
+    def _add(key: str, value: Any) -> None:
+        nonlocal lines
+        if key in skip or key in seen:
+            return
         if value in (None, "", [], {}):
-            continue
+            return
+        seen.add(key)
         lines.append(f"{key}: {value}")
+
+    for key in _ORDER_DETAIL_PRIORITY:
+        if key in doc:
+            _add(key, doc.get(key))
+            if len(lines) >= max_fields:
+                return "\n".join(lines)
+
+    for key, value in doc.items():
+        _add(key, value)
         if len(lines) >= max_fields:
             break
     return "\n".join(lines)

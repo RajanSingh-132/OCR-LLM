@@ -1,9 +1,6 @@
 import os
 import logging
-import json
 import asyncio
-# import uuid  # used only by commented /api/v1/invoices/extract
-# from typing import List  # used only by commented /api/v1/invoices/extract
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -12,16 +9,6 @@ from app.lan_chain_rag_semantic_parent import (
     ingest_pdf_and_return_json_async,
     extract_dynamic_kv_from_pdf_async,
 )
-# from app.prompt import ORDER_ANALYSIS_PROMPT  # unused after Avaal ask rewrite
-# Invoice extract API temporarily disabled
-# from app.invoice_extractor import (
-#     INVOICE_MONGO_COLLECTION,
-#     allowed_invoice_extensions_text,
-#     extract_and_store_invoice_async,
-#     ingest_invoice_file_async,
-#     is_supported_invoice_file,
-#     clean_empty_fields,
-# )
 
 logger = logging.getLogger("api")
 
