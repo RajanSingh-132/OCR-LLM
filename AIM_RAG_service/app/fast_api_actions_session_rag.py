@@ -9,6 +9,16 @@ from app.lan_chain_rag_semantic_parent import (
     ingest_pdf_and_return_json_async,
     extract_dynamic_kv_from_pdf_async,
 )
+# from app.prompt import ORDER_ANALYSIS_PROMPT  # unused after Avaal ask rewrite
+# Invoice extract API temporarily disabled
+# from app.invoice_extractor import (
+#     INVOICE_MONGO_COLLECTION,
+#     allowed_invoice_extensions_text,
+#     extract_and_store_invoice_async,
+#     ingest_invoice_file_async,
+#     is_supported_invoice_file,
+#     clean_empty_fields,
+# )
 
 logger = logging.getLogger("api")
 
