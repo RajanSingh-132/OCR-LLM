@@ -312,6 +312,9 @@ comapny (issuer / forwarder / confirmation company):
 
 customer (shipper / customer — NOT the truck carrier):
 - Shipper / customer the load is for ONLY when clearly labeled as Customer, Bill To, Sold To, Owner, Shipper, Client, Account, or Arranged-With party that is explicitly the shipper/customer (not the carrier).
+- On Order Sheet / AFM-style docs: the Bill To party name/address block is the customer (e.g. "@arnold& adeleide..."). Prefer Bill To over any other guess.
+- NEVER put commodity codes/SKU/product codes (e.g. "ws65") into customer.
+- NEVER put table column headers or numeric package/weight cells into customer.
 - NEVER derive, copy, or infer customer from pickup_location or delivery_location (including facility names inside those addresses).
 - Even if pickup says "Redwood Warehouse - Perfection Pet Foods" or delivery says "H.E.B GROCERY..." / "DHL SUPPLY CHAIN...", do NOT put those names into customer just because they appear in locations.
 - On carrier rate confirmations, "Arranged With" is often the CARRIER company/contact (e.g. EK NAAM SHIPPING CORP). Do NOT put the carrier into customer unless the document also clearly labels that same party as Customer / Bill To / Shipper.
@@ -387,7 +390,12 @@ dimention:
 - shipment_types: GEN, FTL, LTL, import, export, mode, load type, service type when labeled (e.g. "GEN").
 - shipment_for: shipment for / booked for / purpose.
 - shipmetControlNo.: load #, shipment #, AWB/BL/shipment control, carrier confirmation no, trip #, PRO, F-numbers used as shipment id.
-- commodity: goods description (e.g. COSMETICS, pet food).
+- commodity: goods description / commodity name / commodity code under the Commodity column only (e.g. COSMETICS, pet food, ws65).
+  - In shipper/consignee tables (Commodity | PKG | Weight | LxBxH | ...): take the VALUE under the Commodity header, NOT the next column header.
+  - NEVER set commodity to a column label such as PKG, Weight, LxBxH, Equipment, Rate Method, Reefer, ValueOfGoods.
+  - NEVER put package counts, weights, dimensions, rate method, or equipment into commodity.
+  - PKG / pieces / packages belong in No.OfPackage, not commodity.
+  - If customer and commodity would be the same string, re-check: commodity codes are NOT customer names.
 - pickup_date / pickup_time / pickup_refrence_no: pickup side only.
 - delivery_date / delivery_time / delivery_refrence_no: delivery/consignee side; delivery refs may include consignee PO/DA when clearly for delivery.
 - Equipment: trailer / reefer / van / flatbed / equipment type / truck type (e.g. Van). Trailer length like "53.00 Feet" may go with Equipment if no better field; do not invent dimention LxWxH from trailer length.
@@ -420,7 +428,7 @@ dimention:
 4. Output JSON only. No markdown. No ```json. No commentary.
 
 === SELF-CHECK BEFORE OUTPUT ===
-1. comapny is issuer/forwarder; customer is shipper/customer — not swapped; customer is NOT the truck carrier; customer was NOT copied from pickup_location or delivery_location.
+1. comapny is issuer/forwarder; customer is shipper/customer/Bill To — not swapped; customer is NOT the truck carrier; customer was NOT copied from pickup_location or delivery_location; customer is NOT a commodity code (e.g. ws65).
 2. salesman is a person on the broker/issuer side when used; never a company; null if unclear.
 3. importer is null unless explicitly labeled Importer/IOR — never invent from consignee alone.
 4. weight is mass only with unit when present (e.g. "44,000.00 LB"); multiple stop weights → array, not one summed total like only "18,858 lbs"; never bare number if unit exists; never CF/cubes; ValueOfgoods is money only — never CF/cubes/weight.
@@ -430,6 +438,7 @@ dimention:
 8. dimention is only LxWxH like "32X48X24" — no 1PLT@ / DIMS prefix.
 9. Keys match the template exactly; missing values are null.
 10. Valid JSON only.
+11. commodity is the Commodity-column VALUE (e.g. ws65), never a table header like PKG/Weight/LxBxH; PKG counts go to No.OfPackage.
 
 DOCUMENT TEXT:
 {text}
