@@ -5,11 +5,14 @@ Planner picks tools from intent + entities; tools hit Mongo / calculation engine
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from app.embedding_client import get_models
 from app.order_ask.calculation_engine import (
+    execute_formulas,
     format_calculation_result_for_context,
+    is_calculation_question,
+    match_formulas,
     run_calculation_engine,
 )
 from app.order_ask.checkpoint import checkpoint
@@ -44,10 +47,13 @@ def plan_tools(intent: str, entities: Dict[str, Any], intent_info: Dict[str, Any
         tools.append(TOOL_RUN_CALCULATION)
 
     if intent == "order_lookup" or intent_info.get("needs_exact_order") or entities.get("order_token"):
-        if entities.get("order_token"):
+        # Always try exact lookup when token exists (MRP / TORD / numeric id)
+        if entities.get("order_token") or intent_info.get("order_token"):
+            if not entities.get("order_token") and intent_info.get("order_token"):
+                entities["order_token"] = intent_info["order_token"]
             tools.append(TOOL_GET_ORDER)
 
-    if intent in ("list_filter", "list_orders", "filter"):
+    if intent in ("list_filter", "list_orders", "filter") or entities.get("sort_by"):
         tools.append(TOOL_SEARCH_ORDERS)
 
     if intent == "list_recent":
@@ -134,7 +140,14 @@ def execute_tools(
         elif name == TOOL_SEARCH_ORDERS:
             filters = entities_to_mongo_filters(entities)
             limit = int(entities.get("limit") or 15)
-            list_payload = search_orders(filters=filters, limit=limit)
+            sort_by = entities.get("sort_by") or "orderid"
+            ascending = bool(entities.get("ascending", False))
+            list_payload = search_orders(
+                filters=filters,
+                limit=limit,
+                sort_by=sort_by,
+                ascending=ascending,
+            )
             context_blocks.append(format_order_list_for_context(list_payload))
             for row in list_payload.get("orders") or []:
                 matches.append(
@@ -161,12 +174,6 @@ def execute_tools(
             tools_run.append(name)
 
         elif name == TOOL_RUN_CALCULATION:
-            from app.order_ask.calculation_engine import (
-                execute_formulas,
-                match_formulas,
-                is_calculation_question,
-            )
-
             filters = entities_to_mongo_filters(entities)
             formula_ids = match_formulas(question)
             if not formula_ids and is_calculation_question(question):

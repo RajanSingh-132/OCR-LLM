@@ -1,9 +1,6 @@
 import os
 import logging
-import json
 import asyncio
-# import uuid  # used only by commented /api/v1/invoices/extract
-# from typing import List  # used only by commented /api/v1/invoices/extract
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
