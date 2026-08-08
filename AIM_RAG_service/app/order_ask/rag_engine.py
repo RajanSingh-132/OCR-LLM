@@ -143,6 +143,7 @@ def answer_order_question(
             "matches": [],
             "calculation": None,
             "list_result": None,
+            "analytics": None,
             "tools_used": [],
             "session_id": session_id,
             "entities": entities,
@@ -169,11 +170,14 @@ def answer_order_question(
     matches = tool_result.get("matches") or []
     calc_payload = tool_result.get("calculation")
     list_payload = tool_result.get("list_result")
+    analytics_payload = tool_result.get("analytics")
     tools_used = tool_result.get("tools_run") or []
     active_order = tool_result.get("active_order_token") or entities.get("order_token")
 
     mode = intent
-    if "run_calculation" in tools_used and not matches:
+    if "run_analytics" in tools_used:
+        mode = "analytics"
+    elif "run_calculation" in tools_used and not matches:
         mode = "calculation"
     elif "search_orders" in tools_used or "list_recent" in tools_used:
         mode = "list"
@@ -210,6 +214,7 @@ def answer_order_question(
             "matches": [],
             "calculation": None,
             "list_result": None,
+            "analytics": None,
             "tools_used": tools_used,
             "session_id": session_id,
             "entities": entities,
@@ -282,6 +287,7 @@ def answer_order_question(
         "response_style": style,
         "matches": matches[:20],
         "calculation": calc_payload,
+        "analytics": analytics_payload,
         "list_result": list_payload,
         "tools_used": tools_used,
         "session_id": session_id,

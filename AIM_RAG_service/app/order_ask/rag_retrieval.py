@@ -79,6 +79,59 @@ def retrieve_avaal_orders(
     return kept
 
 
+def _side_address_ors(
+    *,
+    side: str,
+    pattern: str,
+    include_location_names: bool = False,
+) -> List[Dict[str, Any]]:
+    """Build $or clauses against pickup/delivery address (+ optional location names)."""
+    ors: List[Dict[str, Any]] = []
+    rx = {"$regex": pattern, "$options": "i"}
+    if side in ("pickup", "both"):
+        ors.append({"pickupfulladdress": rx})
+        if include_location_names:
+            ors.append({"pickuplocationname": rx})
+    if side in ("delivery", "both"):
+        ors.append({"deliveryfulladdress": rx})
+        if include_location_names:
+            ors.append({"deliverylocationname": rx})
+    return ors
+
+
+def _state_address_pattern(state: str) -> str:
+    """Match state/province inside address: ', CA,' or ', California,'."""
+    from app.order_ask.field_catalog import STATE_ALIASES, resolve_state_token
+
+    code = resolve_state_token(state) or (state.strip().upper() if len(state.strip()) <= 3 else None)
+    tokens: List[str] = []
+    if code:
+        tokens.append(code)
+        tokens.extend(STATE_ALIASES.get(code, []))
+    else:
+        tokens.append(state.strip())
+    # unique, longest-first so "new york" beats "york" noise
+    seen = set()
+    ordered = []
+    for t in sorted(tokens, key=lambda x: -len(x)):
+        tl = t.lower()
+        if tl not in seen:
+            seen.add(tl)
+            ordered.append(re.escape(t))
+    alt = "|".join(ordered)
+    return rf"(?:^|,\s*)(?:{alt})(?:\s*,|$)"
+
+
+def _pin_pattern(pin: str) -> str:
+    """US zip or Canadian postal with flexible spacing."""
+    pin = (pin or "").strip()
+    # Canadian: A1A 1A1 or A1A1A1
+    m = re.fullmatch(r"([A-Za-z]\d[A-Za-z])\s?(\d[A-Za-z]\d)", pin, re.I)
+    if m:
+        return rf"\b{m.group(1)}\s?{m.group(2)}\b"
+    return rf"\b{re.escape(pin)}\b"
+
+
 def _base_order_match(filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     match: Dict[str, Any] = {
         "namespace": AVAAL_NAMESPACE,
@@ -114,6 +167,16 @@ def _base_order_match(filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any
             "$regex": re.escape(str(filters["delivery_location"])),
             "$options": "i",
         }
+    if filters.get("salesmanname"):
+        match["salesmanname"] = {
+            "$regex": re.escape(str(filters["salesmanname"])),
+            "$options": "i",
+        }
+    if filters.get("commodityname"):
+        match["commodityname"] = {
+            "$regex": re.escape(str(filters["commodityname"])),
+            "$options": "i",
+        }
     # Date prefix match on ISO-like strings (e.g. 2026-08-06)
     if filters.get("orderdate"):
         match["orderdate"] = {
@@ -130,6 +193,50 @@ def _base_order_match(filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any
             "$regex": f"^{re.escape(str(filters['deliverydate']))}",
             "$options": "i",
         }
+
+    # Geo filters live inside address strings — AND each condition via $or sides
+    side = str(filters.get("location_side") or "both").lower()
+    if side not in ("pickup", "delivery", "both"):
+        side = "both"
+    and_parts: List[Dict[str, Any]] = []
+
+    if filters.get("pin"):
+        ors = _side_address_ors(side=side, pattern=_pin_pattern(str(filters["pin"])))
+        if ors:
+            and_parts.append({"$or": ors})
+
+    if filters.get("state"):
+        ors = _side_address_ors(
+            side=side, pattern=_state_address_pattern(str(filters["state"]))
+        )
+        if ors:
+            and_parts.append({"$or": ors})
+
+    if filters.get("city"):
+        city_rx = rf"\b{re.escape(str(filters['city']).strip())}\b"
+        ors = _side_address_ors(
+            side=side, pattern=city_rx, include_location_names=True
+        )
+        if ors:
+            and_parts.append({"$or": ors})
+
+    if filters.get("address"):
+        addr_rx = re.escape(str(filters["address"]).strip())
+        ors = _side_address_ors(side=side, pattern=addr_rx)
+        if ors:
+            and_parts.append({"$or": ors})
+
+    if filters.get("location"):
+        loc_rx = re.escape(str(filters["location"]).strip())
+        ors = _side_address_ors(
+            side=side, pattern=loc_rx, include_location_names=True
+        )
+        if ors:
+            and_parts.append({"$or": ors})
+
+    if and_parts:
+        match["$and"] = and_parts
+
     return match
 
 
@@ -185,11 +292,15 @@ def search_orders(
                 "distance": doc.get("distance"),
                 "distanceunit": doc.get("distanceunit"),
                 "pickuplocationname": doc.get("pickuplocationname"),
+                "pickupfulladdress": doc.get("pickupfulladdress"),
                 "deliverylocationname": doc.get("deliverylocationname"),
+                "deliveryfulladdress": doc.get("deliveryfulladdress"),
                 "orderdate": doc.get("orderdate"),
                 "pickupdate": doc.get("pickupdate"),
                 "deliverydate": doc.get("deliverydate"),
                 "companycode": doc.get("companycode"),
+                "salesmanname": doc.get("salesmanname"),
+                "commodityname": doc.get("commodityname"),
             }
         )
     checkpoint(
@@ -224,13 +335,34 @@ def format_order_list_for_context(payload: Dict[str, Any]) -> str:
         f"total_matching={payload.get('total_matching')}",
         f"returned={payload.get('returned')}",
     ]
+    filters = payload.get("filters") or {}
+    show_geo = any(
+        filters.get(k)
+        for k in (
+            "pin",
+            "state",
+            "city",
+            "address",
+            "location",
+            "pickup_location",
+            "delivery_location",
+        )
+    )
     for i, row in enumerate(payload.get("orders") or [], start=1):
-        lines.append(
+        line = (
             f"[{i}] orderid={row.get('orderid')} ordernumber={row.get('ordernumber')} "
             f"customer={row.get('customername')} status={row.get('orderstatus')} "
             f"currency={row.get('currencycode')} freight={row.get('totalfreight')} "
-            f"taxes={row.get('taxes')}"
+            f"taxes={row.get('taxes')} "
+            f"pickup_loc={row.get('pickuplocationname')} "
+            f"delivery_loc={row.get('deliverylocationname')}"
         )
+        if show_geo:
+            line += (
+                f" | pickup_address={row.get('pickupfulladdress')} "
+                f"| delivery_address={row.get('deliveryfulladdress')}"
+            )
+        lines.append(line)
     if not payload.get("orders"):
         lines.append("(no orders matched these filters)")
     return "\n".join(lines)
@@ -273,6 +405,7 @@ def find_order_by_id_or_number(token: str) -> Optional[Dict[str, Any]]:
 def extract_order_token(question: str) -> Optional[str]:
     """Extract order number / id tokens including MRP#### and TORD####."""
     q = question or ""
+    ql = q.lower()
     # Avaal order numbers like MRP3301 / MRP3298
     m = re.search(r"\b(MRP\d+)\b", q, flags=re.IGNORECASE)
     if m:
@@ -280,6 +413,10 @@ def extract_order_token(question: str) -> Optional[str]:
     m = re.search(r"\b(TORD\d+)\b", q, flags=re.IGNORECASE)
     if m:
         return m.group(1).upper()
+    # Pin/zip/postal questions — digits are addresses, not order ids
+    pin_context = bool(
+        re.search(r"\b(pin\s*code|pincode|pin|zip\s*code|zip|postal\s*code|postal)\b", ql)
+    )
     m = re.search(
         r"\border(?:\s*(?:id|number|no\.?|#))?\s*[:#]?\s*([A-Za-z]*\d+)\b",
         q,
@@ -287,10 +424,34 @@ def extract_order_token(question: str) -> Optional[str]:
     )
     if m:
         tok = m.group(1)
-        return tok.upper() if tok.upper().startswith("MRP") else tok
-    m = re.search(r"\b(\d{4,})\b", q)
-    if m:
-        return m.group(1)
+        # Ignore bare years mistaken from dates
+        if re.fullmatch(r"20\d{2}", tok):
+            pass
+        elif pin_context and re.fullmatch(r"\d{5}(?:-\d{4})?", tok):
+            pass
+        else:
+            return tok.upper() if tok.upper().startswith("MRP") else tok
+    # Digits: skip years, date fragments, and pin/zip digits
+    for m in re.finditer(r"\b(\d{4,})\b", q):
+        tok = m.group(1)
+        if re.fullmatch(r"20\d{2}", tok):
+            continue
+        # skip if this number sits inside a date pattern
+        start, end = m.span()
+        window = q[max(0, start - 3) : min(len(q), end + 3)]
+        if re.search(r"\d{1,4}[-/]\d{1,2}[-/]\d{1,4}", window) or re.search(
+            rf"{re.escape(tok)}[-/]\d", q[start : end + 6]
+        ):
+            continue
+        # skip zip/pin digits (5-digit US zip) when pin/zip wording is present
+        # or when preceded by pin/zip/postal keywords within a short window
+        pre = q[max(0, start - 24) : start].lower()
+        if re.fullmatch(r"\d{5}(?:-\d{4})?", tok) and (
+            pin_context
+            or re.search(r"\b(pin|zip|postal|pincode|code)\b", pre)
+        ):
+            continue
+        return tok
     return None
 
 
