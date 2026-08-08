@@ -3,8 +3,9 @@ Fleet-wide analytics over ALL Avaal_db order records.
 
 Supports:
 - order status summary / counts (Quoted, Cancelled, Confirmed, Dispatched, Delivered, Invoiced, …)
-- best customer by max order count (default) or max revenue
+- best / worst / low customer by order count (default) or revenue
 - customer counts by country using pickup / delivery (drop) addresses
+- activity on a date (customers + orders)
 """
 from __future__ import annotations
 
@@ -104,14 +105,39 @@ def is_status_summary_question(question: str) -> bool:
     return False
 
 
-def is_best_customer_question(question: str) -> bool:
+_BEST_WORDS = r"best|top|biggest|largest|highest|most|maximum|max|premium"
+_WORST_WORDS = (
+    r"worst|lowest|low|least|fewest|smallest|minimum|min|bottom|poorest|weakest"
+)
+
+
+def detect_customer_direction(question: str) -> str:
+    """best (highest) vs worst (lowest) customer ranking direction."""
     q = (question or "").lower()
-    return bool(
-        re.search(
-            r"\b(best|top|biggest|largest|highest|most)\b.*\bcustomer\b|\bcustomer\b.*\b(best|top|most\s+orders?|maximum|max)\b",
-            q,
-        )
-    )
+    if re.search(rf"\b({_WORST_WORDS})\b", q):
+        return "worst"
+    return "best"
+
+
+def is_best_customer_question(question: str) -> bool:
+    """
+    Any customer-ranking question — best/top AND worst/lowest/low customer.
+    e.g. best customer, top customer by revenue, worst customer, low customer,
+    customer with least orders, smallest customer.
+    """
+    q = (question or "").lower()
+    if not re.search(r"\bcustomers?\b|\bclients?\b", q):
+        return False
+    if re.search(
+        rf"\b({_BEST_WORDS}|{_WORST_WORDS})\b.*\b(customer|client)\b", q
+    ):
+        return True
+    if re.search(
+        rf"\b(customer|client)\b.*\b({_BEST_WORDS}|{_WORST_WORDS}|orders?|revenue|freight|amount|sales)\b",
+        q,
+    ) and re.search(rf"\b({_BEST_WORDS}|{_WORST_WORDS})\b", q):
+        return True
+    return False
 
 
 def is_country_customer_question(question: str) -> bool:
@@ -237,38 +263,39 @@ def best_customers(
     *,
     metric: str = "orders",
     limit: int = 5,
+    direction: str = "best",
 ) -> Dict[str, Any]:
     """
-    Best customer = most orders by default.
-    metric=revenue uses SUM(grosstotalfreight).
+    Rank customers across ALL records.
+    direction="best"  -> highest (most orders / most revenue)
+    direction="worst" -> lowest  (fewest orders / least revenue)
+    metric="revenue" uses SUM(grosstotalfreight), else order count.
     """
     limit = max(1, min(int(limit or 5), 20))
+    direction = "worst" if str(direction).lower() == "worst" else "best"
+    order = 1 if direction == "worst" else -1  # asc for worst, desc for best
+    label = "worst" if direction == "worst" else "best"
     collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
 
+    group = {
+        "_id": "$customername",
+        "order_count": {"$sum": 1},
+        "total_revenue": {"$sum": "$grosstotalfreight"},
+        "total_freight": {"$sum": "$totalfreight"},
+    }
+
     if metric == "revenue":
-        sort_field = "total_revenue"
-        group = {
-            "_id": "$customername",
-            "order_count": {"$sum": 1},
-            "total_revenue": {"$sum": "$grosstotalfreight"},
-            "total_freight": {"$sum": "$totalfreight"},
-        }
-        sort = {sort_field: -1}
+        sort = {"total_revenue": order, "order_count": order}
         definition = (
-            "Best customer by highest total revenue (sum of grosstotalfreight) "
-            "across all orders."
+            f"{label.capitalize()} customer by "
+            f"{'lowest' if direction == 'worst' else 'highest'} total revenue "
+            "(sum of grosstotalfreight) across all orders."
         )
     else:
-        sort_field = "order_count"
-        group = {
-            "_id": "$customername",
-            "order_count": {"$sum": 1},
-            "total_revenue": {"$sum": "$grosstotalfreight"},
-            "total_freight": {"$sum": "$totalfreight"},
-        }
-        sort = {"order_count": -1, "total_revenue": -1}
+        sort = {"order_count": order, "total_revenue": order}
         definition = (
-            "Best customer = customer with the maximum number of orders "
+            f"{label.capitalize()} customer = customer with the "
+            f"{'minimum' if direction == 'worst' else 'maximum'} number of orders "
             "across all records. Ties broken by revenue."
         )
 
@@ -297,12 +324,14 @@ def best_customers(
     checkpoint(
         "ANALYTICS",
         "best_customers",
+        direction=direction,
         metric=metric,
         top=customers[0]["customername"] if customers else None,
         limit=limit,
     )
     return {
         "analytics_type": "best_customer",
+        "direction": direction,
         "metric": metric,
         "definition": definition,
         "customers": customers,
@@ -512,12 +541,20 @@ def run_analytics(
             date_field = "deliverydate"
         return activity_on_date(str(date_val), date_field=date_field)
 
-    if is_best_customer_question(q) or entities.get("analytics") == "best_customer":
+    if is_best_customer_question(q) or entities.get("analytics") in (
+        "best_customer",
+        "worst_customer",
+    ):
         metric = entities.get("best_customer_metric") or "orders"
-        if re.search(r"\b(revenue|freight|amount|sales)\b", q, re.I):
+        if re.search(r"\b(revenue|freight|amount|sales|money|value)\b", q, re.I):
             metric = "revenue"
+        direction = detect_customer_direction(q)
+        if entities.get("analytics") == "worst_customer":
+            direction = "worst"
+        if entities.get("customer_direction") in ("best", "worst"):
+            direction = entities["customer_direction"]
         limit = int(entities.get("limit") or 5)
-        return best_customers(metric=metric, limit=limit)
+        return best_customers(metric=metric, limit=limit, direction=direction)
 
     if is_country_customer_question(q) or (
         entities.get("country") and not date_val
@@ -547,16 +584,20 @@ def format_analytics_for_context(payload: Dict[str, Any]) -> str:
             lines.append(f"- {row.get('status')}: {row.get('order_count')}")
 
     elif atype == "best_customer":
+        direction = payload.get("direction") or "best"
+        lines.append(f"direction: {direction} (best=highest, worst=lowest)")
         lines.append(f"metric: {payload.get('metric')}")
         best = payload.get("best_customer") or {}
+        pick_label = "worst_customer" if direction == "worst" else "best_customer"
         if best:
             lines.append(
-                f"best_customer: {best.get('customername')} | "
+                f"{pick_label}: {best.get('customername')} | "
                 f"order_count={best.get('order_count')} | "
                 f"total_revenue={best.get('total_revenue')} | "
                 f"total_freight={best.get('total_freight')}"
             )
-        lines.append("top_customers:")
+        list_label = "bottom_customers" if direction == "worst" else "top_customers"
+        lines.append(f"{list_label}:")
         for i, row in enumerate(payload.get("customers") or [], start=1):
             lines.append(
                 f"[{i}] {row.get('customername')} | orders={row.get('order_count')} | "

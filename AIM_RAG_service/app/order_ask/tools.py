@@ -21,7 +21,7 @@ from app.order_ask.calculation_engine import (
     run_calculation_engine,
 )
 from app.order_ask.checkpoint import checkpoint
-from app.order_ask.entities import entities_to_mongo_filters
+from app.order_ask.entities import entities_to_mongo_filters, has_geo_or_list_filters
 from app.order_ask.rag_retrieval import (
     build_rag_context,
     find_order_by_id_or_number,
@@ -63,8 +63,15 @@ def plan_tools(intent: str, entities: Dict[str, Any], intent_info: Dict[str, Any
 
     if intent == "order_lookup" or intent_info.get("needs_exact_order") or entities.get("order_token"):
         token = entities.get("order_token") or intent_info.get("order_token")
-        # Skip fake tokens from years in dates when doing analytics
-        if token and not (
+        # Skip fake tokens: years, or pin/zip digits mistaken as order ids
+        pin = str(entities.get("pin") or "")
+        fake_pin_token = bool(
+            token
+            and pin
+            and re.sub(r"\s+", "", str(token)).upper()
+            == re.sub(r"\s+", "", pin).upper()
+        )
+        if token and not fake_pin_token and not (
             TOOL_RUN_ANALYTICS in tools and re.fullmatch(r"20\d{2}", str(token))
         ):
             if not entities.get("order_token") and intent_info.get("order_token"):
@@ -77,6 +84,15 @@ def plan_tools(intent: str, entities: Dict[str, Any], intent_info: Dict[str, Any
 
     if intent in ("list_filter", "list_orders", "filter") or (
         entities.get("sort_by") and intent != "analytics"
+    ):
+        tools.append(TOOL_SEARCH_ORDERS)
+
+    # Pin / state / city / address / customer / location etc. → always filter DB
+    if (
+        has_geo_or_list_filters(entities)
+        and TOOL_RUN_ANALYTICS not in tools
+        and TOOL_SEARCH_ORDERS not in tools
+        and TOOL_GET_ORDER not in tools
     ):
         tools.append(TOOL_SEARCH_ORDERS)
 

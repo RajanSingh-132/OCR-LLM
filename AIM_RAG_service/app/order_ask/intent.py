@@ -97,15 +97,28 @@ def classify_intent_local(
         }
 
     token = extract_order_token(q)
-    # Any explicit MRP / TORD / order number request → full order details
-    if token and (
+    # Pin/zip/state/city/address filters are NOT order lookups
+    geo_filter_q = bool(
         re.search(
-            r"\b(give|get|show|find|lookup|look\s*up|detail|details|info|information|fetch|pull|order\s*number|ordernumber)\b",
+            r"\b(pin\s*code|pincode|pin|zip\s*code|zip|postal\s*code|postal|"
+            r"state|province|city|town|address|street)\b",
             q,
             re.I,
         )
-        or re.match(r"^(MRP\d+|TORD\d+|\d{4,})\s*$", q, re.I)
-        or len(q.split()) <= 8
+    )
+    # Any explicit MRP / TORD / order number request → full order details
+    if (
+        token
+        and not geo_filter_q
+        and (
+            re.search(
+                r"\b(give|get|show|find|lookup|look\s*up|detail|details|info|information|fetch|pull|order\s*number|ordernumber)\b",
+                q,
+                re.I,
+            )
+            or re.match(r"^(MRP\d+|TORD\d+|\d{4,})\s*$", q, re.I)
+            or len(q.split()) <= 8
+        )
     ):
         # Prefer lookup over list when a specific token is present (unless clear multi-list)
         if not re.search(r"\b(all|list|filter|compare|vs)\b", q, re.I) or re.search(
@@ -174,8 +187,11 @@ def classify_intent_local(
             "reason": "status_filtered_list",
         }
 
-    # Analytics: best customer / status summary / customers by country (pickup/delivery)
+    # Analytics: best/worst/low customer / status summary / customers by country
     if is_best_customer_question(q):
+        from app.order_ask.analytics import detect_customer_direction
+
+        direction = detect_customer_direction(q)
         return {
             "intent": "analytics",
             "needs_rag": False,
@@ -185,7 +201,7 @@ def classify_intent_local(
             "response_style": "medium",
             "max_tokens_hint": 350,
             "retrieve_k": 0,
-            "reason": "best_customer",
+            "reason": f"{direction}_customer",
         }
 
     if is_status_summary_question(q):
@@ -224,6 +240,39 @@ def classify_intent_local(
             "max_tokens_hint": 400,
             "retrieve_k": 0,
             "reason": "list_recent",
+        }
+
+    # Geo / address / pin / state / city / customer / location filters → list from full DB
+    if (
+        re.search(
+            r"\b(pin\s*code|pincode|pin|zip\s*code|zip|postal\s*code|postal)\b",
+            q,
+            re.I,
+        )
+        or re.search(r"\b(state|province|city|town|address|street)\b", q, re.I)
+        or re.search(
+            r"\b(location|warehouse|facility)\b.*\b(order|orders|pickup|delivery|drop)\b|"
+            r"\b(order|orders|pickup|delivery|drop)\b.*\b(location|warehouse|facility)\b",
+            q,
+            re.I,
+        )
+        or re.search(
+            r"\borders?\b.*\b(in|from|to|at)\b\s+[A-Za-z]{2,}",
+            q,
+            re.I,
+        )
+    ) and not re.search(
+        r"\b(how many\s+customers?|customer\s+count|best|worst|low)\b", q, re.I
+    ):
+        return {
+            "intent": "list_filter",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "response_style": "medium",
+            "max_tokens_hint": 500,
+            "retrieve_k": 0,
+            "reason": "geo_or_address_filter",
         }
 
     # Accurate filtered lists: status / customer / currency / date / location + list words
