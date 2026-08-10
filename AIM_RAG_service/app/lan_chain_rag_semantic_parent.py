@@ -81,7 +81,7 @@ SUPPORTED_DATA_EXTENSIONS = {".json", ".txt"}
 
 #     # return embeddings, llm
 
-from app.embedding_client import get_models, get_vision_llm, get_vision_model_names
+from app.embedding_client import get_models, get_anthropic_llm, get_vision_llm, get_vision_model_names
 from app.mongo_client import get_mongo_collection, _to_python_types
 from app.rag_retrieval import get_vectorstore
 from app.prompt import DYNAMIC_EXTRACTION_PROMPT
@@ -811,11 +811,35 @@ def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = 
         if not full_text:
             return {"error": f"No text could be extracted from '{source_name}'. The file may be corrupted or empty."}
 
-        # Use Groq LLM to dynamically extract all key-value pairs as a flat JSON object
+        # Use Groq LLM to dynamically extract all key-value pairs as a flat JSON object.
+        # On Groq rate-limit only → same prompt/flow with Anthropic fallback.
         _, llm = get_models()
         prompt = PromptTemplate.from_template(DYNAMIC_EXTRACTION_PROMPT)
-        chain = prompt | llm
-        response = chain.invoke({"text": full_text[:12000]})
+        extract_vars = {"text": full_text[:12000]}
+        try:
+            response = (prompt | llm).invoke(extract_vars)
+            print("PDF dynamic extract: used Groq LLM")
+        except Exception as groq_exc:
+            err_text = str(groq_exc).lower()
+            is_rate_limit = (
+                "429" in err_text
+                or "rate limit" in err_text
+                or "rate_limit" in err_text
+                or "too many requests" in err_text
+                or type(groq_exc).__name__.lower() in (
+                    "ratelimiterror",
+                    "ratelimitederror",
+                )
+            )
+            if not is_rate_limit:
+                raise
+            print(
+                f"PDF dynamic extract: Groq rate-limited, falling back to Anthropic. "
+                f"error={groq_exc}"
+            )
+            anthropic_llm = get_anthropic_llm()
+            response = (prompt | anthropic_llm).invoke(extract_vars)
+            print("PDF dynamic extract: used Anthropic LLM (fallback)")
 
         text_response = response.content if hasattr(response, "content") else str(response)
 
