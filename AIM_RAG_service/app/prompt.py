@@ -297,11 +297,12 @@ Return this exact structure and these exact keys only:
 }}
 
 === KEY RULES ===
-1. Use ONLY the keys shown above. Do not rename, fix spelling, change case, remove dots, or add keys.
+1. Use ONLY the keys shown above (plus the fuel-only keys listed in REVENUE RULES when a fuel line applies). Do not rename, fix spelling, change case, remove dots, or add unrelated keys.
 2. Keep top-level sections exactly: customerinfo, shipment, Revenue.
-3. Keep intentional key spellings exactly: comapny, custome_broker, shipmetControlNo., dimention, Copmliancehandling, fluecurrencyTypes.
+3. Keep intentional key spellings exactly: comapny, custome_broker, shipmetControlNo., dimention, Copmliancehandling, fluecurrencyTypes, fuelratemethod, fuel_rate_method_value, fuel_total_value.
 4. If a required field is not clearly present, set it to null.
 5. Copy values exactly as written. Do not paraphrase, normalize, translate, or invent.
+6. Do NOT change customerinfo or shipment keys/structure. Only Revenue.fluecurrencyTypes may use the fuel key trio when fuel-related.
 
 === COMPANY vs CUSTOMER (CRITICAL — NEVER SWAP) ===
 comapny (issuer / forwarder / confirmation company):
@@ -412,12 +413,25 @@ dimention:
 
 === REVENUE RULES ===
 1. Revenue.fluecurrencyTypes must always be an array of objects.
-2. Add one object for EVERY charge line (line haul, offered amount, addition, deduction, toll, accessorial, fuel, on-time bonus, total rate, etc.). Do not keep only the settled total if line items exist.
-3. Each object uses ONLY:
+2. Add one object for EVERY charge line (line haul, freight charge, offered amount, addition, deduction, toll, accessorial, fuel, fuel surcharge, on-time bonus, total rate, etc.). Do not keep only the settled total if line items exist.
+3. NON-FUEL charge lines (Freight Charge, line haul, offered amount, toll, addition, deduction, accessorial, etc.) use ONLY these three keys:
    - ratemethod: one of "rate/miles", "rate/hour", "rate/item", "rate/package", "rate/weight", "MBF", otherwise "Flat". Never null. Never put charge names here.
    - rate_method_value: numeric unit rate only, or null. Never charge-name strings. If unit rate equals the line total, set rate_method_value to null.
-   - total_value: exact line amount with currency when present (e.g. "900.00 CAD", "$2,160.00").
-4. If no money/rate info exists, return exactly: [{{"ratemethod": "Flat", "rate_method_value": null, "total_value": null}}]. Never [].
+   - total_value: exact line amount with currency when present (e.g. "3736.00", "900.00 CAD", "$2,160.00").
+4. FUEL-RELATED charge lines ONLY (CRITICAL):
+   - If the line description/label mentions fuel in any form — e.g. Fuel, Fuel Surcharge, Fuel Charge, FSC, Diesel Surcharge, Fuel Levy — do NOT use ratemethod / rate_method_value / total_value for that object.
+   - For that fuel line object use ONLY these three keys (exact spellings):
+     - fuelratemethod: same allowed values as ratemethod ("rate/miles", "rate/hour", "rate/item", "rate/package", "rate/weight", "MBF"), otherwise "Flat". Never null. Never put charge names here.
+     - fuel_rate_method_value: numeric unit rate only, or null. Never charge-name strings. If unit rate equals the fuel line total, set fuel_rate_method_value to null.
+     - fuel_total_value: exact fuel line amount with currency when present (e.g. "30.00", "30.00 CAD").
+   - Never mix normal keys and fuel keys in the same object.
+   - Never put a non-fuel charge (e.g. Freight Charge) into fuel keys.
+5. Example when document has Freight Charge 3736.00 and Fuel Surcharge 30.00:
+   [
+     {{"ratemethod": "Flat", "rate_method_value": null, "total_value": "3736.00"}},
+     {{"fuelratemethod": "Flat", "fuel_rate_method_value": null, "fuel_total_value": "30.00"}}
+   ]
+6. If no money/rate info exists, return exactly: [{{"ratemethod": "Flat", "rate_method_value": null, "total_value": null}}]. Never []. Do not invent a fuel object when no fuel line exists.
 
 === ARRAY RULES ===
 1. One value → string. Multiple distinct values → array of strings.
@@ -443,6 +457,7 @@ dimention:
 9. Keys match the template exactly; missing values are null.
 10. Valid JSON only.
 11. commodity is the Commodity-column VALUE (e.g. ws65), never a table header like PKG/Weight/LxBxH; PKG counts go to No.OfPackage.
+12. Fuel / Fuel Surcharge / FSC lines use ONLY fuelratemethod, fuel_rate_method_value, fuel_total_value — not ratemethod/total_value. Non-fuel lines keep ratemethod/rate_method_value/total_value. Never mix both key sets in one object.
 
 DOCUMENT TEXT:
 {text}
