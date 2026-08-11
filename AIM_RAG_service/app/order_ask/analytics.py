@@ -202,15 +202,16 @@ def is_date_activity_question(question: str) -> bool:
     """
     e.g. how many customers ordered on 2026-08-06 /
     is date ko kitne customers ne order diya /
-    orders on 07/13/2026
+    orders on 07/13/2026 /
+    10 august how many total orders
     """
     q = (question or "").lower()
-    has_date = bool(extract_date_from_question(question))
+    has_date = bool(extract_any_date_from_question(question))
     if not has_date:
         return False
     return bool(
         re.search(
-            r"\b(how many|count|kitne|kitna|number of|customers?|orders?|ordered|order diya|ne order)\b",
+            r"\b(how many|count|kitne|kitna|number of|customers?|orders?|ordered|order diya|ne order|created|total)\b",
             q,
         )
     ) or bool(re.search(r"\b(on|for|dated|date)\b", q))
@@ -222,7 +223,480 @@ def is_analytics_question(question: str) -> bool:
         or is_best_customer_question(question)
         or is_country_customer_question(question)
         or is_date_activity_question(question)
+        or is_state_wise_question(question)
+        or is_city_wise_question(question)
+        or is_best_city_question(question)
+        or is_period_orders_question(question)
+        or is_trip_distance_question(question)
     )
+
+
+_MONTH_MAP = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+
+
+def extract_natural_date_from_question(question: str) -> Optional[str]:
+    """
+    Parse dates like '10 august', 'august 10', '10 aug 2026', 'Aug 10, 2026'.
+    Returns YYYY-MM-DD prefix or None.
+    """
+    q = question or ""
+    ql = q.lower()
+    year = None
+    ym = re.search(r"\b(20\d{2})\b", ql)
+    if ym:
+        year = int(ym.group(1))
+
+    day = None
+    month = None
+    m = re.search(
+        r"\b(\d{1,2})\s*(?:st|nd|rd|th)?\s+"
+        r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+        r"nov(?:ember)?|dec(?:ember)?)\b",
+        ql,
+    )
+    if m:
+        day = int(m.group(1))
+        month = _MONTH_MAP.get(m.group(2)[:3] if m.group(2)[:3] in _MONTH_MAP else m.group(2))
+        if month is None:
+            month = _MONTH_MAP.get(m.group(2))
+    else:
+        m = re.search(
+            r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+            r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+            r"nov(?:ember)?|dec(?:ember)?)\s+"
+            r"(\d{1,2})(?:st|nd|rd|th)?\b",
+            ql,
+        )
+        if m:
+            month = _MONTH_MAP.get(m.group(1)[:3] if m.group(1)[:3] in _MONTH_MAP else m.group(1))
+            if month is None:
+                month = _MONTH_MAP.get(m.group(1))
+            day = int(m.group(2))
+
+    if day is None or month is None:
+        return None
+    if day < 1 or day > 31:
+        return None
+    if year is None:
+        # Prefer year from latest orderdate in DB-ish default used in dataset
+        year = 2026
+    return f"{year}-{month:02d}-{day:02d}"
+
+
+def extract_any_date_from_question(question: str) -> Optional[str]:
+    return extract_date_from_question(question) or extract_natural_date_from_question(question)
+
+
+def detect_period_days(question: str) -> Optional[int]:
+    """last 1 month / last month / past 7 days / last 2 weeks → day count."""
+    q = (question or "").lower()
+    m = re.search(r"\b(?:last|past|previous)\s+(\d+)\s*(day|days|week|weeks|month|months)\b", q)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        if unit.startswith("day"):
+            return max(1, n)
+        if unit.startswith("week"):
+            return max(1, n * 7)
+        return max(1, n * 30)
+    if re.search(r"\b(?:last|past|previous)\s+(one\s+)?month\b", q):
+        return 30
+    if re.search(r"\b(?:last|past|previous)\s+(one\s+)?week\b", q):
+        return 7
+    if re.search(r"\b(?:last|past)\s+30\s*days?\b", q):
+        return 30
+    return None
+
+
+def detect_status_filter(question: str) -> Optional[str]:
+    q = (question or "").lower()
+    for key, canonical in (
+        ("quoted", "Quoted"),
+        ("quotes", "Quoted"),
+        ("quote", "Quoted"),
+        ("cancelled", "Cancelled"),
+        ("canceled", "Cancelled"),
+        ("confirmed", "Confirmed"),
+        ("confirmation", "Confirmed"),
+        ("confirmations", "Confirmed"),
+        ("dispatched", "Dispatched"),
+        ("delivered", "Delivered"),
+        ("invoiced", "Invoiced"),
+    ):
+        if re.search(rf"\b{key}\b", q):
+            return canonical
+    return None
+
+
+def is_state_wise_question(question: str) -> bool:
+    q = (question or "").lower()
+    return bool(
+        re.search(r"\bstate[- ]?wise\b|\bby\s+state\b|\borders?\s+per\s+state\b|\bstate\s+wise\b", q)
+        or (
+            re.search(r"\b(states?)\b", q)
+            and re.search(r"\b(orders?|count|how many|break\s*down|summary)\b", q)
+            and not re.search(r"\b(customer|best|worst)\b", q)
+        )
+    )
+
+
+def is_city_wise_question(question: str) -> bool:
+    q = (question or "").lower()
+    if is_best_city_question(q):
+        return False
+    return bool(
+        re.search(r"\bcity[- ]?wise\b|\bby\s+city\b|\borders?\s+per\s+city\b|\bcity\s+wise\b", q)
+        or (
+            re.search(r"\bcities?\b", q)
+            and re.search(r"\b(orders?|count|how many|break\s*down|summary)\b", q)
+            and not re.search(r"\b(customer|best|worst)\b", q)
+        )
+    )
+
+
+def is_best_city_question(question: str) -> bool:
+    q = (question or "").lower()
+    return bool(
+        re.search(
+            r"\b(best|top|biggest|largest|highest|most)\b.*\bcity\b|"
+            r"\bcity\b.*\b(best|top|most\s+orders?|maximum|max)\b",
+            q,
+        )
+    )
+
+
+def is_period_orders_question(question: str) -> bool:
+    """last 1 month orders / last month quoted how many / created in last month."""
+    q = (question or "").lower()
+    if detect_period_days(q) is None:
+        return False
+    return bool(
+        re.search(
+            r"\b(how many|count|kitne|kitna|orders?|created|quoted|confirmed|confirmation|status)\b",
+            q,
+        )
+    )
+
+
+def is_trip_distance_question(question: str) -> bool:
+    q = (question or "").lower()
+    # Fleet-level trip/distance analytics (not a single-order lookup)
+    if re.search(r"\b(MRP\d+|TORD\d+)\b", q, re.I):
+        return False
+    return bool(
+        re.search(r"\b(trip|trips|tripno|trip\s*no)\b", q)
+        or (
+            re.search(r"\bdistance\b", q)
+            and re.search(r"\b(total|sum|how many|average|avg|all|fleet)\b", q)
+        )
+    )
+
+
+def parse_address_geo(addr: Optional[str]) -> Optional[Dict[str, str]]:
+    """
+    Address shape: STREET, CITY, STATE, PIN, Country, email, phone
+    e.g. 1241 OLD TEMESCAL ROAD #103, CORONA, CA, 92881, United States, ...
+    """
+    if not addr or not str(addr).strip():
+        return None
+    parts = [p.strip() for p in str(addr).split(",") if p.strip()]
+    if len(parts) < 3:
+        return None
+    city = parts[1] if len(parts) > 1 else ""
+    state = parts[2] if len(parts) > 2 else ""
+    country = ""
+    if len(parts) >= 5:
+        country = parts[4]
+    elif len(parts) == 4:
+        # STREET, CITY, STATE, Country (no pin)
+        country = parts[3] if not re.match(r"^\d{5}", parts[3]) else ""
+    # Drop email-like country mistakes
+    if "@" in country:
+        country = ""
+    if not city and not state:
+        return None
+    return {
+        "city": city.title() if city else "",
+        "state": state.upper() if len(state) <= 3 else state.title(),
+        "country": country.title() if country else "Unknown",
+    }
+
+
+def _iter_geo_from_orders(location_side: str = "both") -> List[Dict[str, str]]:
+    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    projection = {
+        "pickupfulladdress": 1,
+        "deliveryfulladdress": 1,
+        "_id": 0,
+    }
+    geos: List[Dict[str, str]] = []
+    for doc in collection.find(_base_match(), projection):
+        addrs = []
+        if location_side in ("pickup", "both"):
+            addrs.append(doc.get("pickupfulladdress"))
+        if location_side in ("delivery", "both"):
+            addrs.append(doc.get("deliveryfulladdress"))
+        seen = set()
+        for addr in addrs:
+            geo = parse_address_geo(addr)
+            if not geo:
+                continue
+            key = (geo.get("country"), geo.get("state"), geo.get("city"))
+            # Count each order once per side match — for "both", prefer first non-empty
+            if key in seen:
+                continue
+            seen.add(key)
+            geos.append(geo)
+            if location_side == "both":
+                break  # one geo per order when scanning both (pickup first)
+    return geos
+
+
+def orders_by_state(*, location_side: str = "both", limit: int = 50) -> Dict[str, Any]:
+    """Country → state → order count only."""
+    limit = max(1, min(int(limit or 50), 100))
+    from collections import Counter
+
+    counter: Counter = Counter()
+    for geo in _iter_geo_from_orders(location_side):
+        country = geo.get("country") or "Unknown"
+        state = geo.get("state") or "Unknown"
+        counter[(country, state)] += 1
+
+    rows = [
+        {"country": c, "state": s, "order_count": n}
+        for (c, s), n in counter.most_common(limit)
+    ]
+    checkpoint("ANALYTICS", "orders_by_state", rows=len(rows), side=location_side)
+    return {
+        "analytics_type": "orders_by_state",
+        "location_side": location_side,
+        "definition": (
+            "Order counts grouped by country then state, parsed from "
+            "pickup/delivery full addresses. Answer format: country, then state, then count only."
+        ),
+        "response_format": "country_name → state_name → order_count (counts only)",
+        "total_groups": len(rows),
+        "rows": rows,
+    }
+
+
+def orders_by_city(*, location_side: str = "both", limit: int = 50) -> Dict[str, Any]:
+    """City → order count only."""
+    limit = max(1, min(int(limit or 50), 100))
+    from collections import Counter
+
+    counter: Counter = Counter()
+    for geo in _iter_geo_from_orders(location_side):
+        city = geo.get("city") or "Unknown"
+        country = geo.get("country") or ""
+        state = geo.get("state") or ""
+        counter[(city, state, country)] += 1
+
+    rows = [
+        {"city": city, "state": st, "country": co, "order_count": n}
+        for (city, st, co), n in counter.most_common(limit)
+    ]
+    checkpoint("ANALYTICS", "orders_by_city", rows=len(rows), side=location_side)
+    return {
+        "analytics_type": "orders_by_city",
+        "location_side": location_side,
+        "definition": (
+            "Order counts grouped by city (from pickup/delivery addresses). "
+            "Answer with city name and total order count only."
+        ),
+        "response_format": "city_name → order_count (counts only)",
+        "total_groups": len(rows),
+        "rows": rows,
+    }
+
+
+def best_cities(*, location_side: str = "both", limit: int = 5) -> Dict[str, Any]:
+    """Best city = most orders."""
+    payload = orders_by_city(location_side=location_side, limit=limit)
+    rows = payload.get("rows") or []
+    best = rows[0] if rows else None
+    checkpoint(
+        "ANALYTICS",
+        "best_cities",
+        top=(best or {}).get("city"),
+        limit=limit,
+    )
+    return {
+        "analytics_type": "best_city",
+        "location_side": location_side,
+        "definition": "Best city = city with the maximum number of orders (from addresses).",
+        "response_format": "best city name + order_count",
+        "best_city": best,
+        "top_cities": rows,
+    }
+
+
+def _period_start_iso(days: int) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    start = datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))
+    return start.strftime("%Y-%m-%d")
+
+
+def orders_in_period(
+    *,
+    days: int = 30,
+    status: Optional[str] = None,
+    date_field: str = "orderdate",
+) -> Dict[str, Any]:
+    """Orders created in last N days, optional status filter (Quoted/Confirmed/…)."""
+    if date_field not in ("orderdate", "pickupdate", "deliverydate"):
+        date_field = "orderdate"
+    start = _period_start_iso(days)
+    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    match: Dict[str, Any] = {
+        **_base_match(),
+        date_field: {"$gte": start},
+    }
+    if status:
+        match["orderstatus"] = status
+
+    total = collection.count_documents(match)
+    status_rows = list(
+        collection.aggregate(
+            [
+                {"$match": {**_base_match(), date_field: {"$gte": start}}},
+                {"$group": {"_id": "$orderstatus", "order_count": {"$sum": 1}}},
+                {"$sort": {"order_count": -1}},
+            ]
+        )
+    )
+    by_status = [
+        {
+            "status": (r["_id"] if r["_id"] not in (None, "") else "Unknown"),
+            "order_count": int(r["order_count"]),
+        }
+        for r in status_rows
+    ]
+    checkpoint(
+        "ANALYTICS",
+        "orders_in_period",
+        days=days,
+        start=start,
+        status=status,
+        total=total,
+    )
+    return {
+        "analytics_type": "orders_in_period",
+        "days": days,
+        "period_start": start,
+        "date_field": date_field,
+        "status_filter": status,
+        "matching_orders": total,
+        "by_status": by_status,
+        "definition": (
+            f"Orders with {date_field} on/after {start} (last ~{days} days)"
+            + (f", status={status}" if status else "")
+            + ". Use matching_orders as the total count."
+        ),
+        "response_format": "total order count for the period; if status asked, that status count; optional status breakdown",
+    }
+
+
+def trip_distance_summary(*, days: Optional[int] = None) -> Dict[str, Any]:
+    """Fleet trip / distance snapshot from order fields."""
+    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    match: Dict[str, Any] = {**_base_match()}
+    if days:
+        match["orderdate"] = {"$gte": _period_start_iso(days)}
+
+    total_orders = collection.count_documents(match)
+    with_trip = collection.count_documents(
+        {**match, "tripno": {"$exists": True, "$nin": [None, ""]}}
+    )
+    # Sum numeric distance where present
+    dist_rows = list(
+        collection.aggregate(
+            [
+                {"$match": match},
+                {
+                    "$group": {
+                        "_id": None,
+                        "total_distance": {
+                            "$sum": {
+                                "$cond": [
+                                    {"$isNumber": "$distance"},
+                                    "$distance",
+                                    0,
+                                ]
+                            }
+                        },
+                        "orders_with_distance": {
+                            "$sum": {
+                                "$cond": [
+                                    {
+                                        "$and": [
+                                            {"$ne": ["$distance", None]},
+                                            {"$ne": ["$distance", ""]},
+                                        ]
+                                    },
+                                    1,
+                                    0,
+                                ]
+                            }
+                        },
+                    }
+                },
+            ]
+        )
+    )
+    total_distance = float((dist_rows[0] or {}).get("total_distance") or 0) if dist_rows else 0.0
+    orders_with_distance = (
+        int((dist_rows[0] or {}).get("orders_with_distance") or 0) if dist_rows else 0
+    )
+    checkpoint(
+        "ANALYTICS",
+        "trip_distance",
+        trips=with_trip,
+        distance=total_distance,
+        days=days,
+    )
+    return {
+        "analytics_type": "trip_distance",
+        "days": days,
+        "total_orders": total_orders,
+        "orders_with_tripno": with_trip,
+        "orders_with_distance": orders_with_distance,
+        "total_distance": round(total_distance, 4),
+        "definition": (
+            "Trip count = orders with non-empty tripno. "
+            "Distance = sum of numeric distance fields"
+            + (f" in last ~{days} days." if days else " across all orders.")
+        ),
+        "response_format": "trip count and/or total distance numbers only from this result",
+    }
 
 
 def status_summary() -> Dict[str, Any]:
@@ -517,6 +991,7 @@ def run_analytics(
     """Route analytics question → Mongo aggregation payload."""
     entities = entities or {}
     q = question or ""
+    side = entities.get("location_side") or detect_location_side(q)
 
     # Date-based activity (customers/orders on a day) — dynamic from full DB
     date_val = (
@@ -524,14 +999,18 @@ def run_analytics(
         or entities.get("orderdate")
         or entities.get("pickupdate")
         or entities.get("deliverydate")
-        or extract_date_from_question(q)
+        or extract_any_date_from_question(q)
     )
     if date_val and (
         is_date_activity_question(q)
         or entities.get("analytics") == "activity_on_date"
         or (
             date_val
-            and re.search(r"\b(customer|order|kitne|kitna|how many|count)\b", q, re.I)
+            and re.search(
+                r"\b(customer|order|kitne|kitna|how many|count|total|created)\b",
+                q,
+                re.I,
+            )
         )
     ):
         date_field = entities.get("date_field") or detect_date_field(q)
@@ -540,6 +1019,38 @@ def run_analytics(
         if entities.get("deliverydate") and not entities.get("orderdate"):
             date_field = "deliverydate"
         return activity_on_date(str(date_val), date_field=date_field)
+
+    # Last N days / last month (+ optional status like Quoted / Confirmed)
+    period_days = entities.get("period_days") or detect_period_days(q)
+    if period_days or entities.get("analytics") == "orders_in_period":
+        days = int(period_days or 30)
+        status = entities.get("orderstatus") or detect_status_filter(q)
+        # Only apply status filter when user clearly asked status/quoted/confirmed count
+        if status and not re.search(
+            r"\b(quoted|quotes|quote|cancelled|canceled|confirmed|confirmation|confirmations|"
+            r"dispatched|delivered|invoiced|status)\b",
+            q,
+            re.I,
+        ):
+            status = None
+        date_field = entities.get("date_field") or detect_date_field(q)
+        return orders_in_period(days=days, status=status, date_field=date_field)
+
+    if is_best_city_question(q) or entities.get("analytics") == "best_city":
+        limit = int(entities.get("limit") or 5)
+        return best_cities(location_side=side, limit=limit)
+
+    if is_state_wise_question(q) or entities.get("analytics") == "orders_by_state":
+        limit = int(entities.get("limit") or 50)
+        return orders_by_state(location_side=side, limit=limit)
+
+    if is_city_wise_question(q) or entities.get("analytics") == "orders_by_city":
+        limit = int(entities.get("limit") or 50)
+        return orders_by_city(location_side=side, limit=limit)
+
+    if is_trip_distance_question(q) or entities.get("analytics") == "trip_distance":
+        days = detect_period_days(q)
+        return trip_distance_summary(days=days)
 
     if is_best_customer_question(q) or entities.get("analytics") in (
         "best_customer",
@@ -557,10 +1068,9 @@ def run_analytics(
         return best_customers(metric=metric, limit=limit, direction=direction)
 
     if is_country_customer_question(q) or (
-        entities.get("country") and not date_val
+        entities.get("country") and not date_val and not period_days
     ):
         country = entities.get("country") or detect_country(q) or "Canada"
-        side = entities.get("location_side") or detect_location_side(q)
         return customers_by_country(country, location_side=side)
 
     if is_status_summary_question(q) or entities.get("analytics") == "status_summary":
@@ -576,6 +1086,8 @@ def format_analytics_for_context(payload: Dict[str, Any]) -> str:
     atype = payload.get("analytics_type")
     if payload.get("definition"):
         lines.append(f"Definition: {payload['definition']}")
+    if payload.get("response_format"):
+        lines.append(f"Response format required: {payload['response_format']}")
 
     if atype == "status_summary":
         lines.append(f"total_orders: {payload.get('total_orders')}")
@@ -627,6 +1139,56 @@ def format_analytics_for_context(payload: Dict[str, Any]) -> str:
             )
         if not payload.get("sample_customers"):
             lines.append("(no customers/orders found on this date)")
+
+    elif atype == "orders_by_state":
+        lines.append("state_wise_counts (country then state then count ONLY):")
+        for row in payload.get("rows") or []:
+            lines.append(
+                f"- country={row.get('country')} | state={row.get('state')} | "
+                f"order_count={row.get('order_count')}"
+            )
+        if not payload.get("rows"):
+            lines.append("(no state address data found)")
+
+    elif atype == "orders_by_city":
+        lines.append("city_wise_counts (city then count ONLY):")
+        for row in payload.get("rows") or []:
+            lines.append(
+                f"- city={row.get('city')} | state={row.get('state')} | "
+                f"country={row.get('country')} | order_count={row.get('order_count')}"
+            )
+        if not payload.get("rows"):
+            lines.append("(no city address data found)")
+
+    elif atype == "best_city":
+        best = payload.get("best_city") or {}
+        if best:
+            lines.append(
+                f"best_city: {best.get('city')} | state={best.get('state')} | "
+                f"country={best.get('country')} | order_count={best.get('order_count')}"
+            )
+        lines.append("top_cities:")
+        for i, row in enumerate(payload.get("top_cities") or [], start=1):
+            lines.append(
+                f"[{i}] city={row.get('city')} | orders={row.get('order_count')}"
+            )
+
+    elif atype == "orders_in_period":
+        lines.append(f"period_days: {payload.get('days')}")
+        lines.append(f"period_start: {payload.get('period_start')}")
+        lines.append(f"date_field: {payload.get('date_field')}")
+        lines.append(f"status_filter: {payload.get('status_filter')}")
+        lines.append(f"matching_orders: {payload.get('matching_orders')}")
+        lines.append("by_status_in_period:")
+        for row in payload.get("by_status") or []:
+            lines.append(f"- {row.get('status')}: {row.get('order_count')}")
+
+    elif atype == "trip_distance":
+        lines.append(f"days: {payload.get('days')}")
+        lines.append(f"total_orders: {payload.get('total_orders')}")
+        lines.append(f"orders_with_tripno: {payload.get('orders_with_tripno')}")
+        lines.append(f"orders_with_distance: {payload.get('orders_with_distance')}")
+        lines.append(f"total_distance: {payload.get('total_distance')}")
 
     else:
         lines.append(str(payload))

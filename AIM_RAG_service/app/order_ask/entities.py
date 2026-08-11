@@ -262,12 +262,19 @@ def extract_entities(
     # Dates: YYYY-MM-DD, YYYY/MM/DD, MM/DD/YYYY (Order Sheet style)
     from app.order_ask.analytics import (
         detect_date_field,
+        detect_period_days,
+        extract_any_date_from_question,
         extract_date_from_question,
+        is_best_city_question,
+        is_city_wise_question,
         is_date_activity_question,
+        is_period_orders_question,
+        is_state_wise_question,
+        is_trip_distance_question,
         normalize_date_prefix,
     )
 
-    date_val = extract_date_from_question(q)
+    date_val = extract_any_date_from_question(q)
     if not date_val:
         m = re.search(r"\b(20\d{2}[-/]\d{1,2}[-/]\d{1,2})\b", q)
         if m:
@@ -288,9 +295,24 @@ def extract_entities(
         else:
             entities["orderdate"] = date_val
         if is_date_activity_question(q) or re.search(
-            r"\b(customer|kitne|kitna|how many|count|ordered)\b", ql
+            r"\b(customer|kitne|kitna|how many|count|ordered|created|total)\b", ql
         ):
             entities["analytics"] = "activity_on_date"
+
+    period_days = detect_period_days(q)
+    if period_days:
+        entities["period_days"] = period_days
+        if is_period_orders_question(q):
+            entities["analytics"] = "orders_in_period"
+
+    if is_state_wise_question(q):
+        entities["analytics"] = "orders_by_state"
+    if is_city_wise_question(q):
+        entities["analytics"] = "orders_by_city"
+    if is_best_city_question(q):
+        entities["analytics"] = "best_city"
+    if is_trip_distance_question(q):
+        entities["analytics"] = "trip_distance"
 
     # Sort / best / highest amount
     if re.search(r"\b(best|highest|max|top|largest|most)\b.*\b(amount|freight|revenue|tax|distance)\b", ql) or re.search(

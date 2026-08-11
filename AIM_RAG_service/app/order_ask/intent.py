@@ -78,9 +78,14 @@ def classify_intent_local(
     from app.order_ask.analytics import (
         is_analytics_question,
         is_best_customer_question,
+        is_best_city_question,
+        is_city_wise_question,
         is_country_customer_question,
         is_date_activity_question,
+        is_period_orders_question,
+        is_state_wise_question,
         is_status_summary_question,
+        is_trip_distance_question,
     )
 
     if is_date_activity_question(q):
@@ -202,6 +207,71 @@ def classify_intent_local(
             "max_tokens_hint": 350,
             "retrieve_k": 0,
             "reason": f"{direction}_customer",
+        }
+
+    if is_best_city_question(q):
+        return {
+            "intent": "analytics",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "needs_analytics": True,
+            "response_style": "medium",
+            "max_tokens_hint": 300,
+            "retrieve_k": 0,
+            "reason": "best_city",
+        }
+
+    if is_state_wise_question(q):
+        return {
+            "intent": "analytics",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "needs_analytics": True,
+            "response_style": "medium",
+            "max_tokens_hint": 450,
+            "retrieve_k": 0,
+            "reason": "state_wise_orders",
+        }
+
+    if is_city_wise_question(q):
+        return {
+            "intent": "analytics",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "needs_analytics": True,
+            "response_style": "medium",
+            "max_tokens_hint": 450,
+            "retrieve_k": 0,
+            "reason": "city_wise_orders",
+        }
+
+    if is_period_orders_question(q):
+        return {
+            "intent": "analytics",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "needs_analytics": True,
+            "response_style": "medium",
+            "max_tokens_hint": 350,
+            "retrieve_k": 0,
+            "reason": "period_orders",
+        }
+
+    if is_trip_distance_question(q):
+        return {
+            "intent": "analytics",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "needs_analytics": True,
+            "response_style": "medium",
+            "max_tokens_hint": 300,
+            "retrieve_k": 0,
+            "reason": "trip_distance",
         }
 
     if is_status_summary_question(q):
