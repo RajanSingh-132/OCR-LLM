@@ -95,55 +95,6 @@ You are a strict logistics document data extractor with zero tolerance for misse
 
 Your task is to scan the complete document text and map extracted values into the EXACT JSON structure provided below.
 
-=== REQUIRED OUTPUT JSON STRUCTURE ===
-Return this exact structure and these exact keys only:
-
-{{
-  "customerinfo": {{
-    "comapny": null,
-    "customer": null,
-    "customer_order": null,
-    "salesman": null,
-    "order_notes": null,
-    "shipment_types": null,
-    "shipment_for": null,
-    "custome_broker": null,
-    "shipmetControlNo.": null,
-    "importer": null,
-    "return": null
-  }},
-  "shipment": {{
-    "commodity": null,
-    "pickup_location": null,
-    "pickup_date": null,
-    "pickup_time": null,
-    "pickup_refrence_no": null,
-    "distance": null,
-    "delivery_location": null,
-    "delivery_date": null,
-    "delivery_time": null,
-    "delivery_refrence_no": null,
-    "ValueOfgoods": null,
-    "Equipment": null,
-    "No.OfPackage": null,
-    "weight": null,
-    "temperature": null,
-    "dimention": null,
-    "pickupNote": null,
-    "DeliveryNotes": null,
-    "Copmliancehandling": null
-  }},
-  "Revenue": {{
-    "fluecurrencyTypes": [
-      {{
-        "ratemethod": "Flat",
-        "rate_method_value": null,
-        "total_value": null
-      }}
-    ]
-  }}
-}}
-
 === KEY RULES ===
 1. Use ONLY the keys shown in the required JSON structure.
 2. Do not rename keys, fix spelling, change case, remove dots, or create extra keys.
@@ -252,7 +203,6 @@ Return this exact structure and these exact keys only:
 
 {{
   "customerinfo": {{
-    "comapny": null,
     "customer": null,
     "customer_order": null,
     "salesman": null,
@@ -299,37 +249,34 @@ Return this exact structure and these exact keys only:
 === KEY RULES ===
 1. Use ONLY the keys shown above (plus the fuel-only keys listed in REVENUE RULES when a fuel line applies). Do not rename, fix spelling, change case, remove dots, or add unrelated keys.
 2. Keep top-level sections exactly: customerinfo, shipment, Revenue.
-3. Keep intentional key spellings exactly: comapny, custome_broker, shipmetControlNo., dimention, Copmliancehandling, fluecurrencyTypes, fuelratemethod, fuel_rate_method_value, fuel_total_value.
+3. Keep intentional key spellings exactly: custome_broker, shipmetControlNo., dimention, Copmliancehandling, fluecurrencyTypes, fuelratemethod, fuel_rate_method_value, fuel_total_value.
 4. If a required field is not clearly present, set it to null.
 5. Copy values exactly as written. Do not paraphrase, normalize, translate, or invent.
 6. Do NOT change customerinfo or shipment keys/structure. Only Revenue.fluecurrencyTypes may use the fuel key trio when fuel-related.
+7. Do NOT output a "comapny" / "company" key. That field is removed from the schema.
 
-=== COMPANY vs CUSTOMER (CRITICAL — NEVER SWAP) ===
-comapny (issuer / forwarder / confirmation company):
-- Who ISSUED this document: letterhead, broker/forwarder name, "Arranged By" company, dispatch company on the header.
-- On a Pickup Order, the forwarder/logistics company that issued the pickup order (e.g. Expeditors Canada, Inc.) belongs in comapny when they are the document issuer — NOT the shipper warehouse name alone.
-- NEVER put pickup warehouse, consignee, or delivery warehouse into comapny.
-- NEVER put the hired highway carrier into comapny unless that same company also issued the document.
+=== CUSTOMER (PRIORITY — FOLLOW IN ORDER) ===
+customer (single value from PDF data — pick using this priority only):
+1. FIRST: If an explicit Customer / Customer Name / Client / Account label has a name value → use that as customer.
+2. SECOND: Else if Bill To / Sold To (party name/address block) is present → use that Bill To party name as customer.
+3. THIRD: Else if the customer/company name appears in the document logo branding text in the PDF data → extract that name from the logo as customer.
+4. FOURTH: Else if a company name appears in the document HEADER (top-of-page company name block with address/phone/MC under it — e.g. "PEERLESS LOGISTICS INC" on a Dispatch Confirmation) → use that header company name as customer.
+5. Else → customer MUST be null (blank). Prefer null over guessing.
 
-customer (shipper / customer — NOT the truck carrier):
-- Shipper / customer the load is for ONLY when clearly labeled as Customer, Bill To, Sold To, Owner, Shipper, Client, Account, or Arranged-With party that is explicitly the shipper/customer (not the carrier).
-- On Order Sheet / AFM-style docs: the Bill To party name/address block is the customer (e.g. "@arnold& adeleide..."). Prefer Bill To over any other guess.
+CRITICAL — where customer must NEVER come from:
+- NEVER take customer from Shipper / Ship From / Pickup party name or shipper address details.
+- NEVER take customer from Consignee / Ship To / Deliver To / delivery warehouse party name or consignee address details.
+- NEVER derive, copy, or infer customer from pickup_location or delivery_location (including facility names inside those addresses).
+- Even if pickup says "Redwood Warehouse - Perfection Pet Foods" or delivery says "H.E.B GROCERY..." / "DHL SUPPLY CHAIN...", do NOT put those names into customer.
+- NEVER put the hired Carrier line (e.g. "RIGHT TRACK TRANSPORT") into customer — Carrier is not customer.
 - NEVER put commodity codes/SKU/product codes (e.g. "ws65") into customer.
 - NEVER put table column headers or numeric package/weight cells into customer.
-- NEVER derive, copy, or infer customer from pickup_location or delivery_location (including facility names inside those addresses).
-- Even if pickup says "Redwood Warehouse - Perfection Pet Foods" or delivery says "H.E.B GROCERY..." / "DHL SUPPLY CHAIN...", do NOT put those names into customer just because they appear in locations.
-- On carrier rate confirmations, "Arranged With" is often the CARRIER company/contact (e.g. EK NAAM SHIPPING CORP). Do NOT put the carrier into customer unless the document also clearly labels that same party as Customer / Bill To / Shipper.
-- NEVER put the issuing broker/forwarder into customer.
-- NEVER use consignee / delivery warehouse as customer unless explicitly labeled Customer / Bill To / Sold To (as its own party field — not merely because it is the delivery_location).
-- If a true customer/shipper label is missing → customer MUST be null. Prefer null over borrowing from locations.
-- If comapny and customer would be the same string, re-check roles. If still unclear, set the uncertain one to null.
+- On carrier rate confirmations, "Arranged With" is often the CARRIER. Do NOT put the carrier into customer unless that same party is also clearly Customer / Bill To under priority 1–2.
+- If none of priority 1–4 yields a clear value or confidence is low → customer = null. Do not guess.
 
 custome_broker:
 - Use ONLY when the document explicitly labels customs broker / brokerage.
-- Do NOT move the document issuer into custome_broker just to free comapny.
-- If a party is clearly the issuer, keep them in comapny; leave custome_broker null unless a separate customs broker is named.
-
-If either name is not explicit or confidence is low, return null. Do not guess.
+- Leave custome_broker null unless a separate customs broker is named.
 
 === SALESMAN vs IMPORTER (CRITICAL — DO NOT GUESS) ===
 salesman:
@@ -355,13 +302,22 @@ return:
 - Only when explicitly labeled return / return load / round trip / backhaul. Otherwise null.
 
 === LOCATION RULES (NO DUPLICATE ADDRESSES) ===
-- pickup_location = Pick / Stop #1 / Origin / Pickup From / ship-from facility + full address when present.
-- delivery_location = Deliver / Drop / Stop #2+ / Consignee / Deliver To facility + full address when present.
+- pickup_location = Pick / Stop #1 / Origin / Pickup From / Shipper / Ship From facility + full address when present. The SHIPPER location/address MUST go into pickup_location.
+- delivery_location = Deliver / Drop / Stop #2+ / Consignee / Deliver To / Ship To facility + full address when present. The CONSIGNEE location/address MUST go into delivery_location.
 - Put name and street/city/region together as ONE location string per stop.
 - Never output the same address twice in one field.
 - Never repeat a location because OCR repeated a header/footer.
 - Multiple DISTINCT stops only → array. One stop → single string.
 - City-only duplicates of a fuller address must be dropped; keep the fuller address.
+- Do NOT put shipper location into delivery_location. Do NOT put consignee location into pickup_location.
+
+=== PICKUP / DELIVERY DATE YEAR (pickup_date AND delivery_date ONLY) ===
+- If pickup_date or delivery_date is written without a year (e.g. 06/08, 6/8, 08-06, Aug 6), you MUST add the year from the PDF.
+- Find the year from ANY place in the document: load date, document date, header date, confirmation date, issue date, or any other printed year (e.g. 8/22/2024 → year 2024).
+- Keep the original day/month as written and append that year (e.g. 06/08 → 06/08/2024).
+- If the date already includes a year, keep it as written. Do not change it.
+- If no year exists anywhere in the PDF, leave the date as written (do not invent a year).
+- This year rule applies ONLY to pickup_date and delivery_date. Do not change other fields.
 
 === WEIGHT vs CUBES vs VALUE (CRITICAL — DO NOT CONFUSE) ===
 weight:
@@ -391,6 +347,11 @@ dimention:
 
 === OTHER FIELD MAPPING ===
 - customer_order: Cust Order #, customer order, PO, PO number, customer ref (e.g. POFB...). If a PO is clearly the customer/shipper PO, put it here.
+  - ALSO put Load Number / Load # / Load No. here when present (e.g. LOAD NUMBER 159110).
+  - ALSO put a HEADER Carrier Number / Carrier # / Carrier No. / Reference Number / Reference / Ref # here when that value is in the document header (not a pickup/delivery stop ref).
+  - NEVER put a carrier COMPANY NAME (e.g. RIGHT TRACK TRANSPORT) into customer_order — only the number/id.
+  - NEVER take pickup_refrence_no or delivery_refrence_no values into customer_order; those stay in their own shipment fields.
+  - If none of these are present → customer_order = null.
 - order_notes: operational notes / special instructions only (short). Not full legal T&Cs.
 - shipment_types: GEN, FTL, LTL, import, export, mode, load type, service type when labeled (e.g. "GEN").
 - shipment_for: shipment for / booked for / purpose.
@@ -401,8 +362,10 @@ dimention:
   - NEVER put package counts, weights, dimensions, rate method, or equipment into commodity.
   - PKG / pieces / packages belong in No.OfPackage, not commodity.
   - If customer and commodity would be the same string, re-check: commodity codes are NOT customer names.
-- pickup_date / pickup_time / pickup_refrence_no: pickup side only.
-- delivery_date / delivery_time / delivery_refrence_no: delivery/consignee side; delivery refs may include consignee PO/DA when clearly for delivery.
+- pickup_date / pickup_time: pickup / shipper side only. If pickup_date has no year (e.g. 06/08), add the PDF year as in PICKUP / DELIVERY DATE YEAR.
+- pickup_refrence_no: pickup / SHIPPER reference only (Shipper Ref, PU ref, pickup reference, shipper PO/ref). Do not put this into customer_order or delivery_refrence_no.
+- delivery_date / delivery_time: delivery / consignee side only. If delivery_date has no year (e.g. 06/08), add the PDF year as in PICKUP / DELIVERY DATE YEAR.
+- delivery_refrence_no: delivery / CONSIGNEE reference only (Consignee Ref, delivery ref, drop ref, consignee PO/DA). Do not put this into customer_order or pickup_refrence_no.
 - Equipment: trailer / reefer / van / flatbed / equipment type / truck type (e.g. Van). Trailer length like "53.00 Feet" may go with Equipment if no better field; do not invent dimention LxWxH from trailer length.
 - No.OfPackage: pieces, pallets, skids, qty, packages, pcs.
 - temperature: temp / reefer set point only.
@@ -446,13 +409,13 @@ dimention:
 4. Output JSON only. No markdown. No ```json. No commentary.
 
 === SELF-CHECK BEFORE OUTPUT ===
-1. comapny is issuer/forwarder; customer is shipper/customer/Bill To — not swapped; customer is NOT the truck carrier; customer was NOT copied from pickup_location or delivery_location; customer is NOT a commodity code (e.g. ws65).
+1. No "comapny"/"company" key is present. customer follows priority only: (1) Customer Name, else (2) Bill To, else (3) logo, else (4) document header company name (e.g. PEERLESS LOGISTICS INC), else null; customer is NOT from Shipper/Consignee details; customer is NOT the truck carrier; customer was NOT copied from pickup_location or delivery_location; customer is NOT a commodity code (e.g. ws65).
 2. salesman is a real person name on the broker/issuer side when used; never a company/letterhead (e.g. not "Avaal QA"); never invent "Sr."/"Jr."; Sales codes/IDs are not salesman; null if unclear.
 3. importer is null unless explicitly labeled Importer/IOR — never invent from consignee alone.
 4. weight is mass only with unit when present (e.g. "44,000.00 LB"); multiple stop weights → array, not one summed total like only "18,858 lbs"; never bare number if unit exists; never CF/cubes; ValueOfgoods is money only — never CF/cubes/weight.
 5. Copmliancehandling is not a bare "HAZRD" label.
-6. shipment_types includes GEN/FTL/LTL when present; customer_order includes PO when present.
-7. pickup_location / delivery_location have no near-duplicate repeats.
+6. shipment_types includes GEN/FTL/LTL when present; customer_order includes PO when present, and also Load Number / header Carrier Number / header Reference Number when present (never a carrier company name).
+7. pickup_location is the shipper/pickup address; delivery_location is the consignee/delivery address; no near-duplicate repeats. pickup_refrence_no is shipper/pickup ref; delivery_refrence_no is consignee/delivery ref. pickup_date / delivery_date include a year when the PDF has one (e.g. 06/08 → 06/08/2024).
 8. dimention is only LxWxH like "32X48X24" — no 1PLT@ / DIMS prefix.
 9. Keys match the template exactly; missing values are null.
 10. Valid JSON only.
