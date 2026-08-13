@@ -259,8 +259,14 @@ Return this exact structure and these exact keys only:
 customer (single value from PDF data — pick using this priority only):
 1. FIRST: If an explicit Customer / Customer Name / Client / Account label has a name value → use that as customer.
 2. SECOND: Else if Bill To / Sold To (party name/address block) is present → use that Bill To party name as customer.
-3. THIRD: Else if the customer/company name appears in the document logo branding text in the PDF data → extract that name from the logo as customer.
-4. FOURTH: Else if a company name appears in the document HEADER (top-of-page company name block with address/phone/MC under it — e.g. "PEERLESS LOGISTICS INC" on a Dispatch Confirmation) → use that header company name as customer.
+3. THIRD (REQUIRED when 1–2 are missing): Use the TOP-LEFT / TOP HEADER LOGO company name as customer. The logo brand name IS the customer when no Customer/Bill To label exists. It does NOT need a "Customer" label.
+   - Example: Pickup Order with logo "Expeditors" (or "EXPEDITORS") at top left → customer = "Expeditors".
+   - Do NOT skip the logo name just because it is a forwarder / issuer / broker / letterhead.
+   - Do NOT leave customer null when a logo company name is clearly printed.
+4. FOURTH (REQUIRED when 1–3 are missing): Use the TOP HEADER / TOP-LEFT company name as customer. This is the large company name printed at the very top of the page, usually with address / phone / fax / MC under it. It does NOT need a "Customer" label.
+   - Example: Dispatch Confirmation with "PEERLESS LOGISTICS INC" at top left → customer = "PEERLESS LOGISTICS INC".
+   - Do NOT skip this just because it looks like a broker / issuer / letterhead / dispatch company.
+   - Do NOT leave customer null when this header company name is clearly printed.
 5. Else → customer MUST be null (blank). Prefer null over guessing.
 
 CRITICAL — where customer must NEVER come from:
@@ -272,7 +278,7 @@ CRITICAL — where customer must NEVER come from:
 - NEVER put commodity codes/SKU/product codes (e.g. "ws65") into customer.
 - NEVER put table column headers or numeric package/weight cells into customer.
 - On carrier rate confirmations, "Arranged With" is often the CARRIER. Do NOT put the carrier into customer unless that same party is also clearly Customer / Bill To under priority 1–2.
-- If none of priority 1–4 yields a clear value or confidence is low → customer = null. Do not guess.
+- If none of priority 1–4 yields a clear value → customer = null. Do not guess. Do NOT use low-confidence to skip a clear logo/header company name (e.g. Expeditors, PEERLESS LOGISTICS INC).
 
 custome_broker:
 - Use ONLY when the document explicitly labels customs broker / brokerage.
@@ -363,13 +369,19 @@ dimention:
   - PKG / pieces / packages belong in No.OfPackage, not commodity.
   - If customer and commodity would be the same string, re-check: commodity codes are NOT customer names.
 - pickup_date / pickup_time: pickup / shipper side only. If pickup_date has no year (e.g. 06/08), add the PDF year as in PICKUP / DELIVERY DATE YEAR.
-- pickup_refrence_no: pickup / SHIPPER reference only (Shipper Ref, PU ref, pickup reference, shipper PO/ref). Do not put this into customer_order or delivery_refrence_no.
+- pickup_refrence_no: ONLY the pickup / SHIPPER Ref / Reference number from the Ref column (e.g. 24069). Never put Notes / Remarks text here.
 - delivery_date / delivery_time: delivery / consignee side only. If delivery_date has no year (e.g. 06/08), add the PDF year as in PICKUP / DELIVERY DATE YEAR.
-- delivery_refrence_no: delivery / CONSIGNEE reference only (Consignee Ref, delivery ref, drop ref, consignee PO/DA). Do not put this into customer_order or pickup_refrence_no.
+- delivery_refrence_no: ONLY the delivery / CONSIGNEE Ref / Reference number from the Ref column (e.g. PT-150396). Never put Notes / Remarks text here.
 - Equipment: trailer / reefer / van / flatbed / equipment type / truck type (e.g. Van). Trailer length like "53.00 Feet" may go with Equipment if no better field; do not invent dimention LxWxH from trailer length.
 - No.OfPackage: pieces, pallets, skids, qty, packages, pcs.
 - temperature: temp / reefer set point only.
-- pickupNote / DeliveryNotes: stop-specific notes only.
+- pickupNote / DeliveryNotes (CRITICAL — NOTES vs REFERENCE):
+  - pickupNote = pickup-stop Notes AND/OR Remarks when present (e.g. "Notes: PICKUP# 24069").
+  - DeliveryNotes = delivery-stop Notes AND/OR Remarks when present (e.g. "Notes: PO# PT-150396").
+  - Notes and Remarks belong ONLY in pickupNote / DeliveryNotes. If no notes/remarks exist, leave that field null.
+  - NEVER put Notes / Remarks into pickup_refrence_no or delivery_refrence_no.
+  - pickup_refrence_no / delivery_refrence_no get ONLY the dedicated Ref / Reference value, never the Notes/Remarks line.
+  - Even if a note contains a pickup# or PO# (e.g. "PICKUP# 24069"), that full note text still goes to pickupNote / DeliveryNotes — the ref fields get only the Ref-column number.
 - Copmliancehandling: ONLY real handling requirements stated as yes/required (hazmat DG, food grade, continuous reefer, straps/load bars, etc.).
   - Do NOT copy a column label like "HAZRD" / "Hazrd Pcs" into Copmliancehandling.
   - If hazmat pieces are 0 / blank / not indicated as hazardous, leave Copmliancehandling null.
@@ -409,13 +421,13 @@ dimention:
 4. Output JSON only. No markdown. No ```json. No commentary.
 
 === SELF-CHECK BEFORE OUTPUT ===
-1. No "comapny"/"company" key is present. customer follows priority only: (1) Customer Name, else (2) Bill To, else (3) logo, else (4) document header company name (e.g. PEERLESS LOGISTICS INC), else null; customer is NOT from Shipper/Consignee details; customer is NOT the truck carrier; customer was NOT copied from pickup_location or delivery_location; customer is NOT a commodity code (e.g. ws65).
+1. No "comapny"/"company" key is present. customer follows priority only: (1) Customer Name, else (2) Bill To, else (3) TOP LOGO brand (e.g. Expeditors on a Pickup Order — do not leave null), else (4) TOP HEADER company name even without a Customer label (e.g. PEERLESS LOGISTICS INC on a Dispatch Confirmation — do not leave null), else null; customer is NOT from Shipper/Consignee details; customer is NOT the truck carrier; customer was NOT copied from pickup_location or delivery_location; customer is NOT a commodity code (e.g. ws65).
 2. salesman is a real person name on the broker/issuer side when used; never a company/letterhead (e.g. not "Avaal QA"); never invent "Sr."/"Jr."; Sales codes/IDs are not salesman; null if unclear.
 3. importer is null unless explicitly labeled Importer/IOR — never invent from consignee alone.
 4. weight is mass only with unit when present (e.g. "44,000.00 LB"); multiple stop weights → array, not one summed total like only "18,858 lbs"; never bare number if unit exists; never CF/cubes; ValueOfgoods is money only — never CF/cubes/weight.
 5. Copmliancehandling is not a bare "HAZRD" label.
 6. shipment_types includes GEN/FTL/LTL when present; customer_order includes PO when present, and also Load Number / header Carrier Number / header Reference Number when present (never a carrier company name).
-7. pickup_location is the shipper/pickup address; delivery_location is the consignee/delivery address; no near-duplicate repeats. pickup_refrence_no is shipper/pickup ref; delivery_refrence_no is consignee/delivery ref. pickup_date / delivery_date include a year when the PDF has one (e.g. 06/08 → 06/08/2024).
+7. pickup_location is the shipper/pickup address; delivery_location is the consignee/delivery address; no near-duplicate repeats. pickup_refrence_no / delivery_refrence_no are ONLY Ref-column numbers (never Notes/Remarks). pickupNote / DeliveryNotes get Notes and/or Remarks. pickup_date / delivery_date include a year when the PDF has one (e.g. 06/08 → 06/08/2024).
 8. dimention is only LxWxH like "32X48X24" — no 1PLT@ / DIMS prefix.
 9. Keys match the template exactly; missing values are null.
 10. Valid JSON only.
