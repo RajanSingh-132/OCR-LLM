@@ -59,6 +59,7 @@ SUPPORTED_IMAGE_EXTENSIONS = {
     ".tif",
     ".tiff"
 }
+SUPPORTED_WORD_EXTENSIONS = {".docx", ".doc"}
 SUPPORTED_DATA_EXTENSIONS = {".json", ".txt"}
 
 
@@ -88,6 +89,7 @@ from app.embedding_client import get_models, get_anthropic_llm, get_vision_llm, 
 from app.mongo_client import get_mongo_collection, _to_python_types
 from app.rag_retrieval import get_vectorstore
 from app.prompt import DYNAMIC_EXTRACTION_PROMPT
+from app.word_extractor import extract_text_from_word_bytes, load_word_text_and_images
 
 
 # ---------------- METADATA ----------------
@@ -449,6 +451,62 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
         return docs
 
 
+    if file_ext in SUPPORTED_WORD_EXTENSIONS:
+        if file_bytes is None:
+            with open(file_path, "rb") as f:
+                file_bytes_local = f.read()
+        else:
+            file_bytes_local = file_bytes
+
+        word_text, word_images = load_word_text_and_images(
+            file_bytes=file_bytes_local,
+            filename=source_name,
+        )
+        text_layer = (word_text or "").strip()
+        real_words = [w for w in text_layer.split() if len(w) > 1]
+
+        # Pasted order screenshots live in word/media — OCR when body text is empty/sparse.
+        ocr_text = ""
+        if word_images and (len(real_words) < 30 or not text_layer):
+            page_ocr_parts = []
+            # Cap to avoid extreme multi-icon docs; largest images first.
+            for idx, (img_name, img_data) in enumerate(word_images[:5]):
+                try:
+                    part = _extract_text_from_image(
+                        image_bytes=img_data,
+                        filename=f"{source_name}_{img_name or f'img{idx}'}",
+                        llm=llm,
+                    )
+                    if part and "NO_TEXT_FOUND" not in part.upper():
+                        page_ocr_parts.append(part)
+                except Exception as img_err:
+                    print(f"Word embedded image OCR error {source_name} img {idx}: {img_err}")
+            if page_ocr_parts:
+                ocr_text = "\n".join(page_ocr_parts).strip()
+
+        if ocr_text and len(ocr_text) >= len(text_layer):
+            final_text = ocr_text
+        else:
+            final_text = text_layer
+
+        if not final_text:
+            raise ValueError(
+                f"No readable text found in '{source_name}'. "
+                "If the Word file has a pasted order image, ensure the image is embedded "
+                "and vision OCR is configured; or export to PDF/image and re-upload."
+            )
+
+        return [
+            Document(
+                page_content=final_text,
+                metadata={
+                    "source_document": source_name,
+                    "page": 0,
+                    "file_type": file_ext,
+                },
+            )
+        ]
+
     if file_ext in SUPPORTED_IMAGE_EXTENSIONS:
         if file_bytes is not None:
             image_text = _extract_text_from_image(
@@ -762,11 +820,16 @@ def ingest_pdf_and_return_json_sync(
         file_ext = os.path.splitext(file_path)[1].lower()
         source_name = os.path.basename(file_path)
 
-    allowed_extensions = SUPPORTED_PDF_EXTENSIONS | SUPPORTED_IMAGE_EXTENSIONS | SUPPORTED_DATA_EXTENSIONS
+    allowed_extensions = (
+        SUPPORTED_PDF_EXTENSIONS
+        | SUPPORTED_IMAGE_EXTENSIONS
+        | SUPPORTED_WORD_EXTENSIONS
+        | SUPPORTED_DATA_EXTENSIONS
+    )
     if file_ext not in allowed_extensions:
         return {
             "ingestion_success": False,
-            "error": f"Only PDF, image, or data files ({', '.join(allowed_extensions)}) are supported in this endpoint."
+            "error": f"Only PDF, image, Word, or data files ({', '.join(sorted(allowed_extensions))}) are supported in this endpoint."
         }
 
     success = data_ingestion(

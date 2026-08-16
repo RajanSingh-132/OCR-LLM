@@ -73,20 +73,32 @@ async def upload_pdf_dynamic_extract(
 
     allowed_pdf = {".pdf"}
     allowed_images = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
-    allowed_extensions = allowed_pdf | allowed_images
+    allowed_word = {".docx", ".doc"}
+    allowed_extensions = allowed_pdf | allowed_images | allowed_word
 
     if file_ext not in allowed_extensions:
         logger.warning(f"Rejected upload: invalid extension '{file_ext}' for file {file.filename}")
         raise HTTPException(
             status_code=400,
-            detail=f"Only PDF or image files ({', '.join(allowed_extensions)}) are allowed."
+            detail=f"Only PDF, image, or Word files ({', '.join(sorted(allowed_extensions))}) are allowed."
         )
 
-    if file.content_type != "application/pdf" and not file.content_type.startswith("image/"):
+    content_type = (file.content_type or "").lower()
+    allowed_word_content_types = {
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/octet-stream",
+    }
+    is_pdf = content_type == "application/pdf"
+    is_image = content_type.startswith("image/")
+    is_word = file_ext in allowed_word and (
+        content_type in allowed_word_content_types or content_type == ""
+    )
+    if content_type and not (is_pdf or is_image or is_word):
         logger.warning(f"Rejected upload: invalid content-type '{file.content_type}' for file {file.filename}")
         raise HTTPException(
             status_code=400,
-            detail="Invalid content-type. Expected application/pdf or an image type."
+            detail="Invalid content-type. Expected application/pdf, an image type, or a Word document type."
         )
 
     pwd = os.path.dirname(os.path.realpath(__file__))
