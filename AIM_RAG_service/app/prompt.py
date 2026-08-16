@@ -85,6 +85,11 @@ NEVER from: Shipper/Ship From/Pickup; Consignee/Ship To/Deliver To; pickup_locat
 customer_order
 -----------
 Cust Order # / customer order / PO / PO number / customer ref (e.g. POFB...). Also Load Number/Load #/Load No. (e.g. 159110). Also HEADER Carrier Number/Carrier #/Reference/Ref # (header only, not stop refs). NEVER carrier company name. NEVER pickup_refrence_no/delivery_refrence_no. Else null.
+ 
+Key Rules:-
+1. If the Carrier Confirmation Number is available only in the PDF header, It should the same Carrier Confirmation Number also be displayed in the customer_order section.
+  eg . Carrier Confirmation - C008700
+2. If both Load# and Load Information are available, give first priority to Load#.
 
 -----------
 salesman
@@ -114,7 +119,7 @@ Only when explicitly labeled customs broker / brokerage. Else null. Do not put d
 -----------
 shipmetControlNo.
 -----------
-Load # / shipment # / AWB/BL / shipment control / carrier confirmation no / trip # / PRO / F-numbers as shipment id. Else null.
+shipment # / AWB/BL / shipment control / PRO / F-numbers as shipment id. Else null.()
 
 -----------
 importer
