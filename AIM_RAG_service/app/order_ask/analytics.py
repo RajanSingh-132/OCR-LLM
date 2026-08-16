@@ -218,6 +218,12 @@ def is_date_activity_question(question: str) -> bool:
 
 
 def is_analytics_question(question: str) -> bool:
+    try:
+        from app.order_ask.trip_analytics import is_trip_analytics_question
+
+        trip_analytics = is_trip_analytics_question(question)
+    except Exception:
+        trip_analytics = False
     return (
         is_status_summary_question(question)
         or is_best_customer_question(question)
@@ -228,6 +234,7 @@ def is_analytics_question(question: str) -> bool:
         or is_best_city_question(question)
         or is_period_orders_question(question)
         or is_trip_distance_question(question)
+        or trip_analytics
     )
 
 
@@ -405,16 +412,40 @@ def is_period_orders_question(question: str) -> bool:
 
 
 def is_trip_distance_question(question: str) -> bool:
+    """
+    Fleet-level trip/distance analytics on ORDER docs (tripno / distance fields).
+    Specific trip-DB questions (ETP / best trip / driver on trip) are handled by trip_analytics.
+    """
     q = (question or "").lower()
-    # Fleet-level trip/distance analytics (not a single-order lookup)
-    if re.search(r"\b(MRP\d+|TORD\d+)\b", q, re.I):
+    if re.search(r"\b(MRP\d+|TORD\d+|ETP\d+)\b", q, re.I):
         return False
-    return bool(
-        re.search(r"\b(trip|trips|tripno|trip\s*no)\b", q)
-        or (
-            re.search(r"\bdistance\b", q)
-            and re.search(r"\b(total|sum|how many|average|avg|all|fleet)\b", q)
+    try:
+        from app.order_ask.trip_analytics import (
+            is_best_worst_trip_question,
+            is_longest_shortest_trip_question,
+            is_trip_lookup_question,
+            is_trip_status_summary_question,
         )
+
+        if (
+            is_trip_lookup_question(question)
+            or is_best_worst_trip_question(question)
+            or is_longest_shortest_trip_question(question)
+            or is_trip_status_summary_question(question)
+        ):
+            return False
+    except Exception:
+        pass
+    # Order-fleet: total/sum/count of trips or fleet distance across orders
+    if re.search(r"\b(trip|trips|tripno|trip\s*no)\b", q) and re.search(
+        r"\b(how many|count|total|sum|average|avg|all|fleet|orders?\s+with)\b",
+        q,
+    ):
+        return True
+    return bool(
+        re.search(r"\bdistance\b", q)
+        and re.search(r"\b(total|sum|how many|average|avg|all|fleet)\b", q)
+        and not re.search(r"\btrips?\b", q)
     )
 
 

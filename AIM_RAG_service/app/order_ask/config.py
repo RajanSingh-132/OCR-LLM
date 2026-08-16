@@ -3,6 +3,7 @@ Avaal Orders Ask API — Mongo collection config.
 
 DB: same as .env DB_NAME (chatbot_db)
 Collection (ask-only): Avaal_db
+Trip collection: Avaal_trip_db
 """
 import os
 from dotenv import load_dotenv
@@ -23,6 +24,18 @@ AVAAL_DATA_DIR = os.path.join(_SERVICE_ROOT, "avaal_orders", "data")
 AVAAL_ORDERS_JSON_PATH = os.environ.get(
     "AVAAL_ORDERS_JSON_PATH",
     os.path.join(_SERVICE_ROOT, "orderdata.txt"),
+)
+
+# Trips (same DB, separate collection) — link to orders via orderid / ordernumber / orderids
+AVAAL_TRIP_COLLECTION_NAME = os.environ.get("AVAAL_TRIP_COLLECTION_NAME", "Avaal_trip_db")
+AVAAL_TRIP_NAMESPACE = os.environ.get("AVAAL_TRIP_NAMESPACE", "avaal_trips")
+AVAAL_TRIP_SOURCE_DOCUMENT = os.environ.get(
+    "AVAAL_TRIP_SOURCE_DOCUMENT",
+    "Tripdata.txt",
+)
+AVAAL_TRIPS_JSON_PATH = os.environ.get(
+    "AVAAL_TRIPS_JSON_PATH",
+    os.path.join(_SERVICE_ROOT, "Tripdata.txt"),
 )
 
 # Conversation sessions (same DB, separate collection)

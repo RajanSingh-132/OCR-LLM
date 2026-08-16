@@ -87,6 +87,11 @@ def classify_intent_local(
         is_status_summary_question,
         is_trip_distance_question,
     )
+    from app.order_ask.trip_analytics import (
+        is_trip_analytics_question,
+        is_trip_lookup_question,
+    )
+    from app.order_ask.trip_retrieval import extract_trip_token
 
     if is_date_activity_question(q):
         return {
@@ -99,6 +104,81 @@ def classify_intent_local(
             "max_tokens_hint": 400,
             "retrieve_k": 0,
             "reason": "activity_on_date",
+        }
+
+    # Trip DB questions (before order-token heuristics)
+    trip_tok = extract_trip_token(q)
+    if is_trip_analytics_question(q):
+        return {
+            "intent": "trip_analytics",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "needs_exact_trip": False,
+            "needs_trip_analytics": True,
+            "response_style": "medium",
+            "max_tokens_hint": 450,
+            "retrieve_k": 0,
+            "trip_token": trip_tok,
+            "reason": "trip_analytics",
+        }
+
+    if trip_tok or is_trip_lookup_question(q):
+        # Order + trip join: "MRP3117 ka trip" / "trip of order ..."
+        order_tok_early = extract_order_token(q)
+        if order_tok_early and re.search(r"\btrips?\b", q, re.I) and not trip_tok:
+            return {
+                "intent": "trips_for_order",
+                "needs_rag": False,
+                "needs_calculation": False,
+                "needs_exact_order": True,
+                "needs_trips_for_order": True,
+                "response_style": "detailed",
+                "max_tokens_hint": 900,
+                "retrieve_k": 0,
+                "order_token": order_tok_early,
+                "reason": "trips_for_order",
+            }
+        return {
+            "intent": "trip_lookup",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "needs_exact_trip": True,
+            "response_style": "detailed",
+            "max_tokens_hint": 1100,
+            "retrieve_k": 0,
+            "trip_token": trip_tok,
+            "reason": "exact_trip_token" if trip_tok else "trip_field_question",
+        }
+
+    # Order mention + trip word without ETP → find trips for that order
+    order_tok_trip = extract_order_token(q)
+    if order_tok_trip and re.search(r"\btrips?\b", q, re.I):
+        return {
+            "intent": "trips_for_order",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": True,
+            "needs_trips_for_order": True,
+            "response_style": "detailed",
+            "max_tokens_hint": 900,
+            "retrieve_k": 0,
+            "order_token": order_tok_trip,
+            "reason": "trips_for_order",
+        }
+
+    if re.search(r"\btrips?\b", q, re.I) and not is_trip_distance_question(q):
+        return {
+            "intent": "trip_open_qa",
+            "needs_rag": False,
+            "needs_trip_rag": True,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "response_style": "medium",
+            "max_tokens_hint": 500,
+            "retrieve_k": 6,
+            "reason": "open_trip_question",
         }
 
     token = extract_order_token(q)

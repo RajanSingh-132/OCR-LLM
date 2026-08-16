@@ -36,11 +36,21 @@ from app.order_ask.prompts import (
     ORDER_FORMULA_PROMPT,
     ORDER_GREETING_PROMPT,
     ORDERBOT_CONVERSATION_PROMPT,
+    ORDERBOT_STRUCTURED_PROMPT,
 )
 from app.order_ask.tools import execute_tools, plan_tools
 
 logger = logging.getLogger("order_ask.rag_engine")
 
+_STRUCTURED_MODES = frozenset(
+    {
+        "analytics",
+        "trip_analytics",
+        "exact_trip",
+        "calculation",
+        "trip_rag",
+    }
+)
 
 def _invoke_anthropic(
     prompt_text: str,
@@ -115,6 +125,8 @@ def answer_order_question(
     )
     if intent_info.get("order_token") and not entities.get("order_token"):
         entities["order_token"] = intent_info["order_token"]
+    if intent_info.get("trip_token") and not entities.get("trip_token"):
+        entities["trip_token"] = intent_info["trip_token"]
     timer.mark("ENTITIES_DONE", entities=entities)
 
     # Greeting / thanks: quick reply, no tools
@@ -153,7 +165,7 @@ def answer_order_question(
         }
 
     # 4) Power-user tools
-    tool_names = plan_tools(intent, entities, intent_info)
+    tool_names = plan_tools(intent, entities, intent_info, question=question)
     tool_result = execute_tools(
         tool_names,
         question=question,
@@ -173,9 +185,16 @@ def answer_order_question(
     analytics_payload = tool_result.get("analytics")
     tools_used = tool_result.get("tools_run") or []
     active_order = tool_result.get("active_order_token") or entities.get("order_token")
+    active_trip = tool_result.get("active_trip_token") or entities.get("trip_token")
 
     mode = intent
-    if "run_analytics" in tools_used:
+    if "run_trip_analytics" in tools_used:
+        mode = "trip_analytics"
+    elif "get_trip" in tools_used or "trips_for_order" in tools_used:
+        mode = "exact_trip"
+    elif "semantic_trip_rag" in tools_used:
+        mode = "trip_rag"
+    elif "run_analytics" in tools_used:
         mode = "analytics"
     elif "run_calculation" in tools_used and not matches:
         mode = "calculation"
@@ -243,9 +262,13 @@ def answer_order_question(
                 max_tokens=max_tokens,
             )
         else:
-            prompt = (
-                ORDERBOT_CONVERSATION_PROMPT if conversational else ORDER_ASK_PROMPT
-            )
+            if conversational:
+                if mode in _STRUCTURED_MODES:
+                    prompt = ORDERBOT_STRUCTURED_PROMPT
+                else:
+                    prompt = ORDERBOT_CONVERSATION_PROMPT
+            else:
+                prompt = ORDER_ASK_PROMPT
             answer = _invoke_anthropic(
                 prompt,
                 {
@@ -268,6 +291,8 @@ def answer_order_question(
     # Persist sticky entities for next turn
     sticky = dict(session.get("last_entities") or {})
     sticky.update({k: v for k, v in entities.items() if k != "from_session"})
+    if active_trip:
+        sticky["trip_token"] = active_trip
     save_turn(
         session_id,
         question,

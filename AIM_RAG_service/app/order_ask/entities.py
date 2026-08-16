@@ -46,9 +46,26 @@ def extract_entities(
     ql = q.lower()
     entities: Dict[str, Any] = {}
 
+    from app.order_ask.trip_retrieval import extract_trip_token
+
+    trip_token = extract_trip_token(q)
+    if trip_token:
+        entities["trip_token"] = trip_token
+
     token = extract_order_token(q)
+    # Don't treat ETP as order_token
+    if token and re.match(r"^ETP\d+$", str(token), re.I):
+        entities["trip_token"] = str(token).upper()
+        token = None
     if token:
         entities["order_token"] = token
+
+    if re.search(r"\btrips?\b", ql) and entities.get("order_token") and not entities.get("trip_token"):
+        entities["want_trip_for_order"] = True
+    if entities.get("trip_token") and re.search(
+        r"\b(order|orders|ordernumber|which order|kis order)\b", ql
+    ):
+        entities["want_orders_for_trip"] = True
 
     # Status
     for key, canonical in STATUS_MAP.items():
@@ -273,6 +290,13 @@ def extract_entities(
         is_trip_distance_question,
         normalize_date_prefix,
     )
+    from app.order_ask.trip_analytics import (
+        detect_distance_direction,
+        detect_trip_rank_direction,
+        is_best_worst_trip_question,
+        is_longest_shortest_trip_question,
+        is_trip_status_summary_question,
+    )
 
     date_val = extract_any_date_from_question(q)
     if not date_val:
@@ -313,6 +337,20 @@ def extract_entities(
         entities["analytics"] = "best_city"
     if is_trip_distance_question(q):
         entities["analytics"] = "trip_distance"
+    if is_best_worst_trip_question(q):
+        direction = detect_trip_rank_direction(q)
+        entities["analytics"] = "worst_trip" if direction == "worst" else "best_trip"
+        entities["trip_direction"] = direction
+        entities["limit"] = entities.get("limit") or 5
+    if is_longest_shortest_trip_question(q):
+        direction = detect_distance_direction(q)
+        entities["analytics"] = (
+            "shortest_trip" if direction == "shortest" else "longest_trip"
+        )
+        entities["distance_direction"] = direction
+        entities["limit"] = entities.get("limit") or 5
+    if is_trip_status_summary_question(q):
+        entities["analytics"] = "trip_status_summary"
 
     # Sort / best / highest amount
     if re.search(r"\b(best|highest|max|top|largest|most)\b.*\b(amount|freight|revenue|tax|distance)\b", ql) or re.search(
@@ -372,7 +410,10 @@ def extract_entities(
             entities["best_customer_metric"] = "orders"
 
     if re.search(r"\bstatus\b.*\b(summary|break|count|how many)\b|\b(summary)\b.*\bstatus\b", ql):
-        entities["analytics"] = "status_summary"
+        if re.search(r"\btrips?\b", ql):
+            entities["analytics"] = "trip_status_summary"
+        else:
+            entities["analytics"] = "status_summary"
     elif re.search(
         r"\b(how many|count)\b.*\b(quoted|cancelled|canceled|confirmed|dispatched|delivered|invoiced)\b",
         ql,
@@ -380,10 +421,14 @@ def extract_entities(
         r"\b(quoted|cancelled|canceled|confirmed|dispatched|delivered|invoiced)\b.*\b(how many|count)\b",
         ql,
     ):
-        entities["analytics"] = "status_summary"
+        if re.search(r"\btrips?\b", ql):
+            entities["analytics"] = "trip_status_summary"
+        else:
+            entities["analytics"] = "status_summary"
 
     # Follow-up pronouns → reuse session
     sticky = session_entities or {}
+    session_trip_token = sticky.get("trip_token")
     follow_up = bool(
         re.search(
             r"\b(that|this|same|it|its|uska|uski|uske|wo|woh|previous|again)\b",
@@ -396,7 +441,23 @@ def extract_entities(
                 r"\b(status|tax|freight|detail|details|info|amount|customer|delivery|pickup|distance|location)\b",
                 ql,
             ):
-                entities["order_token"] = session_order_token
+                # Prefer trip sticky if follow-up is trip-flavored
+                if session_trip_token and re.search(
+                    r"\b(trip|driver|truck|etp)\b", ql
+                ):
+                    entities["trip_token"] = session_trip_token
+                    entities["from_session"] = True
+                else:
+                    entities["order_token"] = session_order_token
+                    entities["from_session"] = True
+
+    if not entities.get("trip_token") and session_trip_token:
+        if follow_up or re.search(
+            r"\b(trip|driver|truck|status|distance|customer|country)\b",
+            ql,
+        ):
+            if follow_up or re.search(r"\btrips?\b", ql):
+                entities["trip_token"] = session_trip_token
                 entities["from_session"] = True
 
     if follow_up:
