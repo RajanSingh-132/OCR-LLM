@@ -923,13 +923,121 @@ async def ingest_pdf_and_return_json_async(
 
 # ---------------- DYNAMIC PDF & IMAGE JSON EXTRACTION ----------------
 
+def _is_invalid_commodity_value(value) -> bool:
+    """True when commodity is clearly package/weight text, not a product description."""
+    if value is None:
+        return False
+    if isinstance(value, list):
+        return any(_is_invalid_commodity_value(v) for v in value)
+    text = str(value).strip().lower()
+    if not text:
+        return False
+    # pcs / packages / pallets with optional weight — classic false commodity
+    if re.search(
+        r"\b\d+(\.\d+)?\s*(pcs?|pieces?|pkgs?|packages?|pallets?|skids?|qty)\b",
+        text,
+    ):
+        return True
+    if re.search(r"\b\d+([.,]\d+)?\s*(lbs?|lb|kg|kgs|pounds?)\b", text) and not re.search(
+        r"[a-zA-Z]{3,}",
+        re.sub(r"\b(lbs?|lb|kg|kgs|pounds?|pcs?|pieces?|and|,)\b", " ", text),
+    ):
+        # mostly numbers + mass units, no real product words
+        return True
+    if re.search(r"\bpcs?\b", text) and re.search(r"\b(lbs?|lb|kg)\b", text):
+        return True
+    return False
+
+
+def _sanitize_extracted_commodity(parsed):
+    """Null invalid commodity only; leave every other field unchanged."""
+    if not isinstance(parsed, dict):
+        return parsed
+    shipment = parsed.get("shipment")
+    if isinstance(shipment, dict) and "commodity" in shipment:
+        if _is_invalid_commodity_value(shipment.get("commodity")):
+            shipment["commodity"] = None
+    if "commodity" in parsed and _is_invalid_commodity_value(parsed.get("commodity")):
+        parsed["commodity"] = None
+    return parsed
+
+
+def _parse_llm_json_response(text_response: str):
+    """
+    Parse LLM output into a real JSON object (not a string with \\n escapes).
+    Falls back to raw_extracted_text only if parsing truly fails.
+    """
+    cleaned = (text_response or "").strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    elif cleaned.startswith("```"):
+        cleaned = cleaned[3:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
+
+    # Strip a leading/trailing quoted JSON blob
+    if (cleaned.startswith('"') and cleaned.endswith('"')) or (
+        cleaned.startswith("'") and cleaned.endswith("'")
+    ):
+        try:
+            maybe = json.loads(cleaned)
+            if isinstance(maybe, str):
+                cleaned = maybe.strip()
+        except json.JSONDecodeError:
+            pass
+
+    candidates = [cleaned]
+    # Extract outermost object/array if prose surrounds JSON
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start = cleaned.find(opener)
+        end = cleaned.rfind(closer)
+        if start != -1 and end != -1 and end > start:
+            snippet = cleaned[start : end + 1].strip()
+            if snippet not in candidates:
+                candidates.append(snippet)
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            # If model returned a JSON string of JSON, unwrap once
+            if isinstance(parsed, str):
+                inner = parsed.strip()
+                try:
+                    parsed = json.loads(inner)
+                except json.JSONDecodeError:
+                    pass
+            if isinstance(parsed, (dict, list)):
+                if isinstance(parsed, dict):
+                    return _sanitize_extracted_commodity(parsed)
+                return parsed
+        except json.JSONDecodeError:
+            continue
+
+    # Last resort: NDJSON lines
+    try:
+        result = []
+        for line in cleaned.split("\n"):
+            line = line.strip()
+            if line:
+                result.append(json.loads(line))
+        if result:
+            out = result if len(result) > 1 else result[0]
+            if isinstance(out, dict):
+                return _sanitize_extracted_commodity(out)
+            return out
+    except json.JSONDecodeError:
+        pass
+
+    return {"raw_extracted_text": text_response}
+
+
 def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = None, filename: str = None):
     """Extract key-value pairs from a PDF or image as JSON.
     Reads text DIRECTLY from the file — does NOT trigger embedding or MongoDB.
     Embedding/storage is handled separately by the background task.
     This makes the function fast and Vercel-compatible.
     """
-    import json
     try:
         if file_bytes is not None and filename is not None:
             source_name = filename
@@ -1001,29 +1109,7 @@ def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = 
             print("PDF dynamic extract: used Anthropic LLM (fallback)")
 
         text_response = response.content if hasattr(response, "content") else str(response)
-
-        cleaned = text_response.strip()
-        if cleaned.startswith("```json"):
-            cleaned = cleaned[7:]
-        elif cleaned.startswith("```"):
-            cleaned = cleaned[3:]
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]
-
-        try:
-            return json.loads(cleaned.strip())
-        except json.JSONDecodeError:
-            try:
-                result = []
-                for line in cleaned.strip().split('\n'):
-                    line = line.strip()
-                    if line:
-                        result.append(json.loads(line))
-                if result:
-                    return result
-            except json.JSONDecodeError:
-                pass
-            return {"raw_extracted_text": text_response}
+        return _parse_llm_json_response(text_response)
     except Exception as e:
         print("Failed to dynamically extract JSON:", str(e))
         return {"error": str(e)}

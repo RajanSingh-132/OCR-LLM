@@ -134,7 +134,21 @@ Only if labeled return / return load / round trip / backhaul. Else null.
 -----------
 commodity
 -----------
-Commodity-column VALUE only (e.g. COSMETICS, pet food, ws65) — not header PKG/Weight/LxBxH/Equipment/Rate Method/Reefer/ValueOfGoods. Never packages/weights/dims/rate/equipment here (PKG → No.OfPackage). Commodity codes are not customer names. Else null.
+STRICT — commodity is NOT packages and NOT weight.
+Keep commodity ONLY when the PDF has an explicit goods/product label such as:
+Commodity / Commodity Description / Description of Goods / Product / Cargo / Freight Description
+and the VALUE is a real product name/code (e.g. COSMETICS, pet food, ws65, FAK, General Freight).
+
+FORBIDDEN for commodity (always null if value looks like these):
+- Any pcs/pieces/pkg/packages/pallets/skids/qty text: "4 pcs", "4 pcs, 4624 lbs", "2 pallets"
+- Any weight/mass text: lbs, lb, kg, pounds, "4624 lbs", "44000 LB"
+- Mixing No.OfPackage + weight into one string
+- Copying No.OfPackage or weight fields into commodity
+- Table headers PKG / Weight / LxBxH / Equipment / Rate / ValueOfGoods
+- Inventing commodity when the document has none
+
+If commodity is missing or unclear → null. Prefer null over "4 pcs, 4624 lbs" or any similar guess.
+No.OfPackage gets pcs/qty; weight gets mass+unit. Commodity stays separate or null.
 
 -----------
 pickup_location
@@ -159,7 +173,11 @@ ONLY pickup/SHIPPER Ref-column number (e.g. 24069). NEVER Notes/Remarks/pickupNo
 -----------
 distance
 -----------
-Distance / miles / mileage / mi / km / kilometers / total miles / trip distance. Else null.
+Priority (use first match):
+1) Total Distance / Total Miles / Trip Distance (summary/header total) — e.g. "Total Distance: 398.38 Miles" → "398.38 Miles". Keep number + unit as written.
+2) else labeled Distance / Miles / Mileage / mi / km / kilometers when it is the overall trip total (not a per-stop line).
+NEVER use per-stop L Distance / E Distance / Loaded Distance / Empty Distance alone when Total Distance exists (e.g. do not take "L Distance: 0.00 Miles" if Total Distance is 398.38 Miles).
+If only one overall distance is printed, use that. Else null.
 
 -----------
 delivery_location
@@ -240,7 +258,7 @@ Example Freight 3736.00 + Fuel 30.00:
 No money/rate → exactly [{{"ratemethod":"Flat","rate_method_value":null,"total_value":null}}]. Never []. Do not invent fuel if no fuel line.
 
 === SELF-CHECK ===
-No company key. customer priority 1–4 ok; not shipper/consignee/carrier/locations/commodity. salesman=person only. importer only if labeled IOR. weight=mass+unit/array; ValueOfgoods=money; dimention=LxWxH only; refs=Ref only; notes≠refs; commodity=value not header; fuel uses fuel* keys only. Valid JSON only.
+No company key. customer priority 1–4 ok; not shipper/consignee/carrier/locations. salesman=person only. importer only if labeled IOR. weight=mass+unit/array; ValueOfgoods=money; dimention=LxWxH only; refs=Ref only; notes≠refs; commodity MUST NOT be pcs/weight (e.g. never "4 pcs, 4624 lbs" — use null); fuel uses fuel* keys only. Valid JSON only.
 
 DOCUMENT TEXT:
 {text}
