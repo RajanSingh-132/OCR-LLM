@@ -13,6 +13,8 @@ _anthropic_llm_cache = None
 
 # Read env vars
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+# Text LLM for PDF/Word dynamic JSON extract (llama-3.3-70b-versatile retired on Groq)
+GROQ_LLM_MODEL = os.environ.get("GROQ_LLM_MODEL", "openai/gpt-oss-120b")
 GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
 GROQ_VISION_FALLBACK_MODELS = os.environ.get(
     "GROQ_VISION_FALLBACK_MODELS",
@@ -44,15 +46,24 @@ def get_models():
             model_kwargs={"dimensions": 1024}
         )
 
-        # Initialize Groq LLM
+        # Initialize Groq text LLM (PDF dynamic extract)
         if not GROQ_API_KEY:
             raise ValueError("GROQ_API_KEY is not set. Please add it to your .env file.")
 
-        llm = ChatGroq(
-            model="llama-3.3-70b-versatile",
-            groq_api_key=GROQ_API_KEY,
-            temperature=0.0,
-        )
+        # gpt-oss models can spend tokens on reasoning and truncate JSON —
+        # raise max_tokens and keep reasoning low so full extract fits.
+        groq_kwargs = {
+            "model": GROQ_LLM_MODEL,
+            "groq_api_key": GROQ_API_KEY,
+            "temperature": 0.0,
+            "max_tokens": int(os.environ.get("GROQ_LLM_MAX_TOKENS", "8192")),
+        }
+        if "gpt-oss" in (GROQ_LLM_MODEL or "").lower():
+            groq_kwargs["reasoning_effort"] = os.environ.get(
+                "GROQ_REASONING_EFFORT", "low"
+            )
+
+        llm = ChatGroq(**groq_kwargs)
 
         _embeddings_cache = embeddings
         _llm_cache = llm

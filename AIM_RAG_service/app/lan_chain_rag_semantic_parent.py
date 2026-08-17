@@ -189,7 +189,7 @@ def _extract_text_from_image(image_path: str = None, image_bytes: bytes = None, 
         )
 
         # Always use a dedicated vision LLM for multimodal image input.
-        # The generic `llm` parameter is text-only (llama-3.3-70b) and does not accept
+        # The generic `llm` parameter is text-only (Groq text model) and does not accept
         # list-style content, which would raise: "messages[0].content must be a string".
         last_error = None
         response = None
@@ -965,7 +965,8 @@ def _sanitize_extracted_commodity(parsed):
 def _parse_llm_json_response(text_response: str):
     """
     Parse LLM output into a real JSON object (not a string with \\n escapes).
-    Falls back to raw_extracted_text only if parsing truly fails.
+    Prefers the full extraction dict; never returns a nested scalar array
+    like ["0.000","0.000"] from shipment.weight when the outer object truncates.
     """
     cleaned = (text_response or "").strip()
     if cleaned.startswith("```json"):
@@ -987,46 +988,64 @@ def _parse_llm_json_response(text_response: str):
         except json.JSONDecodeError:
             pass
 
-    candidates = [cleaned]
-    # Extract outermost object/array if prose surrounds JSON
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start = cleaned.find(opener)
-        end = cleaned.rfind(closer)
-        if start != -1 and end != -1 and end > start:
-            snippet = cleaned[start : end + 1].strip()
-            if snippet not in candidates:
-                candidates.append(snippet)
+    def _looks_like_extract(obj) -> bool:
+        if isinstance(obj, dict):
+            return any(
+                k in obj
+                for k in ("customerinfo", "shipment", "Revenue", "raw_extracted_text", "error")
+            )
+        return False
 
-    for candidate in candidates:
+    def _try_load(candidate: str):
         try:
             parsed = json.loads(candidate)
-            # If model returned a JSON string of JSON, unwrap once
-            if isinstance(parsed, str):
-                inner = parsed.strip()
-                try:
-                    parsed = json.loads(inner)
-                except json.JSONDecodeError:
-                    pass
-            if isinstance(parsed, (dict, list)):
-                if isinstance(parsed, dict):
-                    return _sanitize_extracted_commodity(parsed)
-                return parsed
         except json.JSONDecodeError:
-            continue
+            return None
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed.strip())
+            except json.JSONDecodeError:
+                return None
+        return parsed
 
-    # Last resort: NDJSON lines
+    # 1) Prefer full text / outermost object {...}
+    dict_candidates = [cleaned]
+    obj_start = cleaned.find("{")
+    obj_end = cleaned.rfind("}")
+    if obj_start != -1 and obj_end != -1 and obj_end > obj_start:
+        snippet = cleaned[obj_start : obj_end + 1].strip()
+        if snippet not in dict_candidates:
+            dict_candidates.append(snippet)
+
+    for candidate in dict_candidates:
+        parsed = _try_load(candidate)
+        if isinstance(parsed, dict):
+            return _sanitize_extracted_commodity(parsed)
+
+    # 2) Only accept top-level arrays that look like a list of extract objects
+    arr_start = cleaned.find("[")
+    arr_end = cleaned.rfind("]")
+    if arr_start != -1 and arr_end != -1 and arr_end > arr_start:
+        parsed = _try_load(cleaned[arr_start : arr_end + 1].strip())
+        if isinstance(parsed, list) and parsed and all(isinstance(x, dict) for x in parsed):
+            if any(_looks_like_extract(x) for x in parsed):
+                return [_sanitize_extracted_commodity(x) for x in parsed]
+            # list of dicts but not our schema — still return first dict if keys look useful
+            return parsed
+
+    # 3) NDJSON lines (dict lines only)
     try:
         result = []
         for line in cleaned.split("\n"):
-            line = line.strip()
-            if line:
-                result.append(json.loads(line))
+            line = line.strip().rstrip(",")
+            if not line or not line.startswith("{"):
+                continue
+            parsed = _try_load(line)
+            if isinstance(parsed, dict):
+                result.append(_sanitize_extracted_commodity(parsed))
         if result:
-            out = result if len(result) > 1 else result[0]
-            if isinstance(out, dict):
-                return _sanitize_extracted_commodity(out)
-            return out
-    except json.JSONDecodeError:
+            return result if len(result) > 1 else result[0]
+    except Exception:
         pass
 
     return {"raw_extracted_text": text_response}
@@ -1099,7 +1118,14 @@ def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = 
                     "connecttimeout",
                 )
             )
-            if not (is_rate_limit or is_connection_error):
+            # Model retired / renamed / no access → keep extract flow alive via Anthropic
+            is_model_unavailable = (
+                "model_not_found" in err_text
+                or "does not exist" in err_text
+                or "do not have access" in err_text
+                or ("404" in err_text and "model" in err_text)
+            )
+            if not (is_rate_limit or is_connection_error or is_model_unavailable):
                 raise
             print(
                 f"PDF dynamic extract: Groq unavailable ({groq_exc}); falling back to Anthropic."
