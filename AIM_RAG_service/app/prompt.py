@@ -59,7 +59,21 @@ Return this exact structure and these exact keys only:
 2. Top-level exactly: customerinfo, shipment, Revenue.
 3. Keep spellings: custome_broker, shipmetControlNo., dimention, Copmliancehandling, fluecurrencyTypes, fuelratemethod, fuel_rate_method_value, fuel_total_value.
 4. Do NOT output "comapny"/"company".
-5. One value → string; multiple distinct → array. Do not merge stops into one string. Do not sum weights.
+5. One value → string. Multiple PICKUP/DELIVERY STOPS → array of address strings inside that field. Do not merge stops into one string. Do not sum weights.
+6. MULTIPLE COMMODITIES → split shipment into an ARRAY of objects (see MULTI-COMMODITY SHIPMENT). Never put 2+ commodities in one commodity array inside a single shipment object.
+
+=== MULTI-COMMODITY SHIPMENT (CRITICAL) ===
+Count distinct product/commodity line items on the PDF.
+- 0 or 1 commodity → "shipment" is ONE object (template above). commodity is a string or null. Never a 1-item array.
+- 2 or more distinct commodities → "shipment" MUST be an ARRAY of objects. Length = number of commodities. Each object uses the SAME keys as the shipment template.
+
+Each array item:
+- commodity: THAT row's product only (string). Never an array. Never packages/weight.
+- No.OfPackage / weight / dimention: THAT row's values only (string or null). Never copy another row's dim/weight. If that row has no dim/weight/qty → null. Do not put leftover dims into an array on one object.
+- Shared load fields — COPY THE SAME VALUE onto every item: pickup_location, pickup_date, pickup_time, pickup_refrence_no, distance, delivery_location, delivery_date, delivery_time, delivery_refrence_no, ValueOfgoods, Equipment, temperature, pickupNote, DeliveryNotes, Copmliancehandling.
+- customerinfo and Revenue stay ONE object each (do not split).
+
+Example: 4 commodities + 3 dims + one shared pickup/delivery → 4 shipment objects; 4th dimention null; pickup/delivery/notes repeated on all 4.
 
 === SHARED DATE YEAR RULE (pickup_date & delivery_date ONLY) ===
 If date has no year (06/08, 6/8, 08-06, Aug 6): append year found anywhere in PDF (load/header/doc/confirmation date, e.g. 8/22/2024 → 2024) → 06/08/2024.
@@ -149,6 +163,7 @@ FORBIDDEN for commodity (always null if value looks like these):
 
 If commodity is missing or unclear → null. Prefer null over "4 pcs, 4624 lbs" or any similar guess.
 No.OfPackage gets pcs/qty; weight gets mass+unit. Commodity stays separate or null.
+TWO OR MORE distinct commodities (e.g. "91272 – VHT", "91862 – 385k Oilfield Boiler", "91862-100 – Field install crate", "Food Grade Glycol") → do NOT put them in shipment.commodity as an array. Split into shipment[0], shipment[1], ... each with commodity as a string and all other shipment keys present.
 
 -----------
 pickup_location
@@ -212,12 +227,12 @@ Trailer / reefer / van / flatbed / equipment / truck type (e.g. Van). Trailer le
 -----------
 No.OfPackage
 -----------
-Pieces / pallets / skids / qty / packages / pcs (not commodity). Else null.
+Pieces / pallets / skids / qty / packages / pcs (not commodity). One commodity → string. Multiple commodities with per-line qty → that row's string on that shipment object. Else null.
 
 -----------
 weight
 -----------
-Mass only (Weight/Gross/Total, lbs/LB/kg/pounds; e.g. "4 pcs, 4624 lbs", "44,000.00 LB"). Keep unit with number when present — never bare "4624" if unit exists. No unit printed → keep number as written. Multiple stop/line weights → array of strings with units; do NOT use grand total/sum when per-stop weights exist; never sum yourself. One weight → single string. Pickup order Pieces/Weight → No.OfPackage + weight with unit (e.g. "362 L"/"362 lbs"). NEVER CF/CFT/cubes/volume or DIMS-only into weight. Unclear → null.
+Mass only (Weight/Gross/Total, lbs/LB/kg/pounds; e.g. "4 pcs, 4624 lbs", "44,000.00 LB"). Keep unit with number when present — never bare "4624" if unit exists. No unit printed → keep number as written. One commodity + one weight → string. Multiple commodities with per-line weights → each shipment object's weight is that line's string (not an array on one shipment). One document total only (no per-line weights) → put that same total string on every shipment object; never sum yourself. Pickup order Pieces/Weight → No.OfPackage + weight with unit (e.g. "362 L"/"362 lbs"). NEVER CF/CFT/cubes/volume or DIMS-only into weight. Unclear → null.
 
 -----------
 temperature
@@ -227,7 +242,7 @@ Temp / reefer set point only. Else null.
 -----------
 dimention
 -----------
-ONLY LxWxH like "32X48X24" (normalize 32x48x24 / 32 X 48 X 24 → "32X48X24"). From "DIMS (INS): 1PLT@32X48X24" keep "32X48X24" only — drop 1PLT@/PLT@/pallet/DIMS/INS. Pieces/pallets → No.OfPackage. CF/volume not LxWxH (prefer null over mixing). Labels: dimension/dimensions/length/width/height/DIMS/size. Else null.
+ONLY LxWxH like "32X48X24" (normalize 32x48x24 / 32 X 48 X 24 → "32X48X24"). From "DIMS (INS): 1PLT@32X48X24" keep "32X48X24" only — drop 1PLT@/PLT@/pallet/DIMS/INS. Pieces/pallets → No.OfPackage. CF/volume not LxWxH (prefer null over mixing). Labels: dimension/dimensions/length/width/height/DIMS/size. One commodity + one dim → string. Multiple commodities → each shipment object's dimention is that row's LxWxH string or null (do not collect leftover dims as an array on one shipment). Else null.
 
 -----------
 pickupNote
@@ -258,7 +273,7 @@ Example Freight 3736.00 + Fuel 30.00:
 No money/rate → exactly [{{"ratemethod":"Flat","rate_method_value":null,"total_value":null}}]. Never []. Do not invent fuel if no fuel line.
 
 === SELF-CHECK ===
-No company key. customer priority 1–4 ok; not shipper/consignee/carrier/locations. salesman=person only. importer only if labeled IOR. weight=mass+unit/array; ValueOfgoods=money; dimention=LxWxH only; refs=Ref only; notes≠refs; commodity MUST NOT be pcs/weight (e.g. never "4 pcs, 4624 lbs" — use null); fuel uses fuel* keys only. Valid JSON only.
+No company key. customer priority 1–4 ok; not shipper/consignee/carrier/locations. salesman=person only. importer only if labeled IOR. weight=mass+unit; ValueOfgoods=money; dimention=LxWxH only; refs=Ref only; notes≠refs; commodity MUST NOT be pcs/weight (e.g. never "4 pcs, 4624 lbs" — use null). 2+ commodities → shipment is an array of full objects (not commodity:[] inside one object). fuel uses fuel* keys only. Valid JSON only.
 
 DOCUMENT TEXT:
 {text}

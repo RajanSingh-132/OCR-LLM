@@ -949,14 +949,130 @@ def _is_invalid_commodity_value(value) -> bool:
     return False
 
 
-def _sanitize_extracted_commodity(parsed):
-    """Null invalid commodity only; leave every other field unchanged."""
+_SHIPMENT_FIELD_KEYS = (
+    "commodity",
+    "pickup_location",
+    "pickup_date",
+    "pickup_time",
+    "pickup_refrence_no",
+    "distance",
+    "delivery_location",
+    "delivery_date",
+    "delivery_time",
+    "delivery_refrence_no",
+    "ValueOfgoods",
+    "Equipment",
+    "No.OfPackage",
+    "weight",
+    "temperature",
+    "dimention",
+    "pickupNote",
+    "DeliveryNotes",
+    "Copmliancehandling",
+)
+
+_SHIPMENT_LINE_KEYS = ("commodity", "No.OfPackage", "weight", "dimention")
+
+
+def _fill_shipment_keys(row: dict) -> dict:
+    """Keep every shipment field present; do not drop keys."""
+    out = {}
+    for key in _SHIPMENT_FIELD_KEYS:
+        out[key] = row.get(key, None) if isinstance(row, dict) else None
+    return out
+
+
+def _sanitize_one_shipment(row: dict) -> dict:
+    filled = _fill_shipment_keys(row if isinstance(row, dict) else {})
+    commodity = filled.get("commodity")
+    if isinstance(commodity, list):
+        if len(commodity) == 1:
+            filled["commodity"] = commodity[0]
+        elif len(commodity) == 0:
+            filled["commodity"] = None
+    if _is_invalid_commodity_value(filled.get("commodity")):
+        filled["commodity"] = None
+    return filled
+
+
+def _zip_line_value(value, index: int, *, copy_scalar: bool):
+    """Map a field onto shipment row i. Lists zip by index; missing → None."""
+    if isinstance(value, list):
+        if index < len(value):
+            item = value[index]
+            return None if item in ("", []) else item
+        return None
+    if value in (None, "", []):
+        return None
+    return value if copy_scalar else (value if index == 0 else None)
+
+
+def _split_shipment_by_commodity_list(shipment: dict) -> list:
+    commodities = [c for c in shipment.get("commodity") or [] if c not in (None, "")]
+    rows = []
+    for i, commodity in enumerate(commodities):
+        row = {}
+        for key in _SHIPMENT_FIELD_KEYS:
+            if key == "commodity":
+                row[key] = commodity
+            elif key in _SHIPMENT_LINE_KEYS:
+                # Per-line lists zip. A single document total (string) is copied to every row.
+                row[key] = _zip_line_value(
+                    shipment.get(key), i, copy_scalar=True
+                )
+            else:
+                row[key] = shipment.get(key)
+        rows.append(_sanitize_one_shipment(row))
+    return rows
+
+
+def _normalize_extracted_shipment(parsed: dict) -> dict:
+    """
+    1 commodity → shipment object.
+    2+ commodities → shipment array of full objects.
+    If the model still returns one object with commodity:[...], split it here.
+    """
     if not isinstance(parsed, dict):
         return parsed
     shipment = parsed.get("shipment")
-    if isinstance(shipment, dict) and "commodity" in shipment:
-        if _is_invalid_commodity_value(shipment.get("commodity")):
-            shipment["commodity"] = None
+
+    if isinstance(shipment, list):
+        if (
+            len(shipment) == 1
+            and isinstance(shipment[0], dict)
+            and isinstance(shipment[0].get("commodity"), list)
+            and len([c for c in shipment[0].get("commodity") or [] if c not in (None, "")]) > 1
+        ):
+            parsed["shipment"] = _split_shipment_by_commodity_list(shipment[0])
+            return parsed
+        parsed["shipment"] = [
+            _sanitize_one_shipment(item)
+            for item in shipment
+            if isinstance(item, dict)
+        ]
+        if len(parsed["shipment"]) == 1:
+            parsed["shipment"] = parsed["shipment"][0]
+        elif not parsed["shipment"]:
+            parsed["shipment"] = _fill_shipment_keys({})
+        return parsed
+
+    if not isinstance(shipment, dict):
+        return parsed
+
+    commodity = shipment.get("commodity")
+    if isinstance(commodity, list) and len([c for c in commodity if c not in (None, "")]) > 1:
+        parsed["shipment"] = _split_shipment_by_commodity_list(shipment)
+        return parsed
+
+    parsed["shipment"] = _sanitize_one_shipment(shipment)
+    return parsed
+
+
+def _sanitize_extracted_commodity(parsed):
+    """Null invalid commodity; split multi-commodity shipment arrays."""
+    if not isinstance(parsed, dict):
+        return parsed
+    parsed = _normalize_extracted_shipment(parsed)
     if "commodity" in parsed and _is_invalid_commodity_value(parsed.get("commodity")):
         parsed["commodity"] = None
     return parsed
