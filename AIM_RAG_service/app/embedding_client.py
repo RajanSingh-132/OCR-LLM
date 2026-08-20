@@ -50,13 +50,13 @@ def get_models():
         if not GROQ_API_KEY:
             raise ValueError("GROQ_API_KEY is not set. Please add it to your .env file.")
 
-        # gpt-oss models can spend tokens on reasoning and truncate JSON —
-        # raise max_tokens and keep reasoning low so full extract fits.
+        # Free-tier TPM for gpt-oss is ~8000. Requested tokens ≈ input + max_tokens,
+        # so keep max_tokens modest or Groq 413's and we waste Anthropic fallback.
         groq_kwargs = {
             "model": GROQ_LLM_MODEL,
             "groq_api_key": GROQ_API_KEY,
             "temperature": 0.0,
-            "max_tokens": int(os.environ.get("GROQ_LLM_MAX_TOKENS", "8192")),
+            "max_tokens": int(os.environ.get("GROQ_LLM_MAX_TOKENS", "2500")),
         }
         if "gpt-oss" in (GROQ_LLM_MODEL or "").lower():
             groq_kwargs["reasoning_effort"] = os.environ.get(

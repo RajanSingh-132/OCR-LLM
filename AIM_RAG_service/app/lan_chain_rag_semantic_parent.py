@@ -1196,36 +1196,55 @@ def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = 
         if not full_text:
             return {"error": f"No text could be extracted from '{source_name}'. The file may be corrupted or empty."}
 
-        # Use Groq LLM to dynamically extract all key-value pairs as a flat JSON object.
-        # On Groq rate-limit / connection failure → same prompt/flow with Anthropic fallback.
+        # Prefer Groq. Free-tier TPM (~8000) counts input + max_tokens, so keep both lean.
+        # Anthropic only after Groq truly cannot serve (after shrink retries).
         _, llm = get_models()
         prompt = PromptTemplate.from_template(DYNAMIC_EXTRACTION_PROMPT)
-        extract_vars = {"text": full_text[:12000]}
-        try:
-            response = (prompt | llm).invoke(extract_vars)
-            print("PDF dynamic extract: used Groq LLM")
-        except Exception as groq_exc:
-            err_text = str(groq_exc).lower()
-            err_type = type(groq_exc).__name__.lower()
-            is_rate_limit = (
-                "429" in err_text
-                or "rate limit" in err_text
-                or "rate_limit" in err_text
-                or "too many requests" in err_text
-                or err_type in (
+
+        # ~chars/4 ≈ tokens. Leave room for large system prompt + max_tokens under 8000 TPM.
+        groq_doc_chars = int(os.environ.get("GROQ_EXTRACT_DOC_CHARS", "6000"))
+        groq_max_tokens = int(os.environ.get("GROQ_LLM_MAX_TOKENS", "2500"))
+        extract_vars = {"text": full_text[:groq_doc_chars]}
+
+        def _invoke_groq(text_vars: dict, max_out: int):
+            try:
+                llm_bound = llm.bind(max_tokens=max(256, int(max_out)))
+            except Exception:
+                llm_bound = llm
+            return (prompt | llm_bound).invoke(text_vars)
+
+        def _is_request_too_large(exc: Exception) -> bool:
+            err = str(exc).lower()
+            return (
+                "413" in err
+                or "request too large" in err
+                or "tokens per minute" in err
+                or ("requested" in err and "limit" in err and "token" in err)
+            )
+
+        def _is_transient_groq(exc: Exception) -> bool:
+            err = str(exc).lower()
+            err_type = type(exc).__name__.lower()
+            return (
+                "429" in err
+                or "rate limit" in err
+                or "rate_limit" in err
+                or "too many requests" in err
+                or "connection error" in err
+                or "connection" in err
+                or "timeout" in err
+                or "timed out" in err
+                or "temporarily unavailable" in err
+                or "service unavailable" in err
+                or "network" in err
+                or "model_not_found" in err
+                or "does not exist" in err
+                or "do not have access" in err
+                or ("404" in err and "model" in err)
+                or err_type
+                in (
                     "ratelimiterror",
                     "ratelimitederror",
-                )
-            )
-            is_connection_error = (
-                "connection error" in err_text
-                or "connection" in err_text
-                or "timeout" in err_text
-                or "timed out" in err_text
-                or "temporarily unavailable" in err_text
-                or "service unavailable" in err_text
-                or "network" in err_text
-                or err_type in (
                     "apiconnectionerror",
                     "connecterror",
                     "connectionerror",
@@ -1234,21 +1253,58 @@ def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = 
                     "connecttimeout",
                 )
             )
-            # Model retired / renamed / no access → keep extract flow alive via Anthropic
-            is_model_unavailable = (
-                "model_not_found" in err_text
-                or "does not exist" in err_text
-                or "do not have access" in err_text
-                or ("404" in err_text and "model" in err_text)
-            )
-            if not (is_rate_limit or is_connection_error or is_model_unavailable):
-                raise
+
+        response = None
+        try:
+            response = _invoke_groq(extract_vars, groq_max_tokens)
             print(
-                f"PDF dynamic extract: Groq unavailable ({groq_exc}); falling back to Anthropic."
+                f"PDF dynamic extract: used Groq LLM "
+                f"(doc_chars={len(extract_vars['text'])}, max_tokens={groq_max_tokens})"
             )
-            anthropic_llm = get_anthropic_llm()
-            response = (prompt | anthropic_llm).invoke(extract_vars)
-            print("PDF dynamic extract: used Anthropic LLM (fallback)")
+        except Exception as groq_exc:
+            # Size/TPM: shrink payload and retry on Groq before Anthropic
+            if _is_request_too_large(groq_exc):
+                shrink_plan = [
+                    (max(2000, groq_doc_chars // 2), max(1200, groq_max_tokens // 2)),
+                    (max(1500, groq_doc_chars // 3), 1200),
+                    (1200, 1000),
+                ]
+                last_exc = groq_exc
+                for chars, max_out in shrink_plan:
+                    try:
+                        retry_vars = {"text": full_text[:chars]}
+                        print(
+                            f"PDF dynamic extract: Groq request too large; "
+                            f"retrying with doc_chars={chars}, max_tokens={max_out}"
+                        )
+                        response = _invoke_groq(retry_vars, max_out)
+                        extract_vars = retry_vars
+                        print("PDF dynamic extract: used Groq LLM (after shrink retry)")
+                        last_exc = None
+                        break
+                    except Exception as retry_exc:
+                        last_exc = retry_exc
+                        if not _is_request_too_large(retry_exc):
+                            groq_exc = retry_exc
+                            break
+                        groq_exc = retry_exc
+                if response is not None:
+                    last_exc = None
+                elif last_exc is not None:
+                    groq_exc = last_exc
+
+            if response is None:
+                if not (_is_request_too_large(groq_exc) or _is_transient_groq(groq_exc)):
+                    raise
+                print(
+                    f"PDF dynamic extract: Groq unavailable ({groq_exc}); "
+                    f"falling back to Anthropic."
+                )
+                anthropic_llm = get_anthropic_llm()
+                # Anthropic can take fuller text if needed
+                anthropic_vars = {"text": full_text[:12000]}
+                response = (prompt | anthropic_llm).invoke(anthropic_vars)
+                print("PDF dynamic extract: used Anthropic LLM (fallback)")
 
         text_response = response.content if hasattr(response, "content") else str(response)
         return _parse_llm_json_response(text_response)
