@@ -101,31 +101,38 @@ async def upload_pdf_dynamic_extract(
             detail="Invalid content-type. Expected application/pdf, an image type, or a Word document type."
         )
 
-    pwd = os.path.dirname(os.path.realpath(__file__))
+    # pwd = os.path.dirname(os.path.realpath(__file__))  # only needed for Mongo ingest
 
     try:
+        print(f"[pdf_extract] API start — file={file.filename}")
         # Read the file directly into memory (RAM)
         file_bytes = await file.read()
         logger.info(f"Read uploaded file {file.filename} into memory ({len(file_bytes)} bytes)")
-            
+        print(f"[pdf_extract] file.read() done — {len(file_bytes)} bytes")
+
         # 1. Dynamically extract JSON from PDF purely in-memory
+        # (Groq vision OCR if needed → Claude JSON — no MongoDB dependency)
         parsed_json = await extract_dynamic_kv_from_pdf_async(
             file_bytes=file_bytes,
             filename=file.filename
         )
+        print(f"[pdf_extract] extract_dynamic_kv_from_pdf_async() done — file={file.filename}")
 
-        # 2. Embed into MongoDB asynchronously in the background purely in-memory
-        background_tasks.add_task(
-            ingest_pdf_and_return_json_async,
-            base_dir=pwd,
-            file_bytes=file_bytes,
-            filename=file.filename
-        )
+        # 2. MongoDB embed/ingest disabled on this branch (does not affect JSON extract)
+        # background_tasks.add_task(
+        #     ingest_pdf_and_return_json_async,
+        #     base_dir=pwd,
+        #     file_bytes=file_bytes,
+        #     filename=file.filename
+        # )
+        # print(f"[pdf_extract] background ingest scheduled — file={file.filename}")
+        print(f"[pdf_extract] background Mongo ingest SKIPPED (commented out)")
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error during in-memory processing: {e}", exc_info=True)
+        print(f"[pdf_extract] API FAILED — {e}")
         raise HTTPException(
             status_code=400,
             detail=str(e)
@@ -133,6 +140,7 @@ async def upload_pdf_dynamic_extract(
     finally:
         await file.close()
 
+    print(f"[pdf_extract] API complete — returning extracted_json for {file.filename}")
     return {
         "extracted_json": parsed_json
     }

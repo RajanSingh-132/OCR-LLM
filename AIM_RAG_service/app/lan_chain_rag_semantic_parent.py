@@ -85,7 +85,13 @@ SUPPORTED_DATA_EXTENSIONS = {".json", ".txt"}
 
 #     # return embeddings, llm
 
-from app.embedding_client import get_models, get_anthropic_llm, get_vision_llm, get_vision_model_names
+from app.embedding_client import (
+    get_models,
+    get_anthropic_llm,
+    get_vision_llm,
+    get_vision_model_names,
+    ANTHROPIC_LLM_MODEL,
+)
 from app.mongo_client import get_mongo_collection, _to_python_types
 from app.rag_retrieval import get_vectorstore
 from app.prompt import DYNAMIC_EXTRACTION_PROMPT
@@ -126,7 +132,7 @@ def _normalize_image_bytes_for_vision(image_bytes: bytes, filename: str = None):
     try:
         with Image.open(bio) as img:
             img.load()
-            # Groq accepts common RGB/RGBA PNG reliably.
+            # Groq vision accepts common RGB/RGBA PNG reliably.
             if img.mode not in ("RGB", "RGBA"):
                 img = img.convert("RGB")
             out = io.BytesIO()
@@ -163,7 +169,7 @@ def _extract_text_from_image(image_path: str = None, image_bytes: bytes = None, 
             )
         except Exception as norm_err:
             print(f"Image normalize skipped/failed for {source_name}: {norm_err}")
-            # Avoid sending clearly invalid bytes to Groq.
+            # Avoid sending clearly invalid bytes to Groq vision.
             raise ValueError(f"invalid image data: {norm_err}") from norm_err
 
         image_data = base64.b64encode(normalized_bytes).decode("utf-8")
@@ -188,9 +194,8 @@ def _extract_text_from_image(image_path: str = None, image_bytes: bytes = None, 
             ]
         )
 
-        # Always use a dedicated vision LLM for multimodal image input.
-        # The generic `llm` parameter is text-only (Groq text model) and does not accept
-        # list-style content, which would raise: "messages[0].content must be a string".
+        # Vision OCR via Groq. Text extract LLM (Claude) is text-only and cannot
+        # accept list-style multimodal content.
         last_error = None
         response = None
         for model_name in get_vision_model_names():
@@ -209,14 +214,19 @@ def _extract_text_from_image(image_path: str = None, image_bytes: bytes = None, 
         extracted = (extracted or "").strip()
 
         if not extracted or extracted.upper() == "NO_TEXT_FOUND":
+            print(f"[pdf_extract] _extract_text_from_image() done — no text in {source_name}")
             return (
                 f"No readable text found in image {source_name}"
             )
 
+        print(
+            f"[pdf_extract] _extract_text_from_image() done — "
+            f"{source_name}, chars={len(extracted)}"
+        )
         return extracted
 
     except Exception as e:
-        print(f"Image text extraction error: {str(e)}")
+        print(f"[pdf_extract] _extract_text_from_image() FAILED — {source_name}: {e}")
         return f"Image file {source_name}"
 
 def _carve_jpeg_from_pdf_bytes(pdf_bytes: bytes) -> list:
@@ -318,6 +328,8 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
     else:
         raise ValueError("Either file_path or filename must be provided.")
 
+    print(f"[pdf_extract] _load_file_pages() start — {source_name} ({file_ext})")
+
     if file_ext in SUPPORTED_PDF_EXTENSIONS:
         # Resolve bytes whether the file came in-memory or from disk
         if file_bytes is None:
@@ -331,6 +343,10 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
         page_texts = []
         for page in reader.pages:
             page_texts.append(page.extract_text() or "")
+        print(
+            f"[pdf_extract] Tier1 pypdf text done — pages={len(page_texts)}, "
+            f"chars={sum(len(t) for t in page_texts)}"
+        )
 
         # --- TIER 2 & 3: Dynamic OCR — no fixed threshold ---
         # Strategy: for EVERY page, check if embedded images exist.
@@ -366,8 +382,12 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
                             print(f"Embedded image OCR error page {i} img {idx}: {img_err}")
                     if page_ocr_parts:
                         tier2_ocr_text = "\n".join(page_ocr_parts)
+                        print(
+                            f"[pdf_extract] Tier2 embedded-image OCR done — "
+                            f"page={i}, chars={len(tier2_ocr_text)}"
+                        )
             except Exception as emb_err:
-                print(f"pypdf embedded image extraction failed page {i}: {emb_err}")
+                print(f"[pdf_extract] Tier2 embedded image FAILED page {i}: {emb_err}")
 
             # --- TIER 2.5: JPEG byte carving (pure Python, Vercel-safe) ---
             # Handles phone-photo PDFs that use inline image streams instead of
@@ -387,8 +407,12 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
                                 carve_ocr_parts.append(ocr_text)
                         if carve_ocr_parts:
                             tier2_ocr_text = "\n".join(carve_ocr_parts)
+                            print(
+                                f"[pdf_extract] Tier2.5 JPEG carve OCR done — "
+                                f"page={i}, images={len(carve_ocr_parts)}"
+                            )
                 except Exception as carve_err:
-                    print(f"JPEG carving failed page {i}: {carve_err}")
+                    print(f"[pdf_extract] Tier2.5 JPEG carve FAILED page {i}: {carve_err}")
 
             if tier2_ocr_text:
                 # Dynamically pick the richer result: OCR text vs text layer
@@ -419,9 +443,10 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
                     )
                     if ocr_text and len(ocr_text.strip()) > len(text_layer):
                         page_texts[i] = ocr_text
+                        print(f"[pdf_extract] Tier3 pypdfium2 OCR done — page={i}")
                     pdf_doc.close()
                 except Exception as render_err:
-                    print(f"pypdfium2 render fallback failed page {i} of {source_name}: {render_err}")
+                    print(f"[pdf_extract] Tier3 pypdfium2 FAILED page {i}: {render_err}")
 
         # --- AcroForm fields (fillable PDF values) ---
         # Some BOLs keep shipper/consignee/BOL/weight only in form /V values.
@@ -434,8 +459,9 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
                     page_texts[0] = (base + "\n\n" + form_text).strip() if base else form_text
                 else:
                     page_texts = [form_text]
+                print(f"[pdf_extract] AcroForm fields merged — {source_name}")
         except Exception as form_merge_err:
-            print(f"AcroForm merge failed for {source_name}: {form_merge_err}")
+            print(f"[pdf_extract] AcroForm merge FAILED — {source_name}: {form_merge_err}")
 
         docs = []
         for i, text in enumerate(page_texts):
@@ -448,6 +474,10 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
                     }
                 )
             )
+        print(
+            f"[pdf_extract] _load_file_pages() done — PDF {source_name}, "
+            f"pages={len(docs)}, chars={sum(len(d.page_content or '') for d in docs)}"
+        )
         return docs
 
 
@@ -496,6 +526,10 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
                 "and vision OCR is configured; or export to PDF/image and re-upload."
             )
 
+        print(
+            f"[pdf_extract] _load_file_pages() done — Word {source_name}, "
+            f"chars={len(final_text)}"
+        )
         return [
             Document(
                 page_content=final_text,
@@ -519,6 +553,10 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
                 image_path=file_path,
                 llm=llm
             )
+        print(
+            f"[pdf_extract] _load_file_pages() done — Image {source_name}, "
+            f"chars={len(image_text or '')}"
+        )
         return [
             Document(
                 page_content=image_text,
@@ -820,6 +858,8 @@ def ingest_pdf_and_return_json_sync(
         file_ext = os.path.splitext(file_path)[1].lower()
         source_name = os.path.basename(file_path)
 
+    print(f"[pdf_extract] ingest_pdf_and_return_json_sync() start — {source_name}")
+
     allowed_extensions = (
         SUPPORTED_PDF_EXTENSIONS
         | SUPPORTED_IMAGE_EXTENSIONS
@@ -844,6 +884,7 @@ def ingest_pdf_and_return_json_sync(
     )
 
     if not success:
+        print(f"[pdf_extract] ingest FAILED — {source_name}")
         return {
             "ingestion_success": False,
             "error": "Ingestion failed for the PDF file."
@@ -887,6 +928,10 @@ def ingest_pdf_and_return_json_sync(
             "metadata": metadata
         })
 
+    print(
+        f"[pdf_extract] ingest_pdf_and_return_json_sync() done — "
+        f"{source_name}, chunks={total_chunks}"
+    )
     return {
         "ingestion_success": True,
         "collection_name": collection_name,
@@ -1179,6 +1224,8 @@ def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = 
         else:
             source_name = os.path.basename(file_path)
 
+        print(f"[pdf_extract] extract_dynamic_kv_from_pdf_sync() start — {source_name}")
+
         # Get text directly from the file — no database, no embedding dependency.
         # Tier 1: pypdf text layer
         # Tier 2: pypdf XObject images → vision LLM OCR
@@ -1192,128 +1239,58 @@ def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = 
             llm=llm
         )
         full_text = "\n".join([p.page_content for p in pages if p.page_content]).strip()
+        print(
+            f"[pdf_extract] text load done — pages={len(pages)}, chars={len(full_text)}"
+        )
 
         if not full_text:
+            print(f"[pdf_extract] extract STOPPED — no text in {source_name}")
             return {"error": f"No text could be extracted from '{source_name}'. The file may be corrupted or empty."}
 
-        # Prefer Groq. Free-tier TPM (~8000) counts input + max_tokens, so keep both lean.
-        # Anthropic only after Groq truly cannot serve (after shrink retries).
-        _, llm = get_models()
+        # --- claudeAI branch: Anthropic Claude only (Groq text path commented out) ---
+        anthropic_llm = get_anthropic_llm()
         prompt = PromptTemplate.from_template(DYNAMIC_EXTRACTION_PROMPT)
+        extract_vars = {"text": full_text[:12000]}
 
-        # ~chars/4 ≈ tokens. Leave room for large system prompt + max_tokens under 8000 TPM.
-        groq_doc_chars = int(os.environ.get("GROQ_EXTRACT_DOC_CHARS", "6000"))
-        groq_max_tokens = int(os.environ.get("GROQ_LLM_MAX_TOKENS", "2500"))
-        extract_vars = {"text": full_text[:groq_doc_chars]}
+        # --- Groq-first extract + shrink retry + Anthropic fallback (disabled) ---
+        # _, llm = get_models()
+        # groq_doc_chars = int(os.environ.get("GROQ_EXTRACT_DOC_CHARS", "6000"))
+        # groq_max_tokens = int(os.environ.get("GROQ_LLM_MAX_TOKENS", "2500"))
+        # extract_vars = {"text": full_text[:groq_doc_chars]}
+        # def _invoke_groq(...): ...
+        # try: response = _invoke_groq(...)
+        # except: shrink retry then Anthropic fallback
 
-        def _invoke_groq(text_vars: dict, max_out: int):
-            try:
-                llm_bound = llm.bind(max_tokens=max(256, int(max_out)))
-            except Exception:
-                llm_bound = llm
-            return (prompt | llm_bound).invoke(text_vars)
-
-        def _is_request_too_large(exc: Exception) -> bool:
-            err = str(exc).lower()
-            return (
-                "413" in err
-                or "request too large" in err
-                or "tokens per minute" in err
-                or ("requested" in err and "limit" in err and "token" in err)
-            )
-
-        def _is_transient_groq(exc: Exception) -> bool:
-            err = str(exc).lower()
-            err_type = type(exc).__name__.lower()
-            return (
-                "429" in err
-                or "rate limit" in err
-                or "rate_limit" in err
-                or "too many requests" in err
-                or "connection error" in err
-                or "connection" in err
-                or "timeout" in err
-                or "timed out" in err
-                or "temporarily unavailable" in err
-                or "service unavailable" in err
-                or "network" in err
-                or "model_not_found" in err
-                or "does not exist" in err
-                or "do not have access" in err
-                or ("404" in err and "model" in err)
-                or err_type
-                in (
-                    "ratelimiterror",
-                    "ratelimitederror",
-                    "apiconnectionerror",
-                    "connecterror",
-                    "connectionerror",
-                    "timeouterror",
-                    "readtimeout",
-                    "connecttimeout",
-                )
-            )
-
-        response = None
         try:
-            response = _invoke_groq(extract_vars, groq_max_tokens)
             print(
-                f"PDF dynamic extract: used Groq LLM "
-                f"(doc_chars={len(extract_vars['text'])}, max_tokens={groq_max_tokens})"
+                f"[pdf_extract] Claude JSON extract start — "
+                f"model={ANTHROPIC_LLM_MODEL}, doc_chars={len(extract_vars['text'])}"
             )
-        except Exception as groq_exc:
-            # Size/TPM: shrink payload and retry on Groq before Anthropic
-            if _is_request_too_large(groq_exc):
-                shrink_plan = [
-                    (max(2000, groq_doc_chars // 2), max(1200, groq_max_tokens // 2)),
-                    (max(1500, groq_doc_chars // 3), 1200),
-                    (1200, 1000),
-                ]
-                last_exc = groq_exc
-                for chars, max_out in shrink_plan:
-                    try:
-                        retry_vars = {"text": full_text[:chars]}
-                        print(
-                            f"PDF dynamic extract: Groq request too large; "
-                            f"retrying with doc_chars={chars}, max_tokens={max_out}"
-                        )
-                        response = _invoke_groq(retry_vars, max_out)
-                        extract_vars = retry_vars
-                        print("PDF dynamic extract: used Groq LLM (after shrink retry)")
-                        last_exc = None
-                        break
-                    except Exception as retry_exc:
-                        last_exc = retry_exc
-                        if not _is_request_too_large(retry_exc):
-                            groq_exc = retry_exc
-                            break
-                        groq_exc = retry_exc
-                if response is not None:
-                    last_exc = None
-                elif last_exc is not None:
-                    groq_exc = last_exc
-
-            if response is None:
-                if not (_is_request_too_large(groq_exc) or _is_transient_groq(groq_exc)):
-                    raise
-                print(
-                    f"PDF dynamic extract: Groq unavailable ({groq_exc}); "
-                    f"falling back to Anthropic."
-                )
-                anthropic_llm = get_anthropic_llm()
-                # Anthropic can take fuller text if needed
-                anthropic_vars = {"text": full_text[:12000]}
-                response = (prompt | anthropic_llm).invoke(anthropic_vars)
-                print("PDF dynamic extract: used Anthropic LLM (fallback)")
+            try:
+                llm_bound = anthropic_llm.bind(max_tokens=4096)
+            except Exception:
+                llm_bound = anthropic_llm
+            response = (prompt | llm_bound).invoke(extract_vars)
+            print(
+                f"[pdf_extract] Claude JSON extract done — "
+                f"model={ANTHROPIC_LLM_MODEL}"
+            )
+        except Exception as claude_exc:
+            print(f"[pdf_extract] Claude JSON extract FAILED — {claude_exc}")
+            raise
 
         text_response = response.content if hasattr(response, "content") else str(response)
-        return _parse_llm_json_response(text_response)
+        parsed = _parse_llm_json_response(text_response)
+        print(f"[pdf_extract] _parse_llm_json_response() done — {source_name}")
+        print(f"[pdf_extract] extract_dynamic_kv_from_pdf_sync() complete — {source_name}")
+        return parsed
     except Exception as e:
-        print("Failed to dynamically extract JSON:", str(e))
+        print(f"[pdf_extract] extract_dynamic_kv_from_pdf_sync() FAILED — {e}")
         return {"error": str(e)}
 
 
 async def extract_dynamic_kv_from_pdf_async(file_path: str = None, file_bytes: bytes = None, filename: str = None):
+    print("[pdf_extract] extract_dynamic_kv_from_pdf_async() → thread")
     return await asyncio.to_thread(
         extract_dynamic_kv_from_pdf_sync,
         file_path,
