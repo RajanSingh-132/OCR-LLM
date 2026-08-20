@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from app.lan_chain_rag_semantic_parent import (
     ingest_pdf_and_return_json_async,
     extract_dynamic_kv_from_pdf_async,
+    pdf_extract_ckpt,
 )
 # from app.prompt import ORDER_ANALYSIS_PROMPT  # unused after Avaal ask rewrite
 # Invoice extract API temporarily disabled
@@ -101,31 +102,44 @@ async def upload_pdf_dynamic_extract(
             detail="Invalid content-type. Expected application/pdf, an image type, or a Word document type."
         )
 
-    pwd = os.path.dirname(os.path.realpath(__file__))
+    # pwd = os.path.dirname(os.path.realpath(__file__))  # only for Mongo ingest
 
     try:
+        pdf_extract_ckpt("API upload_pdf_dynamic_extract", f"start — file={file.filename}", "start")
         # Read the file directly into memory (RAM)
         file_bytes = await file.read()
         logger.info(f"Read uploaded file {file.filename} into memory ({len(file_bytes)} bytes)")
-            
+        pdf_extract_ckpt("file.read()", f"done — {len(file_bytes)} bytes", "ok")
+
         # 1. Dynamically extract JSON from PDF purely in-memory
         parsed_json = await extract_dynamic_kv_from_pdf_async(
             file_bytes=file_bytes,
             filename=file.filename
         )
+        pdf_extract_ckpt(
+            "API upload_pdf_dynamic_extract",
+            f"extract done — file={file.filename}",
+            "ok",
+        )
 
-        # 2. Embed into MongoDB asynchronously in the background purely in-memory
-        background_tasks.add_task(
-            ingest_pdf_and_return_json_async,
-            base_dir=pwd,
-            file_bytes=file_bytes,
-            filename=file.filename
+        # 2. MongoDB background ingest disabled for this API only
+        # background_tasks.add_task(
+        #     ingest_pdf_and_return_json_async,
+        #     base_dir=pwd,
+        #     file_bytes=file_bytes,
+        #     filename=file.filename
+        # )
+        pdf_extract_ckpt(
+            "Mongo ingest",
+            "SKIPPED (commented out)",
+            "warn",
         )
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error during in-memory processing: {e}", exc_info=True)
+        pdf_extract_ckpt("API upload_pdf_dynamic_extract", f"FAILED — {e}", "fail")
         raise HTTPException(
             status_code=400,
             detail=str(e)
@@ -133,6 +147,11 @@ async def upload_pdf_dynamic_extract(
     finally:
         await file.close()
 
+    pdf_extract_ckpt(
+        "API upload_pdf_dynamic_extract",
+        f"complete — returning extracted_json for {file.filename}",
+        "ok",
+    )
     return {
         "extracted_json": parsed_json
     }

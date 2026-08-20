@@ -22,7 +22,7 @@ GROQ_VISION_FALLBACK_MODELS = os.environ.get(
 )
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # Used only by /api/v1/orders/ask
-ANTHROPIC_LLM_MODEL = os.environ.get("LLM_MODEL", "claude-sonnet-4-5")
+ANTHROPIC_LLM_MODEL = os.environ.get("LLM_MODEL", "claude-haiku-4-5")
 BEDROCK_MODEL = os.environ.get("bedrockmodel", "amazon.titan-embed-text-v2:0")
 BEDROCK_ACCESS_KEY = os.environ.get("accesskey", "")
 BEDROCK_SECRET_KEY = os.environ.get("secretaccesskey", "")
@@ -67,6 +67,10 @@ def get_models():
 
         _embeddings_cache = embeddings
         _llm_cache = llm
+        print(
+            "\033[1m\033[92m[pdf_extract] get_models() — ready (Groq text LLM + Bedrock)\033[0m",
+            flush=True,
+        )
 
     return _embeddings_cache, _llm_cache
 
@@ -110,5 +114,9 @@ def get_vision_llm(model_name: str = None):
             model=model_name,
             groq_api_key=GROQ_API_KEY,
             temperature=0.0,
+        )
+        print(
+            f"\033[1m\033[94m[pdf_extract] get_vision_llm() — ready (Groq vision={model_name})\033[0m",
+            flush=True,
         )
     return _vision_llm_cache[model_name]
