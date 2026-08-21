@@ -90,7 +90,6 @@ from app.embedding_client import (
     get_anthropic_llm,
     get_vision_llm,
     get_vision_model_names,
-    get_haiku_vision_llm,
     ANTHROPIC_LLM_MODEL,
 )
 from app.mongo_client import get_mongo_collection, _to_python_types
@@ -115,7 +114,7 @@ def extract_metadata(
 
 def _normalize_image_bytes_for_vision(image_bytes: bytes, filename: str = None):
     """
-    Convert raw/embedded PDF image bytes into a Groq-safe PNG.
+    Convert raw/embedded PDF image bytes into a vision-safe PNG.
     pypdf often returns raw streams that are not valid JPEG/PNG files.
     """
     if not image_bytes:
@@ -133,7 +132,7 @@ def _normalize_image_bytes_for_vision(image_bytes: bytes, filename: str = None):
     try:
         with Image.open(bio) as img:
             img.load()
-            # Groq vision accepts common RGB/RGBA PNG reliably.
+            # Claude vision accepts common RGB/RGBA PNG reliably.
             if img.mode not in ("RGB", "RGBA"):
                 img = img.convert("RGB")
             out = io.BytesIO()
@@ -170,7 +169,7 @@ def _extract_text_from_image(image_path: str = None, image_bytes: bytes = None, 
             )
         except Exception as norm_err:
             print(f"Image normalize skipped/failed for {source_name}: {norm_err}")
-            # Avoid sending clearly invalid bytes to Groq vision.
+            # Avoid sending clearly invalid bytes to Claude vision.
             raise ValueError(f"invalid image data: {norm_err}") from norm_err
 
         image_data = base64.b64encode(normalized_bytes).decode("utf-8")
@@ -195,7 +194,7 @@ def _extract_text_from_image(image_path: str = None, image_bytes: bytes = None, 
             ]
         )
 
-        # Vision OCR: Groq first; Claude Haiku only if all Groq vision attempts fail.
+        # Vision OCR: Anthropic Claude Sonnet only (Groq removed).
         last_error = None
         response = None
         used_provider = None
@@ -203,33 +202,19 @@ def _extract_text_from_image(image_path: str = None, image_bytes: bytes = None, 
             try:
                 vision_llm = get_vision_llm(model_name)
                 response = vision_llm.invoke([message])
-                used_provider = f"Groq:{model_name}"
+                used_provider = f"Claude:{model_name}"
                 break
             except Exception as model_error:
                 last_error = model_error
-                print(f"Image OCR failed with Groq vision model '{model_name}': {model_error}")
+                print(
+                    f"Image OCR failed with Claude vision model '{model_name}': "
+                    f"{model_error}"
+                )
 
         if response is None:
-            try:
-                print(
-                    f"[pdf_extract] Groq vision failed for {source_name}; "
-                    f"falling back to Claude Haiku vision"
-                )
-                haiku_vision = get_haiku_vision_llm()
-                response = haiku_vision.invoke([message])
-                used_provider = "Claude:claude-haiku-4-5"
-                print(
-                    f"[pdf_extract] _extract_text_from_image() used Claude Haiku vision "
-                    f"fallback — {source_name}"
-                )
-            except Exception as haiku_error:
-                last_error = haiku_error
-                print(
-                    f"Image OCR failed with Claude Haiku vision fallback: {haiku_error}"
-                )
-                raise last_error or RuntimeError(
-                    "No vision model (Groq or Claude Haiku) could extract image text."
-                )
+            raise last_error or RuntimeError(
+                "No Claude vision model could extract image text."
+            )
 
         extracted = response.content if hasattr(response, "content") else str(response)
         extracted = (extracted or "").strip()
@@ -439,13 +424,33 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
                     print(f"[pdf_extract] Tier2.5 JPEG carve FAILED page {i}: {carve_err}")
 
             if tier2_ocr_text:
-                # Dynamically pick the richer result: OCR text vs text layer
-                # More content = more extracted information from the invoice
-                if len(tier2_ocr_text.strip()) >= len(text_layer):
+                # Do NOT replace a rich text layer with OCR-only (OCR can be longer but
+                # messier and causes Claude to null most JSON fields).
+                # Rich text → keep text layer + append OCR (logo/brand from images).
+                # Sparse text (scanned) → OCR primary.
+                real_words = [w for w in text_layer.split() if len(w) > 1]
+                if len(real_words) >= 30 and text_layer:
+                    page_texts[i] = (
+                        text_layer
+                        + "\n\n=== EMBEDDED IMAGE OCR ===\n"
+                        + tier2_ocr_text.strip()
+                    )
+                    print(
+                        f"[pdf_extract] Tier2 merge text+OCR — page={i}, "
+                        f"text_chars={len(text_layer)}, ocr_chars={len(tier2_ocr_text)}"
+                    )
+                elif len(tier2_ocr_text.strip()) >= len(text_layer):
                     page_texts[i] = tier2_ocr_text
-                # else: text layer was already richer, keep it
+                    print(
+                        f"[pdf_extract] Tier2 OCR primary (sparse text layer) — page={i}"
+                    )
+                # else: text layer already richer and sparse OCR — keep text_layer
                 continue  # page resolved, skip Tier 3
 
+            # --- TIER 3: pypdfium2 page rendering (local fallback, may fail on Vercel) ---
+            # Only reached when page has NO embedded images (not a photo PDF).
+            # Useful for PDFs where content is drawn as vector/path graphics.
+            # Trigger only if pypdfium2 loaded AND text layer is sparse (< 30 real words).
             real_words = [w for w in text_layer.split() if len(w) > 1]
             if _PYPDFIUM2_AVAILABLE and len(real_words) < 30:
                 try:
@@ -461,8 +466,15 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
                         filename=f"{source_name}_page{i}.png",
                         llm=llm
                     )
-                    if ocr_text and len(ocr_text.strip()) > len(text_layer):
-                        page_texts[i] = ocr_text
+                    if ocr_text and "NO_TEXT_FOUND" not in (ocr_text or "").upper():
+                        if text_layer and len(real_words) >= 10:
+                            page_texts[i] = (
+                                text_layer
+                                + "\n\n=== PAGE RENDER OCR ===\n"
+                                + ocr_text.strip()
+                            )
+                        elif len(ocr_text.strip()) > len(text_layer):
+                            page_texts[i] = ocr_text
                         print(f"[pdf_extract] Tier3 pypdfium2 OCR done — page={i}")
                     pdf_doc.close()
                 except Exception as render_err:
@@ -1262,7 +1274,7 @@ def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = 
             print(f"[pdf_extract] extract STOPPED — no text in {source_name}")
             return {"error": f"No text could be extracted from '{source_name}'. The file may be corrupted or empty."}
 
-        # --- claudeAI branch: Anthropic Claude only (Groq text path commented out) ---
+        # JSON extract: Claude via LLM_MODEL (Groq text path not used). Flow unchanged.
         anthropic_llm = get_anthropic_llm()
         prompt = PromptTemplate.from_template(DYNAMIC_EXTRACTION_PROMPT)
         extract_vars = {"text": full_text[:12000]}

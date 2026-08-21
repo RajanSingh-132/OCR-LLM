@@ -1,5 +1,5 @@
 import os
-from langchain_groq import ChatGroq
+# from langchain_groq import ChatGroq  # disabled: vision + JSON use Anthropic Sonnet
 from langchain_anthropic import ChatAnthropic
 from langchain_aws import BedrockEmbeddings
 from dotenv import load_dotenv
@@ -11,15 +11,12 @@ _llm_cache = None
 _vision_llm_cache = {}
 _anthropic_llm_cache = None
 
-# Read env vars
-# Text extract LLM is Claude; Groq is used only for vision OCR.
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-# GROQ_LLM_MODEL = os.environ.get("GROQ_LLM_MODEL", "openai/gpt-oss-120b")  # text LLM disabled
-GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
-GROQ_VISION_FALLBACK_MODELS = os.environ.get("GROQ_VISION_FALLBACK_MODELS", "")
+# Vision OCR + JSON extract + /orders/ask: Anthropic Claude (LLM_MODEL).
+# GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+# GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
+# GROQ_VISION_FALLBACK_MODELS = os.environ.get("GROQ_VISION_FALLBACK_MODELS", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-# Used by /api/v1/orders/ask and /api/v1/upload/pdf_dynamic_extract (text LLM)
-ANTHROPIC_LLM_MODEL = os.environ.get("LLM_MODEL", "claude-haiku-4-5")
+ANTHROPIC_LLM_MODEL = os.environ.get("LLM_MODEL", "claude-sonnet-4-5")
 BEDROCK_MODEL = os.environ.get("bedrockmodel", "amazon.titan-embed-text-v2:0")
 BEDROCK_ACCESS_KEY = os.environ.get("accesskey", "")
 BEDROCK_SECRET_KEY = os.environ.get("secretaccesskey", "")
@@ -27,7 +24,7 @@ BEDROCK_REGION = os.environ.get("awsregion", "us-east-1")
 
 
 def get_models():
-    """Return (embeddings, llm). Embeddings=Bedrock; LLM=Anthropic Claude (text only)."""
+    """Return (embeddings, llm). Embeddings=Bedrock; LLM=Anthropic Sonnet."""
     global _embeddings_cache, _llm_cache
     if _embeddings_cache is None or _llm_cache is None:
         if BEDROCK_ACCESS_KEY:
@@ -45,18 +42,21 @@ def get_models():
 
         _embeddings_cache = embeddings
         _llm_cache = llm
-        print("[pdf_extract] get_models() ready — Bedrock embeddings + Claude text LLM")
+        print(
+            "[pdf_extract] get_models() ready — Bedrock embeddings + "
+            f"Claude LLM ({ANTHROPIC_LLM_MODEL})"
+        )
 
     return _embeddings_cache, _llm_cache
 
 
 def get_anthropic_llm():
-    """Anthropic Claude — PDF text extract + /orders/ask."""
+    """Anthropic Claude Sonnet — JSON extract + /orders/ask + vision OCR."""
     global _anthropic_llm_cache
     if _anthropic_llm_cache is None:
         if not ANTHROPIC_API_KEY:
             raise ValueError(
-                "ANTHROPIC_API_KEY is not set. Add it in .env for Claude extract/ask."
+                "ANTHROPIC_API_KEY is not set. Add it in .env for Claude extract/ask/vision."
             )
         _anthropic_llm_cache = ChatAnthropic(
             model=ANTHROPIC_LLM_MODEL,
@@ -68,55 +68,20 @@ def get_anthropic_llm():
 
 
 def get_vision_model_names():
-    """Vision model candidates — Groq only (image OCR)."""
-    model_names = [GROQ_VISION_MODEL]
-    model_names.extend(
-        model.strip()
-        for model in GROQ_VISION_FALLBACK_MODELS.split(",")
-        if model.strip()
-    )
-    return list(dict.fromkeys(model_names))
+    """Vision model — Anthropic Sonnet only (Groq removed)."""
+    return [ANTHROPIC_LLM_MODEL]
 
 
 def get_vision_llm(model_name: str = None):
-    """Vision-capable LLM for image OCR — Groq primary."""
+    """Vision OCR — Anthropic Claude Sonnet (same client as JSON extract)."""
     global _vision_llm_cache
-    model_name = model_name or GROQ_VISION_MODEL
+    model_name = model_name or ANTHROPIC_LLM_MODEL
 
     if model_name not in _vision_llm_cache:
-        if not GROQ_API_KEY:
-            raise ValueError(
-                "GROQ_API_KEY is not set. Add it to .env for Groq vision OCR."
-            )
-        _vision_llm_cache[model_name] = ChatGroq(
-            model=model_name,
-            groq_api_key=GROQ_API_KEY,
-            temperature=0.0,
-        )
-        print(f"[pdf_extract] get_vision_llm() ready — Groq vision model={model_name}")
-    return _vision_llm_cache[model_name]
-
-
-# Dedicated Haiku client for vision OCR fallback only (not used for JSON extract / ask).
-_haiku_vision_llm_cache = None
-HAIKU_VISION_MODEL = "claude-haiku-4-5"
-
-
-def get_haiku_vision_llm():
-    """Claude Haiku vision — only when Groq vision fails (pdf_dynamic_extract OCR)."""
-    global _haiku_vision_llm_cache
-    if _haiku_vision_llm_cache is None:
-        if not ANTHROPIC_API_KEY:
-            raise ValueError(
-                "ANTHROPIC_API_KEY is not set. Needed for Claude Haiku vision fallback."
-            )
-        _haiku_vision_llm_cache = ChatAnthropic(
-            model=HAIKU_VISION_MODEL,
-            anthropic_api_key=ANTHROPIC_API_KEY,
-            temperature=0.0,
-        )
+        # Same ChatAnthropic client accepts multimodal image messages
+        _vision_llm_cache[model_name] = get_anthropic_llm()
         print(
-            f"[pdf_extract] get_haiku_vision_llm() ready — "
-            f"fallback vision model={HAIKU_VISION_MODEL}"
+            f"[pdf_extract] get_vision_llm() ready — "
+            f"Claude vision model={model_name}"
         )
-    return _haiku_vision_llm_cache
+    return _vision_llm_cache[model_name]

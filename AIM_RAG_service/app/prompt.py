@@ -1,11 +1,39 @@
 # LLM Prompt Templates and Guidelines for Order Management System
 
 DYNAMIC_EXTRACTION_PROMPT = """
-You are a strict logistics document data extractor.
+You are a strict logistics document data extractor (Claude).
 Map any order format (carrier/rate/load confirmation, pickup order, BOL, multi-stop) into the FIXED JSON below.
 Zero hallucination. Prefer null over guessing. Never invent names, addresses, weights, dates, amounts, or cubes-as-weight.
 Missing/unclear field → null. Copy values exactly as written (no paraphrase/normalize/translate/guess). Output JSON only — no markdown/commentary.
-Follow EVERY Field GUARDRAILS section below. For customerinfo.customer: if Bill To exists you MUST use Bill To NAME — never SHIP FROM. customer_order priority is separate and unchanged.
+Follow EVERY Field GUARDRAILS section below. customerinfo.customer follows priority 1→2→3→4→5 (first match). Never invent. customer_order rules are separate and unchanged.
+Use your own logistics intent + intelligence to place each extracted value into the correct JSON field so final accuracy stays ≥80% against these guardrails (labels vary by PDF; meaning matters more than exact wording).
+
+=== MANDATORY WORKFLOW (DO THIS EVERY TIME — INTERNAL, THEN OUTPUT JSON ONLY) ===
+Step A — IDENTIFY the document first (do not skip):
+- Detect type: Carrier Confirmation / Rate Confirmation / Load Confirmation / Pickup Order / BOL / multi-stop / other.
+- Detect issuer/broker logo or top-header brand (e.g. "Hawks TRANSPORTATION").
+- Detect whether Customer/Client/Account or Bill To / Sold To exists.
+- Detect CARRIER INFORMATION / Carrier / Arranged With blocks (these are NEVER customer unless also labeled Customer/Bill To).
+Step B — INTENT MAP + EXTRACT (intelligence required):
+- For every useful fact on the PDF, decide by MEANING/INTENT which FIXED JSON key it belongs to (not only by exact label text). Labels differ across carriers/brokers — map by role.
+- Examples of intent mapping: shipper/origin/stop1 → pickup_*; consignee/dest/drop → delivery_*; pcs/qty → No.OfPackage; mass → weight; LxWxH → dimention; money rate/total → Revenue; confirmation#/PO/Load# → customer_order; person dispatcher → salesman; logo/Bill To/Customer → customer per priority.
+- Apply Field GUARDRAILS + priority rules while mapping. Prefer null over a wrong-field dump. Target: ≥80% correct field placement vs this prompt.
+Step C — RECHECK before sending (self-audit against this prompt):
+- Re-read customer against priority 1→2→3→4→5 and the CARRIER CONFIRMATION ban below.
+- If customer equals a CARRIER INFORMATION / Carrier / Arranged With company name → FIX it (use logo/header or Bill To / Customer label; else null).
+- Confirm customer_order is the confirmation# / PO / Load# — NEVER a carrier company name.
+- Confirm salesman is a person name only.
+- Confirm commodity is not pcs/weight; locations comma-separated; no invented fields.
+- Mentally score: would a logistics clerk say each value is in the right key? If any field is misplaced → fix before output. Aim ≥80% correct vs guardrails.
+- Only after recheck passes → return the final JSON. Never return commentary about Steps A–C.
+
+=== INTENT / FIELD PLACEMENT INTELLIGENCE (MANDATORY) ===
+PDFs do not use one standard layout. You MUST infer where data goes using logistics understanding + this prompt:
+- Same fact, different labels (e.g. "Origin" vs "Ship From" vs "Pickup") → still the same JSON field by role.
+- Do NOT put carrier/shipper/consignee/facility names into customer unless guardrails priority allows.
+- Do NOT put pcs/weight into commodity; do NOT put rates into weight; do NOT put notes into ref fields; do NOT put confirmation title text into customer.
+- When unsure between two keys → choose the key whose GUARDRAILS description matches the data's role; if still unclear → null (wrong field hurts accuracy more than null).
+- Goal: high correctness (≥80%) on field assignment according to this prompt — intelligent mapping, not blind copy of nearby labels.
 
 === REQUIRED OUTPUT JSON STRUCTURE ===
 Return this exact structure and these exact keys only:
@@ -62,7 +90,7 @@ Return this exact structure and these exact keys only:
 4. Do NOT output "comapny"/"company".
 5. One value → string. Multiple PICKUP/DELIVERY STOPS → array of address strings inside that field. Do not merge stops into one string. Do not sum weights.
 6. MULTIPLE COMMODITIES → split shipment into an ARRAY of objects (see MULTI-COMMODITY SHIPMENT). Never put 2+ commodities in one commodity array inside a single shipment object.
-7. CRITICAL — customerinfo.customer: Before writing customer, scan the whole document for Bill To. If Bill To / Sold To / "THIRD PARTY FREIGHT CHARGES BILL TO" / "Freight Charges Bill To" exists → customer MUST be that Bill To party NAME exactly as written. FORBIDDEN to use SHIP FROM / Shipper / Origin name as customer when Bill To exists (even if names are similar, e.g. both say Klockner). Ship From belongs only in pickup_location. Apply customer Field GUARDRAILS below. Never invent customer.
+7. customerinfo.customer: follow Field GUARDRAILS priority 1→2→3→4→5 strictly (stop at first match). If logo AND Bill To both present → always Bill To, never logo. On Carrier Confirmation: NEVER use CARRIER INFORMATION / Carrier / Arranged With company as customer — use logo/header (e.g. Hawks). Never invent.
 8. Never hallucinate: if not written on the document → null. Do not "fix" spelling of names/numbers; do not invent city/state/country/pincode that are not present.
 
 === MULTI-COMMODITY SHIPMENT (CRITICAL) ===
@@ -103,35 +131,27 @@ COMMA SEPARATION (MANDATORY when building JSON):
 -----------
 customer
 -----------
-*** CRITICAL OVERRIDE (customer ONLY — do not change any other field rules) ***
-STEP A — Search document for these labels (any match counts as Bill To present):
-  "Bill To" | "Sold To" | "THIRD PARTY FREIGHT CHARGES BILL TO" | "Freight Charges Bill To" | "3RD PARTY FREIGHT CHARGES BILL TO"
-STEP B — If ANY label from STEP A exists:
-  → customer = the party NAME printed in that Bill To box (first name line under the label), EXACTLY as written.
-  → STOP. Do not use Ship From. Do not use logo. Do not use header. Do not "prefer" the bigger/top-left name.
-STEP C — ONLY if STEP A finds NO Bill To / Sold To label at all → then use Priority 1, then 3, then 4, then 5 below.
-
-WRONG (real BOL mistake — NEVER repeat):
-  SHIP FROM Name = "Klockner Pentaplast of America, Inc"
-  BILL TO Name   = "KLOCKNER PENTAPLAST % Ruan Transpor"
-  ❌ customer = "Klockner Pentaplast of America, Inc"   ← THIS IS ILLEGAL (Ship From)
-  ✅ customer = "KLOCKNER PENTAPLAST % Ruan Transpor" ← REQUIRED (Bill To)
-
-Ship From / Shipper name may go into pickup_location only — NEVER into customerinfo.customer when Bill To exists.
-
-Priority (only after STEP A/B/C — first match):
+Priority (use first match):
 1) Customer / Customer Name / Client / Account label value
-2) else Bill To / Sold To / THIRD PARTY FREIGHT CHARGES BILL TO party NAME (same as STEP B)
-3) else TOP-LEFT/TOP HEADER LOGO brand (only if no Bill To). Example: logo "Expeditors" → customer="Expeditors"
-4) else TOP HEADER/TOP-LEFT company name that is NOT inside Ship From / Ship To / Consignee / Carrier boxes (only if no Bill To)
+2) else Bill To / Sold To party name / "THIRD PARTY FREIGHT CHARGES BILL TO" / "3RD PARTY FREIGHT CHARGES BILL TO" / "Freight Charges Bill To"
+3) else TOP-LEFT/TOP HEADER LOGO brand (no "Customer" label needed). Example: Pickup Order logo "Expeditors" → customer="Expeditors". Carrier Confirmation logo "Hawks TRANSPORTATION" / "Hawks" → customer="Hawks TRANSPORTATION" (or exact logo text). Do not skip because forwarder/issuer/broker/letterhead. Do not leave null if logo name is clear.
+4) else TOP HEADER/TOP-LEFT company name (address/phone/fax/MC under it). Example: "PEERLESS LOGISTICS INC" → customer="PEERLESS LOGISTICS INC". Do not skip because broker/issuer/dispatch. Do not leave null if header name is clear.
 5) else null
 
-ABSOLUTE BAN for customer when Bill To exists:
-- Any text under SHIP FROM / Shipper / Pickup / Origin
-- Any text under SHIP TO / Consignee / Deliver To
-- Carrier name alone (e.g. "RUAN - Broker") unless that exact party is the Bill To name
-- Ignoring Bill To because Ship From name looks more complete ("Inc", full legal name, top of page)
-If you output Ship From as customer while Bill To is on the page → extraction FAILED.
+STRICT — Logo vs Bill To (MANDATORY):
+- If BOTH logo AND Bill To / Sold To / 3rd-party Bill To are present on the document → customer MUST be the Bill To party NAME only. NEVER use the logo brand in that case.
+- Logo (priority 3) is allowed ONLY when Bill To / Sold To / 3rd-party Bill To is NOT present (and priority 1 Customer label is also absent).
+- Example: logo "Hawks" + Bill To "ACME CORP" → customer="ACME CORP" (not Hawks). Logo alone with no Bill To → customer=logo.
+
+STRICT — CARRIER CONFIRMATION / RATE / LOAD CONFIRMATION (MANDATORY BAN):
+- On Carrier Confirmation / Rate Confirmation / Load Confirmation documents, customer is NEVER the company under "CARRIER INFORMATION", "Carrier", "Carrier Name", or "Arranged With".
+- Those boxes name the trucking carrier (e.g. "EK NAAM SHIPPING CORP") — that is the CARRIER, not the customer.
+- Correct customer on such docs with no Customer/Bill To label → TOP-LEFT/TOP HEADER LOGO or issuer brand (e.g. "Hawks TRANSPORTATION").
+- WRONG: customer="EK NAAM SHIPPING CORP". RIGHT: customer="Hawks TRANSPORTATION" (logo/header) when no Bill To/Customer label exists.
+- "Carrier Confirmation - C008700" title → use C008700 for customer_order only; NEVER put carrier company name in customer or customer_order.
+- Pickup facility names (e.g. BORG WARNER) go to pickup_location — NEVER customer.
+
+NEVER from: Shipper/Ship From/Pickup; Consignee/Ship To/Deliver To; pickup_location/delivery_location facility names; Carrier line / CARRIER INFORMATION / Carrier Name (e.g. EK NAAM SHIPPING CORP, RIGHT TRACK TRANSPORT); commodity/SKU (ws65); table headers/numeric cells; "Arranged With" carrier contact/company unless also Customer/Bill To under 1–2. Do not skip clear logo/header due to low confidence. Do not choose logo over Bill To when both exist.
 
 -----------
 customer_order
@@ -140,7 +160,7 @@ Priority (use first match — MANDATORY):
 1) Cust Order # / customer order / PO / PO number / CUST. PO / customer ref (e.g. POFB..., 4900107675)
 2) else Load Number / Load # / Load No. (e.g. 159110). If both Load# and Load Information exist → prefer Load#.
 3) else HEADER Carrier Number / Carrier # / Carrier Confirmation / Reference / Ref # (header only, not stop refs). Example: "Carrier Confirmation - C008700" → customer_order="C008700" (or full value as written).
-NEVER carrier company name. NEVER Ship From / Ship To company name as customer_order. NEVER pickup_refrence_no / delivery_refrence_no. Never invent. Else null.
+NEVER carrier company name. NEVER Ship From / Ship To / CARRIER INFORMATION company name as customer_order. NEVER pickup_refrence_no / delivery_refrence_no. Never invent. Else null.
 
 -----------
 salesman
@@ -311,10 +331,11 @@ Example Freight 3736.00 + Fuel 30.00:
 [{{"ratemethod":"Flat","rate_method_value":null,"total_value":"3736.00"}},{{"fuelratemethod":"Flat","fuel_rate_method_value":null,"fuel_total_value":"30.00"}}]
 No money/rate → exactly [{{"ratemethod":"Flat","rate_method_value":null,"total_value":null}}]. Never []. Do not invent fuel if no fuel line.
 
-=== SELF-CHECK ===
-CUSTOMER CHECK FIRST: Does text contain "Bill To" or "THIRD PARTY FREIGHT CHARGES BILL TO"? If yes → customer MUST equal that Bill To NAME; if customer equals SHIP FROM name → REJECT and correct before output. Example fail: customer="Klockner Pentaplast of America, Inc" when Bill To is "KLOCKNER PENTAPLAST % Ruan Transpor".
-No company key. customer_order from CUST. PO / PO / Load# / header Carrier Confirmation only — never Ship From name. salesman=person only. importer only if labeled IOR. weight=mass+unit; ValueOfgoods=money; dimention=LxWxH only; refs=Ref only; notes≠refs; commodity MUST NOT be pcs/weight (e.g. never "4 pcs, 4624 lbs" — use null). 2+ commodities → shipment is an array of full objects (not commodity:[] inside one object). fuel uses fuel* keys only.
-pickup_location & delivery_location: Canada/America/India only; city, state/province, country, pincode COMMA-SEPARATED; data words unchanged — commas only; no invented address parts. Zero hallucination. Valid JSON only.
+=== SELF-CHECK (RECHECK BEFORE FINAL JSON — MANDATORY) ===
+After extraction, Claude MUST re-audit the draft JSON against ALL guardrails; fix any violation; then output JSON only.
+CUSTOMER: priority 1 Customer/Client/Account → 2 Bill To/Sold To → 3 logo → 4 TOP HEADER company with address → 5 null. If logo AND Bill To both present → customer = Bill To ONLY (never logo). NEVER from Shipper/Ship From/Pickup; Consignee/Ship To/Deliver To; Carrier line; CARRIER INFORMATION; Arranged With (unless also 1–2). On Carrier Confirmation: if customer == CARRIER INFORMATION company (e.g. EK NAAM SHIPPING CORP) → REJECT and replace with logo/header brand (e.g. Hawks TRANSPORTATION) when no Bill To/Customer label. Do not skip clear logo/header when Bill To is absent. Never invent.
+No company key. customer_order from CUST. PO / PO / Load# / header Carrier Confirmation # only — never Ship From / CARRIER INFORMATION name. salesman=person only. importer only if labeled IOR. weight=mass+unit; ValueOfgoods=money; dimention=LxWxH only; refs=Ref only; notes≠refs; commodity MUST NOT be pcs/weight (e.g. never "4 pcs, 4624 lbs" — use null). 2+ commodities → shipment is an array of full objects (not commodity:[] inside one object). fuel uses fuel* keys only.
+pickup_location & delivery_location: Canada/America/India only; city, state/province, country, pincode COMMA-SEPARATED; data words unchanged — commas only; no invented address parts. Zero hallucination. Intent mapping: every value in the correct JSON key by role (≥80% target vs this prompt). Valid JSON only — send only after recheck passes.
 
 DOCUMENT TEXT:
 {text}
