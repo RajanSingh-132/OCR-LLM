@@ -90,6 +90,7 @@ from app.embedding_client import (
     get_anthropic_llm,
     get_vision_llm,
     get_vision_model_names,
+    get_haiku_vision_llm,
     ANTHROPIC_LLM_MODEL,
 )
 from app.mongo_client import get_mongo_collection, _to_python_types
@@ -194,34 +195,57 @@ def _extract_text_from_image(image_path: str = None, image_bytes: bytes = None, 
             ]
         )
 
-        # Vision OCR via Groq. Text extract LLM (Claude) is text-only and cannot
-        # accept list-style multimodal content.
+        # Vision OCR: Groq first; Claude Haiku only if all Groq vision attempts fail.
         last_error = None
         response = None
+        used_provider = None
         for model_name in get_vision_model_names():
             try:
                 vision_llm = get_vision_llm(model_name)
                 response = vision_llm.invoke([message])
+                used_provider = f"Groq:{model_name}"
                 break
             except Exception as model_error:
                 last_error = model_error
                 print(f"Image OCR failed with Groq vision model '{model_name}': {model_error}")
 
         if response is None:
-            raise last_error or RuntimeError("No Groq vision model could extract image text.")
+            try:
+                print(
+                    f"[pdf_extract] Groq vision failed for {source_name}; "
+                    f"falling back to Claude Haiku vision"
+                )
+                haiku_vision = get_haiku_vision_llm()
+                response = haiku_vision.invoke([message])
+                used_provider = "Claude:claude-haiku-4-5"
+                print(
+                    f"[pdf_extract] _extract_text_from_image() used Claude Haiku vision "
+                    f"fallback — {source_name}"
+                )
+            except Exception as haiku_error:
+                last_error = haiku_error
+                print(
+                    f"Image OCR failed with Claude Haiku vision fallback: {haiku_error}"
+                )
+                raise last_error or RuntimeError(
+                    "No vision model (Groq or Claude Haiku) could extract image text."
+                )
 
         extracted = response.content if hasattr(response, "content") else str(response)
         extracted = (extracted or "").strip()
 
         if not extracted or extracted.upper() == "NO_TEXT_FOUND":
-            print(f"[pdf_extract] _extract_text_from_image() done — no text in {source_name}")
+            print(
+                f"[pdf_extract] _extract_text_from_image() done — no text in "
+                f"{source_name} (provider={used_provider})"
+            )
             return (
                 f"No readable text found in image {source_name}"
             )
 
         print(
             f"[pdf_extract] _extract_text_from_image() done — "
-            f"{source_name}, chars={len(extracted)}"
+            f"{source_name}, chars={len(extracted)}, provider={used_provider}"
         )
         return extracted
 
@@ -422,10 +446,6 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
                 # else: text layer was already richer, keep it
                 continue  # page resolved, skip Tier 3
 
-            # --- TIER 3: pypdfium2 page rendering (local fallback, may fail on Vercel) ---
-            # Only reached when page has NO embedded images (not a photo PDF).
-            # Useful for PDFs where content is drawn as vector/path graphics.
-            # Trigger only if pypdfium2 loaded AND text layer is sparse (< 30 real words).
             real_words = [w for w in text_layer.split() if len(w) > 1]
             if _PYPDFIUM2_AVAILABLE and len(real_words) < 30:
                 try:
@@ -1226,11 +1246,6 @@ def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = 
 
         print(f"[pdf_extract] extract_dynamic_kv_from_pdf_sync() start — {source_name}")
 
-        # Get text directly from the file — no database, no embedding dependency.
-        # Tier 1: pypdf text layer
-        # Tier 2: pypdf XObject images → vision LLM OCR
-        # Tier 2.5: JPEG byte carving → vision LLM OCR  (Vercel-safe for phone-photo PDFs)
-        # Tier 3: pypdfium2 render (local fallback)
         _, llm = get_models()
         pages = _load_file_pages(
             file_path=file_path,
@@ -1252,14 +1267,6 @@ def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = 
         prompt = PromptTemplate.from_template(DYNAMIC_EXTRACTION_PROMPT)
         extract_vars = {"text": full_text[:12000]}
 
-        # --- Groq-first extract + shrink retry + Anthropic fallback (disabled) ---
-        # _, llm = get_models()
-        # groq_doc_chars = int(os.environ.get("GROQ_EXTRACT_DOC_CHARS", "6000"))
-        # groq_max_tokens = int(os.environ.get("GROQ_LLM_MAX_TOKENS", "2500"))
-        # extract_vars = {"text": full_text[:groq_doc_chars]}
-        # def _invoke_groq(...): ...
-        # try: response = _invoke_groq(...)
-        # except: shrink retry then Anthropic fallback
 
         try:
             print(

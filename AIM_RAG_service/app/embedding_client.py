@@ -41,21 +41,6 @@ def get_models():
             model_kwargs={"dimensions": 1024},
         )
 
-        # --- Groq text LLM (disabled: Claude used for extract/ask) ---
-        # if not GROQ_API_KEY:
-        #     raise ValueError("GROQ_API_KEY is not set. Please add it to your .env file.")
-        # groq_kwargs = {
-        #     "model": GROQ_LLM_MODEL,
-        #     "groq_api_key": GROQ_API_KEY,
-        #     "temperature": 0.0,
-        #     "max_tokens": int(os.environ.get("GROQ_LLM_MAX_TOKENS", "2500")),
-        # }
-        # if "gpt-oss" in (GROQ_LLM_MODEL or "").lower():
-        #     groq_kwargs["reasoning_effort"] = os.environ.get(
-        #         "GROQ_REASONING_EFFORT", "low"
-        #     )
-        # llm = ChatGroq(**groq_kwargs)
-
         llm = get_anthropic_llm()
 
         _embeddings_cache = embeddings
@@ -94,7 +79,7 @@ def get_vision_model_names():
 
 
 def get_vision_llm(model_name: str = None):
-    """Vision-capable LLM for image OCR — Groq (not Claude)."""
+    """Vision-capable LLM for image OCR — Groq primary."""
     global _vision_llm_cache
     model_name = model_name or GROQ_VISION_MODEL
 
@@ -110,3 +95,28 @@ def get_vision_llm(model_name: str = None):
         )
         print(f"[pdf_extract] get_vision_llm() ready — Groq vision model={model_name}")
     return _vision_llm_cache[model_name]
+
+
+# Dedicated Haiku client for vision OCR fallback only (not used for JSON extract / ask).
+_haiku_vision_llm_cache = None
+HAIKU_VISION_MODEL = "claude-haiku-4-5"
+
+
+def get_haiku_vision_llm():
+    """Claude Haiku vision — only when Groq vision fails (pdf_dynamic_extract OCR)."""
+    global _haiku_vision_llm_cache
+    if _haiku_vision_llm_cache is None:
+        if not ANTHROPIC_API_KEY:
+            raise ValueError(
+                "ANTHROPIC_API_KEY is not set. Needed for Claude Haiku vision fallback."
+            )
+        _haiku_vision_llm_cache = ChatAnthropic(
+            model=HAIKU_VISION_MODEL,
+            anthropic_api_key=ANTHROPIC_API_KEY,
+            temperature=0.0,
+        )
+        print(
+            f"[pdf_extract] get_haiku_vision_llm() ready — "
+            f"fallback vision model={HAIKU_VISION_MODEL}"
+        )
+    return _haiku_vision_llm_cache
