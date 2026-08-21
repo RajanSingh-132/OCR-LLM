@@ -98,6 +98,47 @@ from app.prompt import DYNAMIC_EXTRACTION_PROMPT
 from app.word_extractor import extract_text_from_word_bytes, load_word_text_and_images
 
 
+# ---------------- Colored terminal checkpoints (pdf_dynamic_extract) ----------------
+_CKPT_RESET = "\033[0m"
+_CKPT_BOLD = "\033[1m"
+_CKPT_COLORS = {
+    "start": "\033[96m",   # cyan
+    "ok": "\033[92m",      # green
+    "warn": "\033[93m",    # yellow
+    "llm": "\033[95m",     # magenta
+    "vision": "\033[94m",  # blue
+    "fail": "\033[91m",    # red
+    "info": "\033[96m",
+}
+_CKPT_ANSI_READY = False
+
+
+def _enable_ckpt_ansi():
+    """Enable VT100 colors on Windows consoles (no-op elsewhere)."""
+    global _CKPT_ANSI_READY
+    if _CKPT_ANSI_READY:
+        return
+    _CKPT_ANSI_READY = True
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        pass
+
+
+def pdf_extract_ckpt(fn: str, msg: str, level: str = "info"):
+    """Print a colored checkpoint line for pdf_dynamic_extract flow."""
+    _enable_ckpt_ansi()
+    color = _CKPT_COLORS.get(level, _CKPT_COLORS["info"])
+    print(f"{_CKPT_BOLD}{color}[pdf_extract] {fn} — {msg}{_CKPT_RESET}", flush=True)
+
+
 # ---------------- METADATA ----------------
 
 def extract_metadata(
@@ -155,6 +196,7 @@ def _normalize_image_bytes_for_vision(image_bytes: bytes, filename: str = None):
 
 def _extract_text_from_image(image_path: str = None, image_bytes: bytes = None, filename: str = None, llm = None) -> str:
     source_name = filename or (os.path.basename(image_path) if image_path else "image.jpg")
+    pdf_extract_ckpt("_extract_text_from_image()", f"start — {source_name}", "vision")
     try:
         if image_bytes is not None:
             raw_bytes = image_bytes
@@ -1259,6 +1301,7 @@ def extract_dynamic_kv_from_pdf_sync(file_path: str = None, file_bytes: bytes = 
         print(f"[pdf_extract] extract_dynamic_kv_from_pdf_sync() start — {source_name}")
 
         _, llm = get_models()
+        pdf_extract_ckpt("get_models()", "ready", "ok")
         pages = _load_file_pages(
             file_path=file_path,
             file_bytes=file_bytes,
@@ -1316,4 +1359,6 @@ async def extract_dynamic_kv_from_pdf_async(file_path: str = None, file_bytes: b
         file_bytes,
         filename
     )
+    pdf_extract_ckpt("extract_dynamic_kv_from_pdf_async()", "thread done", "ok")
+    return result
 
