@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from app.lan_chain_rag_semantic_parent import (
     ingest_pdf_and_return_json_async,
     extract_dynamic_kv_from_pdf_async,
+    pdf_extract_ckpt,
 )
 
 logger = logging.getLogger("api")
