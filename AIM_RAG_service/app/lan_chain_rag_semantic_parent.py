@@ -489,10 +489,6 @@ def _load_file_pages(file_path: str = None, file_bytes: bytes = None, filename: 
                 # else: text layer already richer and sparse OCR — keep text_layer
                 continue  # page resolved, skip Tier 3
 
-            # --- TIER 3: pypdfium2 page rendering (local fallback, may fail on Vercel) ---
-            # Only reached when page has NO embedded images (not a photo PDF).
-            # Useful for PDFs where content is drawn as vector/path graphics.
-            # Trigger only if pypdfium2 loaded AND text layer is sparse (< 30 real words).
             real_words = [w for w in text_layer.split() if len(w) > 1]
             if _PYPDFIUM2_AVAILABLE and len(real_words) < 30:
                 try:
