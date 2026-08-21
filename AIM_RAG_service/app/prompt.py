@@ -16,12 +16,13 @@ Step A — IDENTIFY the document first (do not skip):
 - Detect CARRIER INFORMATION / Carrier / Arranged With blocks (these are NEVER customer unless also labeled Customer/Bill To).
 Step B — INTENT MAP + EXTRACT (intelligence required):
 - For every useful fact on the PDF, decide by MEANING/INTENT which FIXED JSON key it belongs to (not only by exact label text). Labels differ across carriers/brokers — map by role.
-- Examples of intent mapping: shipper/origin/stop1 → pickup_*; consignee/dest/drop → delivery_*; pcs/qty → No.OfPackage; mass → weight; LxWxH → dimention; money rate/total → Revenue; confirmation#/PO/Load# → customer_order; person dispatcher → salesman; logo/Bill To/Customer → customer per priority.
+- Examples of intent mapping: shipper/origin/stop1 → pickup_*; consignee/dest/drop → delivery_*; PU: / Pickup Ref → pickup_refrence_no; DA: / Delivery Appt/Ref → delivery_refrence_no; pcs/qty → No.OfPackage; mass → weight; LxWxH → dimention; money rate/total → Revenue; confirmation#/PO/Load# → customer_order; person dispatcher → salesman; logo/Bill To/Customer → customer per priority.
 - Apply Field GUARDRAILS + priority rules while mapping. Prefer null over a wrong-field dump. Target: ≥80% correct field placement vs this prompt.
 Step C — RECHECK before sending (self-audit against this prompt):
 - Re-read customer against priority 1→2→3→4→5 and the CARRIER CONFIRMATION ban below.
 - If customer equals a CARRIER INFORMATION / Carrier / Arranged With company name → FIX it (use logo/header or Bill To / Customer label; else null).
 - Confirm customer_order is the confirmation# / PO / Load# — NEVER a carrier company name.
+- Confirm PU: value → pickup_refrence_no; DA: value → delivery_refrence_no (do not leave null if PU/DA present).
 - Confirm salesman is a person name only.
 - Confirm commodity is not pcs/weight; locations comma-separated; no invented fields.
 - Mentally score: would a logistics clerk say each value is in the right key? If any field is misplaced → fix before output. Aim ≥80% correct vs guardrails.
@@ -241,7 +242,11 @@ Pickup/shipper time only. Else null.
 -----------
 pickup_refrence_no
 -----------
-ONLY pickup/SHIPPER Ref-column number (e.g. 24069). NEVER Notes/Remarks/pickupNote/DeliveryNotes. Not customer_order or delivery_refrence_no. Else null.
+Pickup-side reference number ONLY.
+Priority (use first match):
+1) Label PU: / PU # / PU No. / Pickup Ref / Pickup Reference — value after PU (e.g. "PU: 305884, PO: 61X300160" → pickup_refrence_no="305884").
+2) else pickup/SHIPPER Ref-column number (e.g. 24069).
+NEVER put PO / customer_order / DA / delivery refs here. NEVER Notes/Remarks/pickupNote/DeliveryNotes. Not delivery_refrence_no. Else null.
 
 -----------
 distance
@@ -271,7 +276,11 @@ Delivery/consignee time only. Else null.
 -----------
 delivery_refrence_no
 -----------
-ONLY delivery/CONSIGNEE Ref-column number (e.g. PT-150396). NEVER Notes/Remarks/pickupNote/DeliveryNotes. Not customer_order or pickup_refrence_no. Else null.
+Delivery-side reference number ONLY.
+Priority (use first match):
+1) Label DA: / DA # / Delivery Appt / Delivery Appointment / Delivery Ref / Delivery Reference — value after DA (e.g. "PO: 61X300160, DA: 25834791100033167651" → delivery_refrence_no="25834791100033167651").
+2) else delivery/CONSIGNEE Ref-column number (e.g. PT-150396).
+NEVER put PO / customer_order / PU / pickup refs here. NEVER Notes/Remarks/pickupNote/DeliveryNotes. Not pickup_refrence_no. Else null.
 
 -----------
 ValueOfgoods
@@ -334,7 +343,7 @@ No money/rate → exactly [{{"ratemethod":"Flat","rate_method_value":null,"total
 === SELF-CHECK (RECHECK BEFORE FINAL JSON — MANDATORY) ===
 After extraction, Claude MUST re-audit the draft JSON against ALL guardrails; fix any violation; then output JSON only.
 CUSTOMER: priority 1 Customer/Client/Account → 2 Bill To/Sold To → 3 logo → 4 TOP HEADER company with address → 5 null. If logo AND Bill To both present → customer = Bill To ONLY (never logo). NEVER from Shipper/Ship From/Pickup; Consignee/Ship To/Deliver To; Carrier line; CARRIER INFORMATION; Arranged With (unless also 1–2). On Carrier Confirmation: if customer == CARRIER INFORMATION company (e.g. EK NAAM SHIPPING CORP) → REJECT and replace with logo/header brand (e.g. Hawks TRANSPORTATION) when no Bill To/Customer label. Do not skip clear logo/header when Bill To is absent. Never invent.
-No company key. customer_order from CUST. PO / PO / Load# / header Carrier Confirmation # only — never Ship From / CARRIER INFORMATION name. salesman=person only. importer only if labeled IOR. weight=mass+unit; ValueOfgoods=money; dimention=LxWxH only; refs=Ref only; notes≠refs; commodity MUST NOT be pcs/weight (e.g. never "4 pcs, 4624 lbs" — use null). 2+ commodities → shipment is an array of full objects (not commodity:[] inside one object). fuel uses fuel* keys only.
+No company key. customer_order from CUST. PO / PO / Load# / header Carrier Confirmation # only — never Ship From / CARRIER INFORMATION name. salesman=person only. importer only if labeled IOR. weight=mass+unit; ValueOfgoods=money; dimention=LxWxH only; PU: → pickup_refrence_no; DA: → delivery_refrence_no; notes≠refs; commodity MUST NOT be pcs/weight (e.g. never "4 pcs, 4624 lbs" — use null). 2+ commodities → shipment is an array of full objects (not commodity:[] inside one object). fuel uses fuel* keys only.
 pickup_location & delivery_location: Canada/America/India only; city, state/province, country, pincode COMMA-SEPARATED; data words unchanged — commas only; no invented address parts. Zero hallucination. Intent mapping: every value in the correct JSON key by role (≥80% target vs this prompt). Valid JSON only — send only after recheck passes.
 
 DOCUMENT TEXT:
