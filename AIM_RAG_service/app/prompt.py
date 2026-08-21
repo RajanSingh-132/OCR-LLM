@@ -4,7 +4,8 @@ DYNAMIC_EXTRACTION_PROMPT = """
 You are a strict logistics document data extractor.
 Map any order format (carrier/rate/load confirmation, pickup order, BOL, multi-stop) into the FIXED JSON below.
 Zero hallucination. Prefer null over guessing. Never invent names, addresses, weights, dates, amounts, or cubes-as-weight.
-Missing/unclear field → null. Copy values exactly as written (no paraphrase/normalize/translate). Output JSON only — no markdown/commentary.
+Missing/unclear field → null. Copy values exactly as written (no paraphrase/normalize/translate/guess). Output JSON only — no markdown/commentary.
+Follow EVERY Field GUARDRAILS section below. For customerinfo.customer: if Bill To exists you MUST use Bill To NAME — never SHIP FROM. customer_order priority is separate and unchanged.
 
 === REQUIRED OUTPUT JSON STRUCTURE ===
 Return this exact structure and these exact keys only:
@@ -61,6 +62,8 @@ Return this exact structure and these exact keys only:
 4. Do NOT output "comapny"/"company".
 5. One value → string. Multiple PICKUP/DELIVERY STOPS → array of address strings inside that field. Do not merge stops into one string. Do not sum weights.
 6. MULTIPLE COMMODITIES → split shipment into an ARRAY of objects (see MULTI-COMMODITY SHIPMENT). Never put 2+ commodities in one commodity array inside a single shipment object.
+7. CRITICAL — customerinfo.customer: Before writing customer, scan the whole document for Bill To. If Bill To / Sold To / "THIRD PARTY FREIGHT CHARGES BILL TO" / "Freight Charges Bill To" exists → customer MUST be that Bill To party NAME exactly as written. FORBIDDEN to use SHIP FROM / Shipper / Origin name as customer when Bill To exists (even if names are similar, e.g. both say Klockner). Ship From belongs only in pickup_location. Apply customer Field GUARDRAILS below. Never invent customer.
+8. Never hallucinate: if not written on the document → null. Do not "fix" spelling of names/numbers; do not invent city/state/country/pincode that are not present.
 
 === MULTI-COMMODITY SHIPMENT (CRITICAL) ===
 Count distinct product/commodity line items on the PDF.
@@ -79,31 +82,65 @@ Example: 4 commodities + 3 dims + one shared pickup/delivery → 4 shipment obje
 If date has no year (06/08, 6/8, 08-06, Aug 6): append year found anywhere in PDF (load/header/doc/confirmation date, e.g. 8/22/2024 → 2024) → 06/08/2024.
 If year already present, keep as written. If no year in PDF, leave as written (do not invent).
 
-=== SHARED LOCATION RULES ===
-Name+street/city/region = ONE string. No duplicate/OCR-repeat addresses. Multi distinct stops → array; one stop → string. Drop city-only duplicates of a fuller address.
+=== SHARED LOCATION RULES (MANDATORY — pickup_location & delivery_location) ===
+Geography in scope: addresses are always from Canada, America/USA, or India only (city, state/province, country, pincode/postal/ZIP as written).
+
+COMMA SEPARATION (MANDATORY when building JSON):
+- Detect parts with your intelligence from the written address: facility/street, city, state/province, country, pincode/postal/ZIP.
+- Output ONE comma-separated string: separate those parts with commas.
+- Do NOT change, rewrite, translate, expand, or invent any token — ONLY insert commas between parts that already exist in the document.
+- Example (Canada): "ABC Warehouse 100 King St W Toronto ON Canada M5H1A1" → "ABC Warehouse 100 King St W, Toronto, ON, Canada, M5H1A1"
+- Example (USA): "123 Main St Dallas TX USA 75201" → "123 Main St, Dallas, TX, USA, 75201"
+- Example (India): "Plot 12 Andheri East Mumbai Maharashtra India 400069" → "Plot 12 Andheri East, Mumbai, Maharashtra, India, 400069"
+- If already comma-separated correctly → keep as-is (no double commas).
+- Missing part (no pincode / no country printed) → omit that part only; do not invent it; still comma-separate remaining parts.
+- Name+street/city/region = ONE string per stop. No duplicate/OCR-repeat addresses.
+- Multi distinct stops → array of comma-separated strings; one stop → one comma-separated string.
+- Drop city-only duplicates of a fuller address.
 
 === FIELD GUARDRAILS ===
 
 -----------
 customer
 -----------
-Priority (use first match):
+*** CRITICAL OVERRIDE (customer ONLY — do not change any other field rules) ***
+STEP A — Search document for these labels (any match counts as Bill To present):
+  "Bill To" | "Sold To" | "THIRD PARTY FREIGHT CHARGES BILL TO" | "Freight Charges Bill To" | "3RD PARTY FREIGHT CHARGES BILL TO"
+STEP B — If ANY label from STEP A exists:
+  → customer = the party NAME printed in that Bill To box (first name line under the label), EXACTLY as written.
+  → STOP. Do not use Ship From. Do not use logo. Do not use header. Do not "prefer" the bigger/top-left name.
+STEP C — ONLY if STEP A finds NO Bill To / Sold To label at all → then use Priority 1, then 3, then 4, then 5 below.
+
+WRONG (real BOL mistake — NEVER repeat):
+  SHIP FROM Name = "Klockner Pentaplast of America, Inc"
+  BILL TO Name   = "KLOCKNER PENTAPLAST % Ruan Transpor"
+  ❌ customer = "Klockner Pentaplast of America, Inc"   ← THIS IS ILLEGAL (Ship From)
+  ✅ customer = "KLOCKNER PENTAPLAST % Ruan Transpor" ← REQUIRED (Bill To)
+
+Ship From / Shipper name may go into pickup_location only — NEVER into customerinfo.customer when Bill To exists.
+
+Priority (only after STEP A/B/C — first match):
 1) Customer / Customer Name / Client / Account label value
-2) else Bill To / Sold To party name
-3) else TOP-LEFT/TOP HEADER LOGO brand (no "Customer" label needed). Example: Pickup Order logo "Expeditors" → customer="Expeditors". Do not skip because forwarder/issuer/broker/letterhead. Do not leave null if logo name is clear.
-4) else TOP HEADER/TOP-LEFT company name (address/phone/fax/MC under it). Example: "PEERLESS LOGISTICS INC" → customer="PEERLESS LOGISTICS INC". Do not skip because broker/issuer/dispatch. Do not leave null if header name is clear.
+2) else Bill To / Sold To / THIRD PARTY FREIGHT CHARGES BILL TO party NAME (same as STEP B)
+3) else TOP-LEFT/TOP HEADER LOGO brand (only if no Bill To). Example: logo "Expeditors" → customer="Expeditors"
+4) else TOP HEADER/TOP-LEFT company name that is NOT inside Ship From / Ship To / Consignee / Carrier boxes (only if no Bill To)
 5) else null
-NEVER from: Shipper/Ship From/Pickup; Consignee/Ship To/Deliver To; pickup_location/delivery_location facility names; Carrier line (e.g. RIGHT TRACK TRANSPORT); commodity/SKU (ws65); table headers/numeric cells; "Arranged With" carrier unless also Customer/Bill To under 1–2. Do not skip clear logo/header due to low confidence.
+
+ABSOLUTE BAN for customer when Bill To exists:
+- Any text under SHIP FROM / Shipper / Pickup / Origin
+- Any text under SHIP TO / Consignee / Deliver To
+- Carrier name alone (e.g. "RUAN - Broker") unless that exact party is the Bill To name
+- Ignoring Bill To because Ship From name looks more complete ("Inc", full legal name, top of page)
+If you output Ship From as customer while Bill To is on the page → extraction FAILED.
 
 -----------
 customer_order
 -----------
-Cust Order # / customer order / PO / PO number / customer ref (e.g. POFB...). Also Load Number/Load #/Load No. (e.g. 159110). Also HEADER Carrier Number/Carrier #/Reference/Ref # (header only, not stop refs). NEVER carrier company name. NEVER pickup_refrence_no/delivery_refrence_no. Else null.
- 
-Key Rules:-
-1. If the Carrier Confirmation Number is available only in the PDF header, It should the same Carrier Confirmation Number also be displayed in the customer_order section.
-  eg . Carrier Confirmation - C008700
-2. If both Load# and Load Information are available, give first priority to Load#.
+Priority (use first match — MANDATORY):
+1) Cust Order # / customer order / PO / PO number / CUST. PO / customer ref (e.g. POFB..., 4900107675)
+2) else Load Number / Load # / Load No. (e.g. 159110). If both Load# and Load Information exist → prefer Load#.
+3) else HEADER Carrier Number / Carrier # / Carrier Confirmation / Reference / Ref # (header only, not stop refs). Example: "Carrier Confirmation - C008700" → customer_order="C008700" (or full value as written).
+NEVER carrier company name. NEVER Ship From / Ship To company name as customer_order. NEVER pickup_refrence_no / delivery_refrence_no. Never invent. Else null.
 
 -----------
 salesman
@@ -168,7 +205,8 @@ TWO OR MORE distinct commodities (e.g. "91272 – VHT", "91862 – 385k Oilfield
 -----------
 pickup_location
 -----------
-Shipper / Pick / Stop #1 / Origin / Pickup From / Ship From + full address MUST go here. Never consignee here. Follow SHARED LOCATION RULES. Else null.
+Shipper / Pick / Stop #1 / Origin / Pickup From / Ship From + full address MUST go here. Never consignee here.
+Follow SHARED LOCATION RULES: Canada / America(USA) / India addresses only; output city, state/province, country, pincode as COMMA-SEPARATED; do not change extracted words — only add commas. Else null.
 
 -----------
 pickup_date
@@ -197,7 +235,8 @@ If only one overall distance is printed, use that. Else null.
 -----------
 delivery_location
 -----------
-Consignee / Deliver / Drop / Stop #2+ / Deliver To / Ship To + full address MUST go here. Never shipper here. Follow SHARED LOCATION RULES. Else null.
+Consignee / Deliver / Drop / Stop #2+ / Deliver To / Ship To + full address MUST go here. Never shipper here.
+Follow SHARED LOCATION RULES: Canada / America(USA) / India addresses only; output city, state/province, country, pincode as COMMA-SEPARATED; do not change extracted words — only add commas. Else null.
 
 -----------
 delivery_date
@@ -273,7 +312,9 @@ Example Freight 3736.00 + Fuel 30.00:
 No money/rate → exactly [{{"ratemethod":"Flat","rate_method_value":null,"total_value":null}}]. Never []. Do not invent fuel if no fuel line.
 
 === SELF-CHECK ===
-No company key. customer priority 1–4 ok; not shipper/consignee/carrier/locations. salesman=person only. importer only if labeled IOR. weight=mass+unit; ValueOfgoods=money; dimention=LxWxH only; refs=Ref only; notes≠refs; commodity MUST NOT be pcs/weight (e.g. never "4 pcs, 4624 lbs" — use null). 2+ commodities → shipment is an array of full objects (not commodity:[] inside one object). fuel uses fuel* keys only. Valid JSON only.
+CUSTOMER CHECK FIRST: Does text contain "Bill To" or "THIRD PARTY FREIGHT CHARGES BILL TO"? If yes → customer MUST equal that Bill To NAME; if customer equals SHIP FROM name → REJECT and correct before output. Example fail: customer="Klockner Pentaplast of America, Inc" when Bill To is "KLOCKNER PENTAPLAST % Ruan Transpor".
+No company key. customer_order from CUST. PO / PO / Load# / header Carrier Confirmation only — never Ship From name. salesman=person only. importer only if labeled IOR. weight=mass+unit; ValueOfgoods=money; dimention=LxWxH only; refs=Ref only; notes≠refs; commodity MUST NOT be pcs/weight (e.g. never "4 pcs, 4624 lbs" — use null). 2+ commodities → shipment is an array of full objects (not commodity:[] inside one object). fuel uses fuel* keys only.
+pickup_location & delivery_location: Canada/America/India only; city, state/province, country, pincode COMMA-SEPARATED; data words unchanged — commas only; no invented address parts. Zero hallucination. Valid JSON only.
 
 DOCUMENT TEXT:
 {text}
