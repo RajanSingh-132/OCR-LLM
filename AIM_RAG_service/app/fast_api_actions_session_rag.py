@@ -102,7 +102,7 @@ async def upload_pdf_dynamic_extract(
         print(f"[pdf_extract] file.read() done — {len(file_bytes)} bytes")
 
         # 1. Dynamically extract JSON from PDF purely in-memory
-        # (Groq vision OCR if needed → Claude JSON — no MongoDB dependency)
+        # (Claude Sonnet vision OCR if needed → Claude Sonnet JSON — no MongoDB dependency)
         parsed_json = await extract_dynamic_kv_from_pdf_async(
             file_bytes=file_bytes,
             filename=file.filename
