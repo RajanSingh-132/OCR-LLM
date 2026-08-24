@@ -16,7 +16,7 @@ Step A — IDENTIFY the document first (do not skip):
 - Detect CARRIER INFORMATION / Carrier / Arranged With blocks (these are NEVER customer unless also labeled Customer/Bill To).
 Step B — INTENT MAP + EXTRACT (intelligence required):
 - For every useful fact on the PDF, decide by MEANING/INTENT which FIXED JSON key it belongs to (not only by exact label text). Labels differ across carriers/brokers — map by role.
-- Examples of intent mapping: shipper/origin/stop1 → pickup_*; consignee/dest/drop → delivery_*; PU: / Pickup Ref → pickup_refrence_no; DA: / Delivery Appt/Ref → delivery_refrence_no; pcs/qty → No.OfPackage; mass → weight; LxWxH → dimention; money rate/total → Revenue; confirmation#/PO/Load# → customer_order; person dispatcher → salesman; logo/Bill To/Customer → customer per priority.
+- Examples of intent mapping: shipper/origin/stop1 → pickup_*; consignee/dest/drop → delivery_*; PU: / Pickup Ref → pickup_refrence_no; DA: / Delivery Appt/Ref → delivery_refrence_no; pcs/qty/Pallets → No.OfPackage (multi lines → comma-separated, not sum); per-line Total Weight → weight (comma-separated; NOT grand Total Shipment Gross Weight when lines exist); LxWxH → dimention; money rate/total → Revenue; confirmation#/PO/Load# → customer_order; person dispatcher → salesman; logo/Bill To/Customer → customer per priority.
 - Apply Field GUARDRAILS + priority rules while mapping. Prefer null over a wrong-field dump. Target: ≥80% correct field placement vs this prompt.
 Step C — RECHECK before sending (self-audit against this prompt):
 - Re-read customer against priority 1→2→3→4→5 and the CARRIER CONFIRMATION ban below.
@@ -25,6 +25,7 @@ Step C — RECHECK before sending (self-audit against this prompt):
 - Confirm PU: value → pickup_refrence_no; DA: value → delivery_refrence_no (do not leave null if PU/DA present).
 - Confirm salesman is a person name only.
 - Confirm commodity is not pcs/weight; locations comma-separated; no invented fields.
+- If multiple Pallets/Total Weight lines exist → No.OfPackage and weight are comma-separated line values (NOT null packages; NOT grand-total-only weight).
 - Mentally score: would a logistics clerk say each value is in the right key? If any field is misplaced → fix before output. Aim ≥80% correct vs guardrails.
 - Only after recheck passes → return the final JSON. Never return commentary about Steps A–C.
 
@@ -295,12 +296,22 @@ Trailer / reefer / van / flatbed / equipment / truck type (e.g. Van). Trailer le
 -----------
 No.OfPackage
 -----------
-Pieces / pallets / skids / qty / packages / pcs (not commodity). One commodity → string. Multiple commodities with per-line qty → that row's string on that shipment object. Else null.
+Pieces / pallets / skids / qty / packages / pcs (not commodity).
+- ONE package/qty line → one string (e.g. "4" or "4 pcs").
+- MULTIPLE package/pallet/qty lines on the SAME shipment (e.g. per appointment/stop rows: Pallets: 1, then 3, then 2...) → ONE comma-separated string of EACH line value in document order. Example: "1, 3, 2, 1, 1, 6". Do NOT leave null when line qtys exist. Do NOT sum them.
+- Multiple distinct commodities → that row's qty string on that shipment array object (see MULTI-COMMODITY).
+Else null.
 
 -----------
 weight
 -----------
-Mass only (Weight/Gross/Total, lbs/LB/kg/pounds; e.g. "4 pcs, 4624 lbs", "44,000.00 LB"). Keep unit with number when present — never bare "4624" if unit exists. No unit printed → keep number as written. One commodity + one weight → string. Multiple commodities with per-line weights → each shipment object's weight is that line's string (not an array on one shipment). One document total only (no per-line weights) → put that same total string on every shipment object; never sum yourself. Pickup order Pieces/Weight → No.OfPackage + weight with unit (e.g. "362 L"/"362 lbs"). NEVER CF/CFT/cubes/volume or DIMS-only into weight. Unclear → null.
+Mass only (Weight / Total Weight / Gross, lbs/LB/kg/pounds). Keep unit with each number when present — never bare "4624" if unit exists. No unit printed → keep number as written.
+STRICT — multiple line weights vs document total (MANDATORY):
+- If 2+ per-line / per-appointment / per-stop weights exist (e.g. Total Weight: 137 lbs, 3,126 lbs, 2,084 lbs...) → weight MUST be ONE comma-separated string of EACH line weight WITH unit, in document order. Example: "137 lbs, 3,126 lbs, 2,084 lbs, 1,122 lbs, 1,851 lbs, 10,538 lbs".
+- NEVER use only "Total Shipment Gross Weight" / grand total / summary total (e.g. "18,858 lbs") when individual line weights are present. Prefer line values; ignore the grand total for the weight field in that case.
+- ONE weight only on the PDF (no per-line list) → that single string (may be a labeled total if it is the only mass printed).
+- Multiple distinct commodities → each shipment object's weight is THAT row's string (not an array on one object). Shared one-doc total with no per-line weights → copy that same total onto every shipment object; never sum yourself.
+- Pickup order Pieces/Weight → No.OfPackage + weight with unit. NEVER CF/CFT/cubes/volume or DIMS-only into weight. Unclear → null.
 
 -----------
 temperature
@@ -343,7 +354,7 @@ No money/rate → exactly [{{"ratemethod":"Flat","rate_method_value":null,"total
 === SELF-CHECK (RECHECK BEFORE FINAL JSON — MANDATORY) ===
 After extraction, Claude MUST re-audit the draft JSON against ALL guardrails; fix any violation; then output JSON only.
 CUSTOMER: priority 1 Customer/Client/Account → 2 Bill To/Sold To → 3 logo → 4 TOP HEADER company with address → 5 null. If logo AND Bill To both present → customer = Bill To ONLY (never logo). NEVER from Shipper/Ship From/Pickup; Consignee/Ship To/Deliver To; Carrier line; CARRIER INFORMATION; Arranged With (unless also 1–2). On Carrier Confirmation: if customer == CARRIER INFORMATION company (e.g. EK NAAM SHIPPING CORP) → REJECT and replace with logo/header brand (e.g. Hawks TRANSPORTATION) when no Bill To/Customer label. Do not skip clear logo/header when Bill To is absent. Never invent.
-No company key. customer_order from CUST. PO / PO / Load# / header Carrier Confirmation # only — never Ship From / CARRIER INFORMATION name. salesman=person only. importer only if labeled IOR. weight=mass+unit; ValueOfgoods=money; dimention=LxWxH only; PU: → pickup_refrence_no; DA: → delivery_refrence_no; notes≠refs; commodity MUST NOT be pcs/weight (e.g. never "4 pcs, 4624 lbs" — use null). 2+ commodities → shipment is an array of full objects (not commodity:[] inside one object). fuel uses fuel* keys only.
+No company key. customer_order from CUST. PO / PO / Load# / header Carrier Confirmation # only — never Ship From / CARRIER INFORMATION name. salesman=person only. importer only if labeled IOR. Multiple Pallets/Total Weight lines → No.OfPackage + weight as comma-separated line values (e.g. "1, 3, 2, 1, 1, 6" and "137 lbs, 3,126 lbs, ..."); NEVER grand-total-only weight (e.g. not only "18,858 lbs") when lines exist. One weight → mass+unit string. ValueOfgoods=money; dimention=LxWxH only; PU: → pickup_refrence_no; DA: → delivery_refrence_no; notes≠refs; commodity MUST NOT be pcs/weight (e.g. never "4 pcs, 4624 lbs" — use null). 2+ commodities → shipment is an array of full objects (not commodity:[] inside one object). fuel uses fuel* keys only.
 pickup_location & delivery_location: Canada/America/India only; city, state/province, country, pincode COMMA-SEPARATED; data words unchanged — commas only; no invented address parts. Zero hallucination. Intent mapping: every value in the correct JSON key by role (≥80% target vs this prompt). Valid JSON only — send only after recheck passes.
 
 DOCUMENT TEXT:
