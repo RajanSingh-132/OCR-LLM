@@ -84,4 +84,4 @@ def get_vision_llm(model_name: str = None):
             f"[pdf_extract] get_vision_llm() ready — "
             f"Claude vision model={model_name}"
         )
-    return _haiku_vision_llm_cache
+    return _vision_llm_cache[model_name]
