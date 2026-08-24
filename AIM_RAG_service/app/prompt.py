@@ -16,7 +16,7 @@ Step A — IDENTIFY the document first (do not skip):
 - Detect CARRIER INFORMATION / Carrier / Arranged With blocks (these are NEVER customer unless also labeled Customer/Bill To).
 Step B — INTENT MAP + EXTRACT (intelligence required):
 - For every useful fact on the PDF, decide by MEANING/INTENT which FIXED JSON key it belongs to (not only by exact label text). Labels differ across carriers/brokers — map by role.
-- Examples of intent mapping: shipper/origin/stop1 → pickup_*; consignee/dest/drop → delivery_*; PU: / Pickup Ref → pickup_refrence_no; DA: / Delivery Appt/Ref → delivery_refrence_no; pcs/qty → No.OfPackage; mass → weight; LxWxH → dimention; money rate/total → Revenue; confirmation#/PO/Load# → customer_order; person dispatcher → salesman; logo/Bill To/Customer → customer per priority.
+- Examples of intent mapping: shipper/origin/stop1 → pickup_*; consignee/dest/drop → delivery_*; PU: / Pickup Ref → pickup_refrence_no; DA: / Delivery Appt/Ref → delivery_refrence_no; pcs/qty/Pallets → No.OfPackage (multi lines → JSON array, not sum, not one comma-string); per-line Total Weight → weight (JSON array of line weights; NOT grand Total Shipment Gross Weight when lines exist); multi Appt times → delivery_time JSON array; multi drops → delivery_location JSON array; LxWxH → dimention; money rate/total → Revenue; confirmation#/PO/Load# → customer_order; person dispatcher → salesman; logo/Bill To/Customer → customer per priority.
 - Apply Field GUARDRAILS + priority rules while mapping. Prefer null over a wrong-field dump. Target: ≥80% correct field placement vs this prompt.
 Step C — RECHECK before sending (self-audit against this prompt):
 - Re-read customer against priority 1→2→3→4→5 and the CARRIER CONFIRMATION ban below.
@@ -24,7 +24,8 @@ Step C — RECHECK before sending (self-audit against this prompt):
 - Confirm customer_order is the confirmation# / PO / Load# — NEVER a carrier company name.
 - Confirm PU: value → pickup_refrence_no; DA: value → delivery_refrence_no (do not leave null if PU/DA present).
 - Confirm salesman is a person name only.
-- Confirm commodity is not pcs/weight; locations comma-separated; no invented fields.
+- Confirm commodity is not pcs/weight; single locations comma-separated; multi stops/packages/weights/times → JSON arrays (not one merged string); no invented fields.
+- If multiple Pallets/Total Weight/Appt times/drops exist → No.OfPackage, weight, delivery_time, delivery_location are JSON arrays of line values (NOT null packages; NOT grand-total-only weight; NOT one long comma string).
 - Mentally score: would a logistics clerk say each value is in the right key? If any field is misplaced → fix before output. Aim ≥80% correct vs guardrails.
 - Only after recheck passes → return the final JSON. Never return commentary about Steps A–C.
 
@@ -89,10 +90,20 @@ Return this exact structure and these exact keys only:
 2. Top-level exactly: customerinfo, shipment, Revenue.
 3. Keep spellings: custome_broker, shipmetControlNo., dimention, Copmliancehandling, fluecurrencyTypes, fuelratemethod, fuel_rate_method_value, fuel_total_value.
 4. Do NOT output "comapny"/"company".
-5. One value → string. Multiple PICKUP/DELIVERY STOPS → array of address strings inside that field. Do not merge stops into one string. Do not sum weights.
+5. One value → string. Multiple values for the SAME field (stops, times, packages, weights, dims) → JSON ARRAY of strings (one item per line in document order). NEVER merge multi values into one long comma string. Do not sum weights/packages.
 6. MULTIPLE COMMODITIES → split shipment into an ARRAY of objects (see MULTI-COMMODITY SHIPMENT). Never put 2+ commodities in one commodity array inside a single shipment object.
 7. customerinfo.customer: follow Field GUARDRAILS priority 1→2→3→4→5 strictly (stop at first match). If logo AND Bill To both present → always Bill To, never logo. On Carrier Confirmation: NEVER use CARRIER INFORMATION / Carrier / Arranged With company as customer — use logo/header (e.g. Hawks). Never invent.
 8. Never hallucinate: if not written on the document → null. Do not "fix" spelling of names/numbers; do not invent city/state/country/pincode that are not present.
+
+=== MULTI-VALUE ARRAY FORMAT (MANDATORY) ===
+When a field has 2+ values, output a JSON array — each value its own array element (pretty-print puts each on the next line). NEVER one string like "1, 3, 2" or "5:00AM, 7:00AM".
+Correct example:
+"No.OfPackage": ["1", "3", "2", "1", "1", "6"]
+"weight": ["137 lbs", "3,126 lbs", "2,084 lbs", "1,122 lbs", "1,851 lbs", "10,538 lbs"]
+"delivery_time": ["5:00AM", "7:00AM", "8:00AM", "9:00AM", "10:00AM", "11:00AM"]
+"delivery_location": ["Costco Wholesale CAD - Winnipeg Business CTR-17680423038, 1315 St. James Street, Winnipeg, MB", "Peak of the Market Ltd.-FO IGO WPG 5/2, 1200 King Edward St., Winnipeg, MB"]
+Wrong: "No.OfPackage": "1, 3, 2, 1, 1, 6" or one giant merged delivery_location string.
+One value only → plain string (not a 1-item array). Apply to: pickup_location, delivery_location, pickup_time, delivery_time, pickup_date, delivery_date (if multiple distinct), No.OfPackage, weight, dimention, pickup_refrence_no, delivery_refrence_no when multi.
 
 === MULTI-COMMODITY SHIPMENT (CRITICAL) ===
 Count distinct product/commodity line items on the PDF.
@@ -124,7 +135,8 @@ COMMA SEPARATION (MANDATORY when building JSON):
 - If already comma-separated correctly → keep as-is (no double commas).
 - Missing part (no pincode / no country printed) → omit that part only; do not invent it; still comma-separate remaining parts.
 - Name+street/city/region = ONE string per stop. No duplicate/OCR-repeat addresses.
-- Multi distinct stops → array of comma-separated strings; one stop → one comma-separated string.
+- Multi distinct stops → JSON ARRAY of address strings (one stop per element; each address still comma-separated internally). NEVER merge all stops into one long string.
+- One stop → one comma-separated string (not a 1-item array).
 - Drop city-only duplicates of a fuller address.
 
 === FIELD GUARDRAILS ===
@@ -227,17 +239,17 @@ TWO OR MORE distinct commodities (e.g. "91272 – VHT", "91862 – 385k Oilfield
 pickup_location
 -----------
 Shipper / Pick / Stop #1 / Origin / Pickup From / Ship From + full address MUST go here. Never consignee here.
-Follow SHARED LOCATION RULES: Canada / America(USA) / India addresses only; output city, state/province, country, pincode as COMMA-SEPARATED; do not change extracted words — only add commas. Else null.
+Follow SHARED LOCATION RULES. One pickup → one comma-separated address string. Multiple pickups → JSON ARRAY of address strings. NEVER merge into one long string. Else null.
 
 -----------
 pickup_date
 -----------
-Pickup/shipper date only. Apply SHARED DATE YEAR RULE. Else null.
+Pickup/shipper date only. Apply SHARED DATE YEAR RULE. One date → string. Multiple distinct dates → JSON array. Else null.
 
 -----------
 pickup_time
 -----------
-Pickup/shipper time only. Else null.
+Pickup/shipper time only. One time → string. Multiple times → JSON ARRAY. NEVER one comma-joined string. Else null.
 
 -----------
 pickup_refrence_no
@@ -261,17 +273,17 @@ If only one overall distance is printed, use that. Else null.
 delivery_location
 -----------
 Consignee / Deliver / Drop / Stop #2+ / Deliver To / Ship To + full address MUST go here. Never shipper here.
-Follow SHARED LOCATION RULES: Canada / America(USA) / India addresses only; output city, state/province, country, pincode as COMMA-SEPARATED; do not change extracted words — only add commas. Else null.
+Follow SHARED LOCATION RULES. One drop → one comma-separated address string. Multiple drops/appointments → JSON ARRAY of address strings (one facility+address per element). NEVER merge all drops into one long string. Else null.
 
 -----------
 delivery_date
 -----------
-Delivery/consignee date only. Apply SHARED DATE YEAR RULE. Else null.
+Delivery/consignee date only. Apply SHARED DATE YEAR RULE. One date → string. Multiple distinct dates → JSON array of date strings. Else null.
 
 -----------
 delivery_time
 -----------
-Delivery/consignee time only. Else null.
+Delivery/consignee / Appt time only. One time → string (e.g. "5:00AM"). Multiple Appt times → JSON ARRAY in document order (e.g. ["5:00AM", "7:00AM", "8:00AM", "9:00AM", "10:00AM", "11:00AM"]). NEVER one string "5:00AM, 7:00AM, ...". Else null.
 
 -----------
 delivery_refrence_no
@@ -295,12 +307,22 @@ Trailer / reefer / van / flatbed / equipment / truck type (e.g. Van). Trailer le
 -----------
 No.OfPackage
 -----------
-Pieces / pallets / skids / qty / packages / pcs (not commodity). One commodity → string. Multiple commodities with per-line qty → that row's string on that shipment object. Else null.
+Pieces / pallets / skids / qty / packages / pcs (not commodity).
+- ONE package/qty line → one string (e.g. "4" or "4 pcs").
+- MULTIPLE package/pallet/qty lines on the SAME shipment (e.g. per appointment: Pallets: 1, then 3, then 2...) → JSON ARRAY of EACH line value in document order. Example: ["1", "3", "2", "1", "1", "6"]. NEVER one string "1, 3, 2, 1, 1, 6". Do NOT leave null when line qtys exist. Do NOT sum them.
+- Multiple distinct commodities → that row's qty string on that shipment array object (see MULTI-COMMODITY).
+Else null.
 
 -----------
 weight
 -----------
-Mass only (Weight/Gross/Total, lbs/LB/kg/pounds; e.g. "4 pcs, 4624 lbs", "44,000.00 LB"). Keep unit with number when present — never bare "4624" if unit exists. No unit printed → keep number as written. One commodity + one weight → string. Multiple commodities with per-line weights → each shipment object's weight is that line's string (not an array on one shipment). One document total only (no per-line weights) → put that same total string on every shipment object; never sum yourself. Pickup order Pieces/Weight → No.OfPackage + weight with unit (e.g. "362 L"/"362 lbs"). NEVER CF/CFT/cubes/volume or DIMS-only into weight. Unclear → null.
+Mass only (Weight / Total Weight / Gross, lbs/LB/kg/pounds). Keep unit with each number when present — never bare "4624" if unit exists. No unit printed → keep number as written.
+STRICT — multiple line weights vs document total (MANDATORY):
+- If 2+ per-line / per-appointment / per-stop weights exist → weight MUST be a JSON ARRAY of EACH line weight WITH unit, in document order. Example: ["137 lbs", "3,126 lbs", "2,084 lbs", "1,122 lbs", "1,851 lbs", "10,538 lbs"]. NEVER one string "137 lbs, 3,126 lbs, ...".
+- NEVER use only "Total Shipment Gross Weight" / grand total / summary total (e.g. "18,858 lbs") when individual line weights are present. Prefer line values; ignore the grand total for the weight field in that case.
+- ONE weight only on the PDF (no per-line list) → that single string (may be a labeled total if it is the only mass printed).
+- Multiple distinct commodities → each shipment object's weight is THAT row's string (not an array on one object). Shared one-doc total with no per-line weights → copy that same total onto every shipment object; never sum yourself.
+- Pickup order Pieces/Weight → No.OfPackage + weight with unit. NEVER CF/CFT/cubes/volume or DIMS-only into weight. Unclear → null.
 
 -----------
 temperature
@@ -343,8 +365,8 @@ No money/rate → exactly [{{"ratemethod":"Flat","rate_method_value":null,"total
 === SELF-CHECK (RECHECK BEFORE FINAL JSON — MANDATORY) ===
 After extraction, Claude MUST re-audit the draft JSON against ALL guardrails; fix any violation; then output JSON only.
 CUSTOMER: priority 1 Customer/Client/Account → 2 Bill To/Sold To → 3 logo → 4 TOP HEADER company with address → 5 null. If logo AND Bill To both present → customer = Bill To ONLY (never logo). NEVER from Shipper/Ship From/Pickup; Consignee/Ship To/Deliver To; Carrier line; CARRIER INFORMATION; Arranged With (unless also 1–2). On Carrier Confirmation: if customer == CARRIER INFORMATION company (e.g. EK NAAM SHIPPING CORP) → REJECT and replace with logo/header brand (e.g. Hawks TRANSPORTATION) when no Bill To/Customer label. Do not skip clear logo/header when Bill To is absent. Never invent.
-No company key. customer_order from CUST. PO / PO / Load# / header Carrier Confirmation # only — never Ship From / CARRIER INFORMATION name. salesman=person only. importer only if labeled IOR. weight=mass+unit; ValueOfgoods=money; dimention=LxWxH only; PU: → pickup_refrence_no; DA: → delivery_refrence_no; notes≠refs; commodity MUST NOT be pcs/weight (e.g. never "4 pcs, 4624 lbs" — use null). 2+ commodities → shipment is an array of full objects (not commodity:[] inside one object). fuel uses fuel* keys only.
-pickup_location & delivery_location: Canada/America/India only; city, state/province, country, pincode COMMA-SEPARATED; data words unchanged — commas only; no invented address parts. Zero hallucination. Intent mapping: every value in the correct JSON key by role (≥80% target vs this prompt). Valid JSON only — send only after recheck passes.
+No company key. customer_order from CUST. PO / PO / Load# / header Carrier Confirmation # only — never Ship From / CARRIER INFORMATION name. salesman=person only. importer only if labeled IOR. Multiple Pallets/Total Weight/Appt times/drops → No.OfPackage, weight, delivery_time, delivery_location as JSON ARRAYS (e.g. ["1","3","2","1","1","6"], ["137 lbs","3,126 lbs",...], ["5:00AM","7:00AM",...]); NEVER one long comma string; NEVER grand-total-only weight (e.g. not only "18,858 lbs") when lines exist. One value → string. ValueOfgoods=money; dimention=LxWxH only; PU: → pickup_refrence_no; DA: → delivery_refrence_no; notes≠refs; commodity MUST NOT be pcs/weight (e.g. never "4 pcs, 4624 lbs" — use null). 2+ commodities → shipment is an array of full objects (not commodity:[] inside one object). fuel uses fuel* keys only.
+pickup_location & delivery_location: Canada/America/India only; each stop address city/state/country/pincode COMMA-SEPARATED; multi stops → JSON array of strings (never one merged blob); data words unchanged — commas only; no invented address parts. Zero hallucination. Intent mapping: every value in the correct JSON key by role (≥80% target vs this prompt). Valid JSON only — send only after recheck passes.
 
 DOCUMENT TEXT:
 {text}
