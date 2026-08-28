@@ -9,8 +9,11 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.mongo_client import get_mongo_collection
-from app.order_ask.config import AVAAL_COLLECTION_NAME, AVAAL_NAMESPACE
+from app.tenants.router import (
+    get_orders_collection,
+    get_orders_metadata_type,
+    get_orders_namespace,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -21,7 +24,7 @@ FORMULA_CATALOG: Dict[str, Dict[str, Any]] = {
     "order_count": {
         "id": "order_count",
         "label": "Order Count",
-        "description": "Total number of orders in Avaal_db.",
+        "description": "Total number of orders in db.",
         "op": "count",
         "field": None,
         "aliases": [
@@ -187,8 +190,8 @@ def list_formula_catalog_for_prompt() -> str:
 
 def _base_match(extra_filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     match: Dict[str, Any] = {
-        "namespace": AVAAL_NAMESPACE,
-        "metadata.type": "avaal_order",
+        "namespace": get_orders_namespace(),
+        "metadata.type": get_orders_metadata_type(),
     }
     if extra_filters:
         match.update(extra_filters)
@@ -290,7 +293,7 @@ def _run_field_aggs(
     fields: List[str],
     filters: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    collection = get_orders_collection()
     match = _base_match(filters)
     group: Dict[str, Any] = {"_id": None, "order_count": {"$sum": 1}}
     for field in fields:

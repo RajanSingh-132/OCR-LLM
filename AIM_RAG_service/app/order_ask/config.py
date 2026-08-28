@@ -2,7 +2,7 @@
 Avaal Orders Ask API — Mongo collection config.
 
 DB: same as .env DB_NAME (chatbot_db)
-Collection (ask-only): Avaal_db
+Collection (ask-only): Avaal_order
 """
 import os
 from dotenv import load_dotenv
@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 _SERVICE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 load_dotenv(os.path.join(_SERVICE_ROOT, ".env"))
 
-AVAAL_COLLECTION_NAME = os.environ.get("AVAAL_COLLECTION_NAME", "Avaal_db")
+AVAAL_COLLECTION_NAME = os.environ.get("AVAAL_COLLECTION_NAME", "Avaal_order")
 AVAAL_NAMESPACE = os.environ.get("AVAAL_NAMESPACE", "avaal_orders")
 AVAAL_SOURCE_DOCUMENT = os.environ.get(
     "AVAAL_SOURCE_DOCUMENT",

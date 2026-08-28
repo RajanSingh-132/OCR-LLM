@@ -128,12 +128,14 @@ async def upload_pdf_dynamic_extract(
         "extracted_json": parsed_json
     }
 
-# ==================== ORDER MANAGEMENT API (Avaal_db + Anthropic) ====================
+# ==================== ORDER MANAGEMENT API (Avaal_order + Anthropic) ====================
 
 class OrderQuery(BaseModel):
     question: str
-    # Kept for API compatibility; Avaal ask always uses Avaal_db / avaal_orders.
-    collection_name: str = "avaal_orders"
+    # Identifies which company/tenant DB to use (routing wired in a later step).
+    corporate_id: str
+    # Kept for API compatibility; ask uses tenant orders collection (default Avaal_order).
+    # collection_name: str = "avaal_orders"
     # Pass back session_id from previous response to continue conversation.
     session_id: str | None = None
 
@@ -147,15 +149,16 @@ async def ask_order_question(query: OrderQuery):
     2. Retrieve relevant orders based on the question
     3. Use LLM to generate intelligent response
 
-    Send the same session_id on follow-up turns to keep memory
+    Send the same session_id and corporate_id on follow-up turns to keep memory
     (e.g. "uska status?" after looking up an order).
 
     Watch the server terminal for [CHECKPOINT] logs.
     """
     try:
         logger.info(
-            "Received Avaal order query: %s | session_id=%s",
+            "Received Avaal order query: %s | corporate_id=%s | session_id=%s",
             query.question,
+            query.corporate_id,
             query.session_id,
         )
         from app.order_ask.rag_engine import answer_order_question
@@ -166,6 +169,7 @@ async def ask_order_question(query: OrderQuery):
             True,
             10,
             query.session_id,
+            query.corporate_id,
         )
         return result
     except HTTPException:

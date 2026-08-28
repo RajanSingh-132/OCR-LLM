@@ -13,6 +13,24 @@ MONGO_URI = os.environ.get("MONGO_URI", "")
 MONGO_DB_NAME = os.environ.get("DB_NAME", "")
 MONGO_COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "ocr_db")
 
+_mongo_client_cache = None
+
+
+def get_mongo_client() -> MongoClient:
+    """Shared Mongo client (one per process)."""
+    global _mongo_client_cache
+    if not MONGO_URI:
+        raise ValueError(
+            "Mongo config missing. Please set "
+            "mongo_db.MONGO_URI and mongo_db.DB_NAME"
+        )
+    if _mongo_client_cache is None:
+        _mongo_client_cache = MongoClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=15000,
+        )
+    return _mongo_client_cache
+
 
 def _to_python_types(value):
     """Convert numpy types and complex Python objects to JSON-serializable types"""
@@ -49,26 +67,41 @@ def _to_python_types(value):
     return value
 
 
-def get_mongo_collection(collection_name: str = None):
-    """Get MongoDB collection with proper indexes"""
+def get_mongo_collection(
+    collection_name: str = None,
+    db_name: str = None,
+    *,
+    ensure_indexes: bool = False,
+):
+    """
+    Get a MongoDB collection handle (read-only by default).
+
+    ensure_indexes=True only for ingest/setup — otherwise indexes would
+    create empty collections/DBs on first access.
+    """
     if not MONGO_URI or not MONGO_DB_NAME:
         raise ValueError(
             "Mongo config missing. Please set "
             "mongo_db.MONGO_URI and mongo_db.DB_NAME"
         )
 
-    client = MongoClient(
-        MONGO_URI,
-        serverSelectionTimeoutMS=15000
-    )
-
-    db = client[MONGO_DB_NAME]
+    client = get_mongo_client()
+    db = client[db_name or MONGO_DB_NAME]
     collection = db[collection_name or MONGO_COLLECTION_NAME]
 
-    # Indexes for fast namespace and source-document filtering.
-    collection.create_index([("namespace", 1)])
-    collection.create_index(
-        [("namespace", 1), ("metadata.source_document", 1)]
-    )
+    if ensure_indexes:
+        collection.create_index([("namespace", 1)])
+        collection.create_index(
+            [("namespace", 1), ("metadata.source_document", 1)]
+        )
 
     return collection
+
+
+def list_mongo_database_names() -> list[str]:
+    """Return database names that already exist on the server (no create)."""
+    return sorted(get_mongo_client().list_database_names())
+
+
+def mongo_database_exists(db_name: str) -> bool:
+    return db_name in set(list_mongo_database_names())

@@ -1,5 +1,5 @@
 """
-One-time / safe setup for Avaal_db collection used by /api/v1/orders/ask.
+One-time / safe setup for collection used by /api/v1/orders/ask.
 
 Creates the collection (if missing), indexes, and a setup marker doc.
 Does NOT ingest order records — put JSON in avaal_orders/data/ later.
@@ -27,12 +27,12 @@ def ensure_avaal_data_dir() -> str:
 
 def setup_avaal_collection() -> dict:
     """
-    Ensure Mongo DB + Avaal_db collection exist with indexes.
+    Ensure Mongo DB  collection exist with indexes.
     Returns a small status dict.
     """
     ensure_avaal_data_dir()
 
-    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    collection = get_mongo_collection(AVAAL_COLLECTION_NAME, ensure_indexes=True)
 
     # Extra index helpful for order-id style metadata later
     collection.create_index([("namespace", 1), ("metadata.orderid", 1)])
