@@ -1,7 +1,7 @@
 """
 Avaal orders retrieval helpers for /api/v1/orders/ask.
 
-Uses dedicated Mongo collection Avaal_db + namespace avaal_orders.
+Uses dedicated Mongo collection Avaal_order + namespace avaal_orders.
 Builds on MongoVectorStore from app.rag_retrieval (PDF store) without changing PDF flow.
 """
 from __future__ import annotations
@@ -12,14 +12,14 @@ from typing import Any, Dict, List, Optional
 from langchain_core.documents import Document
 
 from app.embedding_client import get_models
-from app.mongo_client import get_mongo_collection
 from app.order_ask.checkpoint import checkpoint
-from app.order_ask.config import (
-    AVAAL_COLLECTION_NAME,
-    AVAAL_NAMESPACE,
-    AVAAL_RAG_MIN_SCORE,
-)
+from app.order_ask.config import AVAAL_RAG_MIN_SCORE
 from app.rag_retrieval import MongoVectorStore
+from app.tenants.router import (
+    get_orders_collection,
+    get_orders_metadata_type,
+    get_orders_namespace,
+)
 
 # Projection used for list/search responses (no embeddings)
 _LIST_PROJECTION = {
@@ -29,13 +29,15 @@ _LIST_PROJECTION = {
 
 
 def get_avaal_vectorstore(embeddings=None) -> Optional[MongoVectorStore]:
-    """Return vectorstore bound to Avaal_db / avaal_orders if data exists."""
+    """Return vectorstore bound to Avaal_order / avaal_orders if data exists."""
     if embeddings is None:
         embeddings, _ = get_models()
 
-    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    collection = get_orders_collection()
+    namespace = get_orders_namespace()
+    metadata_type = get_orders_metadata_type()
     exists = collection.count_documents(
-        {"namespace": AVAAL_NAMESPACE, "metadata.type": "avaal_order"},
+        {"namespace": namespace, "metadata.type": metadata_type},
         limit=1,
     ) > 0
     if not exists:
@@ -44,7 +46,7 @@ def get_avaal_vectorstore(embeddings=None) -> Optional[MongoVectorStore]:
     return MongoVectorStore(
         collection=collection,
         embeddings=embeddings,
-        namespace=AVAAL_NAMESPACE,
+        namespace=namespace,
     )
 
 
@@ -57,7 +59,7 @@ def retrieve_avaal_orders(
     """Semantic retrieve top-k Avaal order chunks (weak matches dropped)."""
     vectorstore = get_avaal_vectorstore(embeddings=embeddings)
     if vectorstore is None:
-        checkpoint("RAG", "no vectorstore / empty Avaal_db")
+        checkpoint("RAG", "no vectorstore / empty Avaal_order")
         return []
     threshold = AVAAL_RAG_MIN_SCORE if min_score is None else min_score
     docs = vectorstore.similarity_search(
@@ -134,8 +136,8 @@ def _pin_pattern(pin: str) -> str:
 
 def _base_order_match(filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     match: Dict[str, Any] = {
-        "namespace": AVAAL_NAMESPACE,
-        "metadata.type": "avaal_order",
+        "namespace": get_orders_namespace(),
+        "metadata.type": get_orders_metadata_type(),
     }
     filters = filters or {}
     if filters.get("orderstatus"):
@@ -269,7 +271,7 @@ def search_orders(
     if sort_by not in allowed_sort:
         sort_by = "orderid"
 
-    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    collection = get_orders_collection()
     match = _base_order_match(filters)
     total = collection.count_documents(match)
     cursor = (
@@ -372,11 +374,11 @@ def find_order_by_id_or_number(token: str) -> Optional[Dict[str, Any]]:
     """Exact lookup by orderid or ordernumber when user asks for one order."""
     if not token:
         return None
-    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    collection = get_orders_collection()
     token = token.strip()
     query_filter: Dict[str, Any] = {
-        "namespace": AVAAL_NAMESPACE,
-        "metadata.type": "avaal_order",
+        "namespace": get_orders_namespace(),
+        "metadata.type": get_orders_metadata_type(),
     }
     if token.isdigit():
         query_filter["$or"] = [

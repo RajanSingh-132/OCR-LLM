@@ -1,7 +1,7 @@
 """
 Conversation memory for Avaal OrderBot (session turns + last entities).
 
-Stored in Mongo collection avaal_chat_sessions (same DB as Avaal_db).
+Stored in Mongo collection avaal_chat_sessions (same DB ).
 """
 from __future__ import annotations
 
@@ -29,6 +29,8 @@ def load_session(session_id: Optional[str]) -> Dict[str, Any]:
         checkpoint("MEMORY", "new session created", session_id=session_id)
         return {
             "session_id": session_id,
+            "corporate_id": None,
+            "last_domain": None,
             "turns": [],
             "last_order_token": None,
             "last_entities": {},
@@ -40,6 +42,8 @@ def load_session(session_id: Optional[str]) -> Dict[str, Any]:
         checkpoint("MEMORY", "session not found — starting fresh", session_id=session_id)
         return {
             "session_id": session_id,
+            "corporate_id": None,
+            "last_domain": None,
             "turns": [],
             "last_order_token": None,
             "last_entities": {},
@@ -56,6 +60,8 @@ def load_session(session_id: Optional[str]) -> Dict[str, Any]:
     )
     return {
         "session_id": session_id,
+        "corporate_id": doc.get("corporate_id"),
+        "last_domain": doc.get("last_domain"),
         "turns": turns,
         "last_order_token": doc.get("last_order_token"),
         "last_entities": doc.get("last_entities") or {},
@@ -82,6 +88,8 @@ def save_turn(
     question: str,
     answer: str,
     *,
+    corporate_id: Optional[str] = None,
+    domain: Optional[str] = None,
     order_token: Optional[str] = None,
     entities: Optional[Dict[str, Any]] = None,
     mode: Optional[str] = None,
@@ -112,6 +120,10 @@ def save_turn(
         },
     }
     set_fields: Dict[str, Any] = {}
+    if corporate_id:
+        set_fields["corporate_id"] = corporate_id
+    if domain:
+        set_fields["last_domain"] = domain
     if order_token:
         set_fields["last_order_token"] = order_token
     if entities:

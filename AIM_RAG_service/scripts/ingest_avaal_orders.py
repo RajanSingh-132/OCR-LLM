@@ -1,5 +1,5 @@
 """
-Ingest all records from orderdata.txt into Mongo Avaal_db.
+Ingest all records from orderdata.txt into Mongo Avaal_order.
 
   python -m scripts.ingest_avaal_orders
 """

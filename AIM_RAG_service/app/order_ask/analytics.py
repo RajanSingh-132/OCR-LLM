@@ -1,5 +1,5 @@
 """
-Fleet-wide analytics over ALL Avaal_db order records.
+Fleet-wide analytics over ALL Avaal_order order records.
 
 Supports:
 - order status summary / counts (Quoted, Cancelled, Confirmed, Dispatched, Delivered, Invoiced, …)
@@ -12,9 +12,12 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from app.mongo_client import get_mongo_collection
 from app.order_ask.checkpoint import checkpoint
-from app.order_ask.config import AVAAL_COLLECTION_NAME, AVAAL_NAMESPACE
+from app.tenants.router import (
+    get_orders_collection,
+    get_orders_metadata_type,
+    get_orders_namespace,
+)
 
 KNOWN_STATUSES = [
     "Quoted",
@@ -38,8 +41,8 @@ COUNTRY_PATTERNS = {
 
 def _base_match() -> Dict[str, Any]:
     return {
-        "namespace": AVAAL_NAMESPACE,
-        "metadata.type": "avaal_order",
+        "namespace": get_orders_namespace(),
+        "metadata.type": get_orders_metadata_type(),
     }
 
 
@@ -449,7 +452,7 @@ def parse_address_geo(addr: Optional[str]) -> Optional[Dict[str, str]]:
 
 
 def _iter_geo_from_orders(location_side: str = "both") -> List[Dict[str, str]]:
-    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    collection = get_orders_collection()
     projection = {
         "pickupfulladdress": 1,
         "deliveryfulladdress": 1,
@@ -575,7 +578,7 @@ def orders_in_period(
     if date_field not in ("orderdate", "pickupdate", "deliverydate"):
         date_field = "orderdate"
     start = _period_start_iso(days)
-    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    collection = get_orders_collection()
     match: Dict[str, Any] = {
         **_base_match(),
         date_field: {"$gte": start},
@@ -627,7 +630,7 @@ def orders_in_period(
 
 def trip_distance_summary(*, days: Optional[int] = None) -> Dict[str, Any]:
     """Fleet trip / distance snapshot from order fields."""
-    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    collection = get_orders_collection()
     match: Dict[str, Any] = {**_base_match()}
     if days:
         match["orderdate"] = {"$gte": _period_start_iso(days)}
@@ -701,7 +704,7 @@ def trip_distance_summary(*, days: Optional[int] = None) -> Dict[str, Any]:
 
 def status_summary() -> Dict[str, Any]:
     """Count orders per orderstatus across ALL records."""
-    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    collection = get_orders_collection()
     rows = list(
         collection.aggregate(
             [
@@ -749,7 +752,7 @@ def best_customers(
     direction = "worst" if str(direction).lower() == "worst" else "best"
     order = 1 if direction == "worst" else -1  # asc for worst, desc for best
     label = "worst" if direction == "worst" else "best"
-    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    collection = get_orders_collection()
 
     group = {
         "_id": "$customername",
@@ -822,7 +825,7 @@ def customers_by_country(
     Count distinct customers whose pickup and/or delivery address mentions country.
     Uses pickupfulladdress + deliveryfulladdress (and location name fallbacks).
     """
-    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    collection = get_orders_collection()
     rx = _country_regex(country)
     address_or: List[Dict[str, Any]] = []
     if location_side in ("pickup", "both"):
@@ -916,7 +919,7 @@ def activity_on_date(
         date_field = "orderdate"
     date_prefix = normalize_date_prefix(date_prefix) or date_prefix
 
-    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    collection = get_orders_collection()
     match = {
         **_base_match(),
         date_field: {"$regex": f"^{re.escape(date_prefix)}", "$options": "i"},

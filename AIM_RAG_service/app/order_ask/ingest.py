@@ -1,6 +1,4 @@
 """
-Ingest orderdata.txt into Mongo Avaal_db as structured documents.
-
 Each order = 1 document with:
 - all business fields at top level (for Atlas dropdown + $sum calculations)
 - namespace / source metadata
@@ -148,7 +146,7 @@ def ingest_avaal_orders(
     if not records:
         return {"ok": False, "error": "No order records found", "path": path}
 
-    collection = get_mongo_collection(AVAAL_COLLECTION_NAME)
+    collection = get_mongo_collection(AVAAL_COLLECTION_NAME, ensure_indexes=True)
 
     if replace_namespace:
         deleted = collection.delete_many({"namespace": AVAAL_NAMESPACE}).deleted_count
