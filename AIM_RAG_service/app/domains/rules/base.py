@@ -24,12 +24,29 @@ class DomainRules:
     compare_token_pattern: re.Pattern = re.compile(r"$^")
 
 
-def extract_limit(question: str, *, default_all: int = 25) -> Optional[int]:
+def extract_limit(question: str, *, default_all: int = 25, some_default: int = 10) -> Optional[int]:
+    """
+    Parse how many records the user wants.
+    - "give me 20 orders" / "only 2" / "top 5" / "last 3"
+    - "some" / "any" / "few" → some_default (10)
+    - "all" / "every" → default_all
+    """
     ql = (question or "").lower()
-    m = re.search(r"\b(?:top|last|recent|show|list)\s+(\d{1,3})\b", ql)
-    if m:
-        return min(50, max(1, int(m.group(1))))
-    if re.search(r"\b(all|every)\b", ql):
+
+    # Explicit count near domain nouns or list verbs
+    patterns = (
+        r"\b(?:top|last|recent|show|list|get|give|fetch|only|just|bas|kewal)\s+(\d{1,3})\b",
+        r"\b(\d{1,3})\s+(?:orders?|invoices?|trips?|records?|rows?|items?|details?)\b",
+        r"\b(?:orders?|invoices?|trips?)\s*[:=]?\s*(\d{1,3})\b",
+    )
+    for pat in patterns:
+        m = re.search(pat, ql)
+        if m:
+            return min(50, max(1, int(m.group(1))))
+
+    if re.search(r"\b(some|any|few|kuch|kai)\b", ql):
+        return max(1, min(50, int(some_default)))
+    if re.search(r"\b(all|every|saare|saari)\b", ql):
         return default_all
     return None
 

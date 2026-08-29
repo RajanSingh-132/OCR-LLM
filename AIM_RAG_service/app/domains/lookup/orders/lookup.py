@@ -28,9 +28,9 @@ def is_list_or_status_question(question: str) -> bool:
         return True
     if re.search(r"\b(summary|breakdown)\b.*\bstatus\b", q):
         return True
-    if re.search(r"\b(list|show|display|all|some)\b.*\borders?\b", q):
+    if re.search(r"\b(list|show|display|all|some|any|give|get)\b.*\borders?\b", q):
         return True
-    if re.search(r"\borders?\b.*\b(list|show|status|recent|confirmed|quoted|delivered)\b", q):
+    if re.search(r"\borders?\b.*\b(list|show|status|recent|confirmed|quoted|delivered|some)\b", q):
         if not extract_token(question or ""):
             return True
     return False

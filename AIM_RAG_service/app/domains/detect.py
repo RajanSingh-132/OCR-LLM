@@ -43,6 +43,18 @@ def detect_domain_local(question: str, *, history_hint: str = "") -> Tuple[str, 
     if not text:
         return DEFAULT_DOMAIN, "empty_question_default_orders", {}
 
+    # Avaal trip number prefixes are definitive (ETP4455, TRO4725, …).
+    if re.search(r"\b(?:etp|tro|trip)[a-z0-9-]{2,}\b", text, re.I):
+        return "trips", "trip_number_prefix", {"trips": _STRONG_SCORE + 1.0}
+
+    # Invoice numbers like MR3932 / INO4 / AIN12225 (not MRP/TORD/"invoice").
+    if re.search(
+        r"\b(?:mr(?!p)|ino|ain|ugy|inv)[a-z0-9-]*\d[a-z0-9-]*\b",
+        text,
+        re.I,
+    ):
+        return "invoices", "invoice_number_prefix", {"invoices": _STRONG_SCORE + 1.0}
+
     scores = _score_domains(text)
     if not scores:
         return DEFAULT_DOMAIN, "no_keyword_match", scores
@@ -105,6 +117,32 @@ def classify_domain_with_anthropic(
     }
 
 
+def _is_bare_record_token(question: str) -> bool:
+    """True when the message is mostly just an id/number (follow-up after asking for it)."""
+    q = (question or "").strip()
+    if not q:
+        return False
+    # Allow short wrappers: "this", "check", "lookup", etc. + token
+    q2 = re.sub(
+        r"^(?:please\s+)?(?:check|lookup|look\s*up|get|show|find|this|that|here)\s+",
+        "",
+        q,
+        flags=re.I,
+    ).strip()
+    if len(q2.split()) > 2:
+        return False
+    tok = q2.split()[0] if q2 else ""
+    tok = tok.strip(".,:;\"'")
+    if not tok or len(tok) < 2:
+        return False
+    if tok.lower() in {
+        "hi", "hello", "hey", "thanks", "thank", "ok", "okay", "yes", "no",
+        "order", "orders", "invoice", "invoices", "trip", "trips",
+    }:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{1,40}", tok))
+
+
 def detect_domain_detailed(
     question: str,
     *,
@@ -114,11 +152,32 @@ def detect_domain_detailed(
     """
     Hybrid domain detection:
     1) Fast keyword path when a strong match exists (exact invoice/order/trip words).
-    2) Claude when keywords miss, tie, or only weak signals (typos: invoi, ord, trp).
+    2) Sticky last_domain when user sends only a bare number/id after we asked for one.
+    3) Claude when keywords miss, tie, or only weak signals (typos: invoi, ord, trp).
     """
     local_domain, local_reason, scores = detect_domain_local(
         question, history_hint=history_hint
     )
+
+    # After "please provide order/invoice/trip number", user often replies with only the id.
+    last = (history_hint or "").strip().lower()
+    if last in DOMAINS and _is_bare_record_token(question):
+        # Prefix rules from local detection still win when definitive
+        if "prefix" not in local_reason:
+            result = {
+                "domain": last,
+                "method": "local",
+                "reason": f"bare_token_sticky_last_domain={last}",
+                "scores": scores,
+            }
+            checkpoint(
+                "DOMAIN",
+                "detected",
+                domain=last,
+                method="local",
+                reason=result["reason"],
+            )
+            return result
 
     use_llm = False
     if not scores:

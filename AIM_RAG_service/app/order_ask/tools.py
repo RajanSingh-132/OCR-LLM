@@ -126,9 +126,32 @@ def execute_tools(
             token = _record_token(entities, {})
             doc = find_record_by_token(token) if token else None
             if doc:
-                context_blocks.append(
-                    f"EXACT {label} RECORD:\n" + format_record_doc_for_context(doc)
-                )
+                focus = entities.get("focus_fields") or []
+                # Derived paid amount for invoices when outstanding is present
+                if domain == "invoices":
+                    try:
+                        total = float(str(doc.get("TotalAmount") or "").replace(",", "") or 0)
+                        outstanding_raw = doc.get("outstandinamount")
+                        status = str(doc.get("InvoiceStatus") or "").strip().lower()
+                        outstanding = (
+                            float(outstanding_raw)
+                            if outstanding_raw not in (None, "")
+                            else None
+                        )
+                        doc = dict(doc)
+                        if status == "paid":
+                            doc["PaidAmount"] = total
+                        elif outstanding is not None:
+                            doc["PaidAmount"] = max(0.0, total - outstanding)
+                    except (TypeError, ValueError):
+                        pass
+                record_ctx = format_record_doc_for_context(doc)
+                if focus:
+                    record_ctx += (
+                        "\nFOCUS_FIELDS (answer these first): "
+                        + ", ".join(str(f) for f in focus)
+                    )
+                context_blocks.append(f"EXACT {label} RECORD:\n" + record_ctx)
                 matches.append(_match_summary(doc, "exact"))
                 active_order_token = str(token)
                 tools_run.append(name)
@@ -208,6 +231,31 @@ def execute_tools(
         elif name == TOOL_RUN_ANALYTICS and domain == "orders":
             analytics_payload = run_analytics(question, entities=entities)
             context_blocks.append(format_analytics_for_context(analytics_payload))
+            tools_run.append(name)
+
+        elif name == TOOL_RUN_ANALYTICS and domain == "trips":
+            from app.order_ask.trip_analytics import (
+                format_trip_analytics_for_context,
+                run_trip_analytics,
+            )
+
+            analytics_payload = run_trip_analytics(question, entities=entities)
+            context_blocks.append(
+                format_trip_analytics_for_context(analytics_payload)
+            )
+            tools_run.append(name)
+
+        elif name == TOOL_RUN_ANALYTICS and domain == "invoices":
+            from app.order_ask.invoice_analytics import (
+                format_invoice_analytics_for_context,
+                run_invoice_analytics,
+            )
+
+            analytics_payload = run_invoice_analytics(question, entities=entities)
+            # Enrich exact-record style paid amount hint when ranking rows present
+            context_blocks.append(
+                format_invoice_analytics_for_context(analytics_payload)
+            )
             tools_run.append(name)
 
         elif name == TOOL_COMPARE:
