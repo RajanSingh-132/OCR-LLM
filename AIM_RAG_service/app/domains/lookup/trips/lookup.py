@@ -20,7 +20,11 @@ LIST_RE = re.compile(
 )
 TRIP_STATUS_RE = re.compile(
     r"\btrips?\b.*\b(status|statuses|summary|breakdown)\b|"
-    r"\b(status|statuses|summary|breakdown)\b.*\btrips?\b",
+    r"\b(status|statuses|summary|breakdown)\b.*\btrips?\b|"
+    r"\b(planned|dispatched|started|stated|in[- ]?transit|enroute|"
+    r"delivered|deliverd|rejected)\b.*\btrips?\b|"
+    r"\btrips?\b.*\b(planned|dispatched|started|stated|in[- ]?transit|enroute|"
+    r"delivered|deliverd|rejected)\b",
     re.I,
 )
 
@@ -57,6 +61,11 @@ def extract_token(question: str) -> Optional[str]:
     if m and _valid_token(m.group(1)):
         return m.group(1).strip()
 
+    # Bare trip numbers common in Avaal_trip: ETP4455, TRO4725, etc.
+    m = re.search(r"\b((?:ETP|TRO|TRIP)[A-Za-z0-9-]{2,20})\b", q, re.I)
+    if m and _valid_token(m.group(1)):
+        return m.group(1).strip()
+
     return None
 
 
@@ -66,11 +75,25 @@ def is_list_or_status_question(question: str) -> bool:
         return True
     if LIST_RE.search(q):
         return True
-    if re.search(r"\btrips?\b.*\b(driver|truck|trailer)\b", q, re.I):
+    if re.search(
+        r"\btrips?\b.*\b(driver|truck|trailer|customer|commodity|salesman|"
+        r"pickup|delivery|country|distance|type|planned|dispatched|started|"
+        r"in[- ]?transit|delivered|rejected)\b",
+        q,
+        re.I,
+    ):
         return True
-    if re.search(r"\b(driver|truck|trailer)\b.*\btrips?\b", q, re.I):
+    if re.search(
+        r"\b(driver|truck|trailer|customer|commodity|salesman|"
+        r"pickup|delivery|country|distance|type|planned|dispatched|started|"
+        r"in[- ]?transit|delivered|rejected)\b.*\btrips?\b",
+        q,
+        re.I,
+    ):
         return True
-    if re.search(r"\b(recent|latest|top)\b.*\btrips?\b", q, re.I):
+    if re.search(r"\b(recent|recently|latest|top)\b.*\btrips?\b", q, re.I):
+        return True
+    if re.search(r"\btrips?\b.*\b(recent|recently|latest|top)\b", q, re.I):
         return True
     return False
 
@@ -81,14 +104,21 @@ def try_lookup_intent(
     history_hint: str = "",
 ) -> Optional[Dict[str, Any]]:
     q = (question or "").strip()
-    if not q or is_list_or_status_question(q):
+    if not q:
         return None
 
     token = extract_token(q)
-    if not token:
-        return None
-
-    if LOOKUP_VERB_RE.search(q) or len(q.split()) <= 6:
+    # Specific trip id/number always wins over generic list phrasing.
+    if token and (
+        LOOKUP_VERB_RE.search(q)
+        or len(q.split()) <= 14
+        or re.search(
+            r"\b(status|type|pickup|delivery|driver|phone|customer|commodity|"
+            r"salesman|distance|country|location|date|detail|details)\b",
+            q,
+            re.I,
+        )
+    ):
         return {
             "intent": INTENT_NAME,
             "needs_rag": False,
@@ -101,5 +131,8 @@ def try_lookup_intent(
             "order_token": token,
             "reason": "trip_lookup",
         }
+
+    if is_list_or_status_question(q):
+        return None
 
     return None

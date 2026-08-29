@@ -2,7 +2,10 @@
 Fleet-wide analytics over ALL Avaal_order order records.
 
 Supports:
-- order status summary / counts (Quoted, Cancelled, Confirmed, Dispatched, Delivered, Invoiced, …)
+- order status summary / counts (Quoted, Confirmed, Dispatched, Started, In-Transit,
+  Partially Delivered, Delivered, Cancelled, Rejected)
+- accounting status (Invoiced, PartiallyPaid, Paid, Restricted)
+- outsource status (Open, Planned, Assigned, Quoted, Delivered)
 - best / worst / low customer by order count (default) or revenue
 - customer counts by country using pickup / delivery (drop) addresses
 - activity on a date (customers + orders)
@@ -21,11 +24,29 @@ from app.tenants.router import (
 
 KNOWN_STATUSES = [
     "Quoted",
-    "Cancelled",
     "Confirmed",
     "Dispatched",
+    "Started",
+    "In-Transit",
+    "Partially Delivered",
     "Delivered",
+    "Cancelled",
+    "Rejected",
+]
+
+KNOWN_ACCOUNTING_STATUSES = [
     "Invoiced",
+    "PartiallyPaid",
+    "Paid",
+    "Restricted",
+]
+
+KNOWN_OUTSOURCE_STATUSES = [
+    "Open",
+    "Planned",
+    "Assigned",
+    "Quoted",
+    "Delivered",
 ]
 
 COUNTRY_PATTERNS = {
@@ -81,29 +102,31 @@ def is_status_summary_question(question: str) -> bool:
     q = (question or "").lower()
     # "list/show confirmed orders" is a filtered LIST, not a status summary/count
     if re.search(r"\b(list|show|display|find|search|filter|get)\b", q) and not re.search(
-        r"\b(how many|count|summary|break\s*down|breakdown|distribution|total)\b", q
+        r"\b(how many|count|summary|break\s*down|breakdown|distribution|total|kitne|kitna)\b",
+        q,
     ):
         return False
     if re.search(r"\bstatus\b.*\b(summary|break\s*down|breakdown|count|how many|distribution)\b", q):
         return True
     if re.search(r"\b(summary|break\s*down|breakdown)\b.*\bstatus", q):
         return True
-    if re.search(r"\bhow many\b.*\b(quoted|cancelled|canceled|confirmed|dispatched|delivered|invoiced)\b", q):
+    status_words = (
+        r"quoted|cancelled|canceled|confirmed|confirm|dispatched|started|"
+        r"in[- ]?transit|partially\s*delivered|delivered|rejected|"
+        r"invoiced|partially\s*paid|paid|restricted|"
+        r"open|planned|assigned"
+    )
+    if re.search(rf"\b(how many|count|kitne|kitna)\b.*\b({status_words})\b", q):
         return True
-    if re.search(
-        r"\b(quoted|cancelled|canceled|confirmed|dispatched|delivered|invoiced)\b.*\b(count|how many)\b",
-        q,
+    if re.search(rf"\b({status_words})\b.*\b(count|how many|kitne|kitna|huye|hua|hue)\b", q):
+        return True
+    if re.search(rf"\b({status_words})\b.*\borders?\b", q) and re.search(
+        r"\b(how many|count|summary|total|breakdown|kitne|kitna)\b", q
     ):
         return True
-    # "confirmed orders count" style — not plain "confirmed orders" list phrasing
     if re.search(
-        r"\b(quoted|cancelled|canceled|confirmed|dispatched|delivered|invoiced)\b.*\borders?\b",
-        q,
-    ) and re.search(r"\b(how many|count|summary|total|breakdown)\b", q):
-        return True
-    if re.search(r"\border\s*status(es)?\b", q) and re.search(
-        r"\b(summary|how many|count|break|breakdown|distribution)\b", q
-    ):
+        r"\b(order|accounting|out\s*source|outsource)\s*status(es)?\b", q
+    ) and re.search(r"\b(summary|how many|count|break|breakdown|distribution)\b", q):
         return True
     return False
 
@@ -206,15 +229,18 @@ def is_date_activity_question(question: str) -> bool:
     e.g. how many customers ordered on 2026-08-06 /
     is date ko kitne customers ne order diya /
     orders on 07/13/2026 /
-    10 august how many total orders
+    10 august how many total orders /
+    aaj kitne order create / confirm / dispatched
     """
     q = (question or "").lower()
+    if is_today_orders_question(question):
+        return True
     has_date = bool(extract_any_date_from_question(question))
     if not has_date:
         return False
     return bool(
         re.search(
-            r"\b(how many|count|kitne|kitna|number of|customers?|orders?|ordered|order diya|ne order|created|total)\b",
+            r"\b(how many|count|kitne|kitna|number of|customers?|orders?|ordered|order diya|ne order|created|total|confirm|confirmed|dispatched)\b",
             q,
         )
     ) or bool(re.search(r"\b(on|for|dated|date)\b", q))
@@ -231,6 +257,10 @@ def is_analytics_question(question: str) -> bool:
         or is_best_city_question(question)
         or is_period_orders_question(question)
         or is_trip_distance_question(question)
+        or is_orders_by_country_question(question)
+        or is_best_order_question(question)
+        or is_worst_order_question(question)
+        or is_today_orders_question(question)
     )
 
 
@@ -313,7 +343,71 @@ def extract_natural_date_from_question(question: str) -> Optional[str]:
 
 
 def extract_any_date_from_question(question: str) -> Optional[str]:
+    q = question or ""
+    ql = q.lower()
+    # today / aaj
+    if re.search(r"\b(today|aaj|aj)\b", ql):
+        from datetime import datetime, timezone
+
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
     return extract_date_from_question(question) or extract_natural_date_from_question(question)
+
+
+def is_today_orders_question(question: str) -> bool:
+    q = (question or "").lower()
+    if not re.search(r"\b(today|aaj|aj)\b", q):
+        return False
+    return bool(
+        re.search(
+            r"\b(how many|count|kitne|kitna|orders?|created|confirm|confirmed|"
+            r"dispatched|quoted|delivered|invoiced|huye|hua)\b",
+            q,
+        )
+    )
+
+
+def is_orders_by_country_question(question: str) -> bool:
+    q = (question or "").lower()
+    if not re.search(r"\borders?\b", q):
+        return False
+    return bool(
+        re.search(
+            r"\bcountry[\s\-]*wise\b|"
+            r"\b(by|per|across)\s+countr(?:y|ies)\b|"
+            r"\borders?\b.*\bby\s+countr|"
+            r"\bcountr(?:y|ies)\b.*\b(total|count|how many)\s+orders?\b|"
+            r"\b(total|count|how many)\s+orders?\b.*\bcountr",
+            q,
+        )
+    )
+
+
+def is_best_order_question(question: str) -> bool:
+    q = (question or "").lower()
+    if re.search(r"\bcustomers?\b|\bcit(?:y|ies)\b", q):
+        return False
+    return bool(
+        re.search(
+            r"\bbest\s+orders?\b|"
+            r"\b(best|top|highest|maximum|max|largest)\b.*\borders?\b|"
+            r"\borders?\b.*\b(best|highest|maximum|max)\b.*\b(freight|amount|value|revenue)?",
+            q,
+        )
+    )
+
+
+def is_worst_order_question(question: str) -> bool:
+    q = (question or "").lower()
+    if re.search(r"\bcustomers?\b|\bcit(?:y|ies)\b", q):
+        return False
+    return bool(
+        re.search(
+            r"\bworst\s+orders?\b|"
+            r"\b(worst|lowest|minimum|min|smallest|cheapest)\b.*\borders?\b|"
+            r"\borders?\b.*\b(worst|lowest|minimum|min)\b",
+            q,
+        )
+    )
 
 
 def detect_period_days(question: str) -> Optional[int]:
@@ -338,8 +432,14 @@ def detect_period_days(question: str) -> Optional[int]:
 
 
 def detect_status_filter(question: str) -> Optional[str]:
+    """Detect orderstatus value from question (lifecycle only)."""
     q = (question or "").lower()
     for key, canonical in (
+        ("partially delivered", "Partially Delivered"),
+        ("partiallydelivered", "Partially Delivered"),
+        ("in-transit", "In-Transit"),
+        ("in transit", "In-Transit"),
+        ("intransit", "In-Transit"),
         ("quoted", "Quoted"),
         ("quotes", "Quoted"),
         ("quote", "Quoted"),
@@ -348,13 +448,73 @@ def detect_status_filter(question: str) -> Optional[str]:
         ("confirmed", "Confirmed"),
         ("confirmation", "Confirmed"),
         ("confirmations", "Confirmed"),
+        ("confirm", "Confirmed"),
         ("dispatched", "Dispatched"),
+        ("started", "Started"),
         ("delivered", "Delivered"),
+        ("rejected", "Rejected"),
+    ):
+        if re.search(rf"\b{re.escape(key)}\b", q):
+            return canonical
+    return None
+
+
+def detect_accounting_status_filter(question: str) -> Optional[str]:
+    q = (question or "").lower()
+    for key, canonical in (
+        ("invoice restricted", "Restricted"),
+        ("invoiced restricted", "Restricted"),
+        ("restricted", "Restricted"),
+        ("partially paid", "PartiallyPaid"),
+        ("partiallypaid", "PartiallyPaid"),
+        ("partial paid", "PartiallyPaid"),
         ("invoiced", "Invoiced"),
+        ("paid", "Paid"),
+    ):
+        if re.search(rf"\b{re.escape(key)}\b", q):
+            if canonical == "Paid" and not re.search(
+                r"\b(paid\s+orders?|orders?\s+.*paid|accounting|how many\s+paid|kitne\s+paid)\b",
+                q,
+            ):
+                continue
+            return canonical
+    return None
+
+
+def detect_outsource_status_filter(question: str) -> Optional[str]:
+    q = (question or "").lower()
+    wants_out = bool(re.search(r"\b(out\s*source|outsource|out\s*status|outstatus)\b", q))
+    if wants_out:
+        if re.search(r"\bdelivered\b", q):
+            return "Delivered"
+        if re.search(r"\bquoted\b", q):
+            return "Quoted"
+    for key, canonical in (
+        ("assigned", "Assigned"),
+        ("planned", "Planned"),
+        ("open", "Open"),
     ):
         if re.search(rf"\b{key}\b", q):
             return canonical
     return None
+
+
+def detect_status_field(question: str) -> str:
+    """Which status column to summarize: orderstatus | accountingstatus | outstatus."""
+    q = (question or "").lower()
+    if re.search(r"\b(accounting|account\s*status|invoiced|partially\s*paid|restricted)\b", q):
+        return "accountingstatus"
+    if re.search(r"\b(out\s*source|outsource|out\s*status|outstatus|assigned|planned)\b", q):
+        if re.search(r"\b(quoted|confirmed|dispatched|started|cancelled|canceled|rejected)\b", q) and not re.search(
+            r"\b(out\s*source|outsource)\b", q
+        ):
+            return "orderstatus"
+        return "outstatus"
+    if detect_accounting_status_filter(q):
+        return "accountingstatus"
+    if detect_outsource_status_filter(q) and not detect_status_filter(q):
+        return "outstatus"
+    return "orderstatus"
 
 
 def is_state_wise_question(question: str) -> bool:
@@ -561,6 +721,96 @@ def best_cities(*, location_side: str = "both", limit: int = 5) -> Dict[str, Any
     }
 
 
+def orders_by_country(*, location_side: str = "both", limit: int = 50) -> Dict[str, Any]:
+    """Country → order count from pickup/delivery addresses."""
+    limit = max(1, min(int(limit or 50), 100))
+    from collections import Counter
+
+    counter: Counter = Counter()
+    for geo in _iter_geo_from_orders(location_side):
+        country = geo.get("country") or "Unknown"
+        counter[country] += 1
+
+    rows = [{"country": c, "order_count": n} for c, n in counter.most_common(limit)]
+    checkpoint("ANALYTICS", "orders_by_country", rows=len(rows), side=location_side)
+    return {
+        "analytics_type": "orders_by_country",
+        "location_side": location_side,
+        "definition": (
+            "Order counts grouped by country parsed from pickup/delivery full addresses."
+        ),
+        "response_format": "country_name → order_count (counts only)",
+        "total_groups": len(rows),
+        "rows": rows,
+    }
+
+
+def rank_orders_by_amount(
+    *,
+    direction: str = "best",
+    limit: int = 5,
+) -> Dict[str, Any]:
+    """Best order = highest freight; worst = lowest freight."""
+    limit = max(1, min(int(limit or 5), 25))
+    direction = "worst" if str(direction).lower() == "worst" else "best"
+    collection = get_orders_collection()
+    projection = {
+        "orderid": 1,
+        "ordernumber": 1,
+        "orderstatus": 1,
+        "customername": 1,
+        "totalfreight": 1,
+        "grosstotalfreight": 1,
+        "pickuplocationname": 1,
+        "deliverylocationname": 1,
+        "_id": 0,
+    }
+
+    def _amt(doc: Dict[str, Any]) -> Optional[float]:
+        for field in ("grosstotalfreight", "totalfreight"):
+            try:
+                if doc.get(field) in (None, ""):
+                    continue
+                return float(doc.get(field))
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    scored = []
+    for doc in collection.find(_base_match(), projection):
+        amt = _amt(doc)
+        if amt is None:
+            continue
+        scored.append(
+            {
+                "orderid": doc.get("orderid"),
+                "ordernumber": doc.get("ordernumber"),
+                "orderstatus": doc.get("orderstatus"),
+                "customername": doc.get("customername"),
+                "totalfreight": amt,
+                "pickuplocationname": doc.get("pickuplocationname"),
+                "deliverylocationname": doc.get("deliverylocationname"),
+            }
+        )
+
+    scored.sort(key=lambda r: r["totalfreight"], reverse=(direction == "best"))
+    rows = scored[:limit]
+    top = rows[0] if rows else None
+    checkpoint("ANALYTICS", f"orders_by_amount_{direction}", rows=len(rows))
+    return {
+        "analytics_type": "best_order" if direction == "best" else "worst_order",
+        "rank_by": "totalfreight",
+        "direction": direction,
+        "definition": (
+            "Best order = highest freight amount. Worst order = lowest freight amount."
+        ),
+        "response_format": "ordernumber, amount, status, customer (from rows only)",
+        "total_scored": len(scored),
+        "rows": rows,
+        "top": top,
+    }
+
+
 def _period_start_iso(days: int) -> str:
     from datetime import datetime, timedelta, timezone
 
@@ -702,14 +952,31 @@ def trip_distance_summary(*, days: Optional[int] = None) -> Dict[str, Any]:
     }
 
 
-def status_summary() -> Dict[str, Any]:
-    """Count orders per orderstatus across ALL records."""
+def status_summary(
+    *,
+    status_field: str = "orderstatus",
+    status: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Count orders per status field across ALL records."""
+    field = status_field if status_field in (
+        "orderstatus",
+        "accountingstatus",
+        "outstatus",
+    ) else "orderstatus"
+    known = {
+        "orderstatus": KNOWN_STATUSES,
+        "accountingstatus": KNOWN_ACCOUNTING_STATUSES,
+        "outsource": KNOWN_OUTSOURCE_STATUSES,
+        "outstatus": KNOWN_OUTSOURCE_STATUSES,
+    }.get(field, KNOWN_STATUSES)
+
     collection = get_orders_collection()
+    group_field = f"${field}"
     rows = list(
         collection.aggregate(
             [
                 {"$match": _base_match()},
-                {"$group": {"_id": "$orderstatus", "order_count": {"$sum": 1}}},
+                {"$group": {"_id": group_field, "order_count": {"$sum": 1}}},
                 {"$sort": {"order_count": -1}},
             ]
         )
@@ -719,20 +986,43 @@ def status_summary() -> Dict[str, Any]:
         for r in rows
     }
     total = sum(by_status.values())
-    # Include known statuses with 0 for completeness
     ordered = []
-    for name in KNOWN_STATUSES:
+    for name in known:
         ordered.append({"status": name, "order_count": by_status.get(name, 0)})
     for name, count in by_status.items():
-        if name not in KNOWN_STATUSES:
+        if name not in known:
             ordered.append({"status": name, "order_count": count})
 
-    checkpoint("ANALYTICS", "status_summary", total_orders=total, statuses=len(ordered))
+    matching = total
+    if status:
+        matching = 0
+        for k, v in by_status.items():
+            if str(k).lower() == status.lower():
+                matching = v
+                break
+
+    checkpoint(
+        "ANALYTICS",
+        "status_summary",
+        total_orders=total,
+        statuses=len(ordered),
+        status_field=field,
+        status=status,
+    )
     return {
         "analytics_type": "status_summary",
+        "status_field": field,
+        "status_filter": status,
+        "matching_orders": matching if status else total,
         "total_orders": total,
         "by_status": ordered,
-        "definition": "Counts from all Avaal order records grouped by orderstatus.",
+        "definition": (
+            f"Counts from all Avaal order records grouped by {field}. "
+            "Order status: Quoted/Confirmed/Dispatched/Started/In-Transit/"
+            "Partially Delivered/Delivered/Cancelled/Rejected. "
+            "Outsource: Open/Planned/Assigned/Quoted/Delivered. "
+            "Accounting: Invoiced/PartiallyPaid/Paid/Restricted."
+        ),
     }
 
 
@@ -910,10 +1200,12 @@ def activity_on_date(
     date_prefix: str,
     *,
     date_field: str = "orderdate",
+    status: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     On a given calendar day: order count + distinct customers (from ALL matching records).
     Dates in DB look like 2026-08-06T05:20:03.043+05:30 — match by YYYY-MM-DD prefix.
+    Optional status filter (Confirmed / Dispatched / …).
     """
     if date_field not in ("orderdate", "pickupdate", "deliverydate"):
         date_field = "orderdate"
@@ -924,6 +1216,11 @@ def activity_on_date(
         **_base_match(),
         date_field: {"$regex": f"^{re.escape(date_prefix)}", "$options": "i"},
     }
+    if status:
+        match["orderstatus"] = {
+            "$regex": f"^{re.escape(status)}$",
+            "$options": "i",
+        }
     order_count = collection.count_documents(match)
 
     rows = list(
@@ -957,6 +1254,32 @@ def activity_on_date(
     )
     distinct_customers = int(distinct_rows[0]["n"]) if distinct_rows else 0
 
+    # Status breakdown for the day (always useful for "today" questions)
+    status_rows = list(
+        collection.aggregate(
+            [
+                {
+                    "$match": {
+                        **_base_match(),
+                        date_field: {
+                            "$regex": f"^{re.escape(date_prefix)}",
+                            "$options": "i",
+                        },
+                    }
+                },
+                {"$group": {"_id": "$orderstatus", "order_count": {"$sum": 1}}},
+                {"$sort": {"order_count": -1}},
+            ]
+        )
+    )
+    by_status = [
+        {
+            "status": (r["_id"] if r["_id"] not in (None, "") else "Unknown"),
+            "order_count": int(r["order_count"]),
+        }
+        for r in status_rows
+    ]
+
     field_label = {
         "orderdate": "order date",
         "pickupdate": "pickup date",
@@ -968,6 +1291,7 @@ def activity_on_date(
         "activity_on_date",
         date=date_prefix,
         field=date_field,
+        status=status,
         customers=distinct_customers,
         orders=order_count,
     )
@@ -976,12 +1300,20 @@ def activity_on_date(
         "date": date_prefix,
         "date_field": date_field,
         "date_field_label": field_label,
+        "status_filter": status,
         "definition": (
-            f"Orders and distinct customers on {date_prefix} using {field_label} "
-            f"across all Avaal order records."
+            f"Orders and distinct customers on {date_prefix} using {field_label}"
+            + (f", status={status}" if status else "")
+            + " across all Avaal order records."
+        ),
+        "response_format": (
+            "Report matching_orders for the asked day"
+            + (" and status" if status else "")
+            + "; optional by_status breakdown."
         ),
         "distinct_customers": distinct_customers,
         "matching_orders": order_count,
+        "by_status": by_status,
         "sample_customers": customers[:10],
     }
 
@@ -1006,11 +1338,12 @@ def run_analytics(
     )
     if date_val and (
         is_date_activity_question(q)
+        or is_today_orders_question(q)
         or entities.get("analytics") == "activity_on_date"
         or (
             date_val
             and re.search(
-                r"\b(customer|order|kitne|kitna|how many|count|total|created)\b",
+                r"\b(customer|order|kitne|kitna|how many|count|total|created|confirm|confirmed|dispatched)\b",
                 q,
                 re.I,
             )
@@ -1021,7 +1354,17 @@ def run_analytics(
             date_field = "pickupdate"
         if entities.get("deliverydate") and not entities.get("orderdate"):
             date_field = "deliverydate"
-        return activity_on_date(str(date_val), date_field=date_field)
+        status = entities.get("orderstatus") or detect_status_filter(q)
+        # "today created" / "aaj create" = all statuses that day
+        if status and re.search(r"\b(created|create|new)\b", q, re.I) and not re.search(
+            r"\b(quoted|cancelled|canceled|confirmed|confirm|dispatched|started|"
+            r"in[- ]?transit|partially\s*delivered|delivered|rejected|invoiced|"
+            r"paid|restricted|open|planned|assigned)\b",
+            q,
+            re.I,
+        ):
+            status = None
+        return activity_on_date(str(date_val), date_field=date_field, status=status)
 
     # Last N days / last month (+ optional status like Quoted / Confirmed)
     period_days = entities.get("period_days") or detect_period_days(q)
@@ -1031,13 +1374,22 @@ def run_analytics(
         # Only apply status filter when user clearly asked status/quoted/confirmed count
         if status and not re.search(
             r"\b(quoted|quotes|quote|cancelled|canceled|confirmed|confirmation|confirmations|"
-            r"dispatched|delivered|invoiced|status)\b",
+            r"confirm|dispatched|started|in[- ]?transit|partially\s*delivered|delivered|"
+            r"rejected|invoiced|paid|restricted|open|planned|assigned|status)\b",
             q,
             re.I,
         ):
             status = None
         date_field = entities.get("date_field") or detect_date_field(q)
         return orders_in_period(days=days, status=status, date_field=date_field)
+
+    if is_worst_order_question(q) or entities.get("analytics") == "worst_order":
+        limit = int(entities.get("limit") or 5)
+        return rank_orders_by_amount(direction="worst", limit=limit)
+
+    if is_best_order_question(q) or entities.get("analytics") == "best_order":
+        limit = int(entities.get("limit") or 5)
+        return rank_orders_by_amount(direction="best", limit=limit)
 
     if is_best_city_question(q) or entities.get("analytics") == "best_city":
         limit = int(entities.get("limit") or 5)
@@ -1050,6 +1402,10 @@ def run_analytics(
     if is_city_wise_question(q) or entities.get("analytics") == "orders_by_city":
         limit = int(entities.get("limit") or 50)
         return orders_by_city(location_side=side, limit=limit)
+
+    if is_orders_by_country_question(q) or entities.get("analytics") == "orders_by_country":
+        limit = int(entities.get("limit") or 50)
+        return orders_by_country(location_side=side, limit=limit)
 
     if is_trip_distance_question(q) or entities.get("analytics") == "trip_distance":
         days = detect_period_days(q)
@@ -1077,10 +1433,32 @@ def run_analytics(
         return customers_by_country(country, location_side=side)
 
     if is_status_summary_question(q) or entities.get("analytics") == "status_summary":
-        return status_summary()
+        field = (
+            "accountingstatus"
+            if entities.get("accountingstatus")
+            else "outstatus"
+            if entities.get("outstatus")
+            else detect_status_field(q)
+        )
+        status = (
+            entities.get("accountingstatus")
+            or entities.get("outstatus")
+            or entities.get("orderstatus")
+            or detect_accounting_status_filter(q)
+            or detect_outsource_status_filter(q)
+            or detect_status_filter(q)
+        )
+        # If user asked a specific status type, prefer that field
+        if entities.get("accountingstatus"):
+            field = "accountingstatus"
+        elif entities.get("outstatus") and not entities.get("orderstatus"):
+            field = "outstatus"
+        elif entities.get("orderstatus"):
+            field = "orderstatus"
+        return status_summary(status_field=field, status=status)
 
     # Fallback: if analytics tool was forced, prefer status summary
-    return status_summary()
+    return status_summary(status_field=detect_status_field(q))
 
 
 def format_analytics_for_context(payload: Dict[str, Any]) -> str:
@@ -1093,7 +1471,11 @@ def format_analytics_for_context(payload: Dict[str, Any]) -> str:
         lines.append(f"Response format required: {payload['response_format']}")
 
     if atype == "status_summary":
+        lines.append(f"status_field: {payload.get('status_field') or 'orderstatus'}")
         lines.append(f"total_orders: {payload.get('total_orders')}")
+        if payload.get("status_filter"):
+            lines.append(f"status_filter: {payload.get('status_filter')}")
+            lines.append(f"matching_orders: {payload.get('matching_orders')}")
         lines.append("by_status:")
         for row in payload.get("by_status") or []:
             lines.append(f"- {row.get('status')}: {row.get('order_count')}")
@@ -1133,14 +1515,19 @@ def format_analytics_for_context(payload: Dict[str, Any]) -> str:
     elif atype == "activity_on_date":
         lines.append(f"date: {payload.get('date')}")
         lines.append(f"date_field: {payload.get('date_field')} ({payload.get('date_field_label')})")
+        lines.append(f"status_filter: {payload.get('status_filter')}")
         lines.append(f"distinct_customers: {payload.get('distinct_customers')}")
         lines.append(f"matching_orders: {payload.get('matching_orders')}")
+        if payload.get("by_status"):
+            lines.append("by_status_on_date:")
+            for row in payload.get("by_status") or []:
+                lines.append(f"- {row.get('status')}: {row.get('order_count')}")
         lines.append("sample_customers:")
         for i, row in enumerate(payload.get("sample_customers") or [], start=1):
             lines.append(
                 f"[{i}] {row.get('customername')} | orders={row.get('order_count')}"
             )
-        if not payload.get("sample_customers"):
+        if not payload.get("sample_customers") and not payload.get("matching_orders"):
             lines.append("(no customers/orders found on this date)")
 
     elif atype == "orders_by_state":
@@ -1162,6 +1549,31 @@ def format_analytics_for_context(payload: Dict[str, Any]) -> str:
             )
         if not payload.get("rows"):
             lines.append("(no city address data found)")
+
+    elif atype == "orders_by_country":
+        lines.append("country_wise_counts (country then count ONLY):")
+        for row in payload.get("rows") or []:
+            lines.append(f"- country={row.get('country')} | order_count={row.get('order_count')}")
+        if not payload.get("rows"):
+            lines.append("(no country address data found)")
+
+    elif atype in ("best_order", "worst_order"):
+        lines.append(f"direction: {payload.get('direction')}")
+        lines.append(f"total_scored: {payload.get('total_scored')}")
+        top = payload.get("top") or {}
+        if top:
+            lines.append(
+                f"top_order: ordernumber={top.get('ordernumber')} "
+                f"amount={top.get('totalfreight')} status={top.get('orderstatus')} "
+                f"customer={top.get('customername')}"
+            )
+        lines.append("ranked_orders:")
+        for i, row in enumerate(payload.get("rows") or [], start=1):
+            lines.append(
+                f"[{i}] ordernumber={row.get('ordernumber')} "
+                f"amount={row.get('totalfreight')} status={row.get('orderstatus')} "
+                f"customer={row.get('customername')}"
+            )
 
     elif atype == "best_city":
         best = payload.get("best_city") or {}

@@ -233,6 +233,22 @@ def find_record_by_token(token: str) -> Optional[Dict[str, Any]]:
 
     query_filter["$or"] = ors
     doc = collection.find_one(query_filter, {"embedding": 0})
+    # Flexible number formats: try contains match if exact miss
+    if not doc and domain in ("orders", "invoices") and not token.isdigit():
+        soft_fields = (
+            ("ordernumber", "tempordernumber")
+            if domain == "orders"
+            else ("InvoiceNumber", "invoicenumber")
+        )
+        soft = {
+            "namespace": get_domain_namespace(domain),
+            "metadata.type": get_domain_metadata_type(domain),
+            "$or": [
+                {field: {"$regex": re.escape(token), "$options": "i"}}
+                for field in soft_fields
+            ],
+        }
+        doc = collection.find_one(soft, {"embedding": 0})
     checkpoint("LOOKUP", "exact record", domain=domain, token=token, found=bool(doc))
     return doc
 
@@ -254,6 +270,56 @@ def format_record_list_for_context(payload: Dict[str, Any]) -> str:
         lines.append(f"[{i}] " + " ".join(parts))
     if not payload.get("records"):
         lines.append(f"(no {profile.label.lower()} records matched these filters)")
+    return "\n".join(lines)
+
+
+def format_list_answer_for_user(
+    domain: str,
+    payload: Dict[str, Any],
+    *,
+    max_fields_per_row: int = 6,
+) -> str:
+    """
+    Deterministic user-facing list (no LLM).
+    Guarantees all returned rows are present — avoids mid-sentence max_tokens cutoff.
+    """
+    profile = get_domain_profile(domain) if domain else _profile()
+    records = payload.get("records") or payload.get("orders") or []
+    returned = int(payload.get("returned") or len(records) or 0)
+    total = payload.get("total_matching")
+    noun = (profile.label or "record").lower()
+    plural = f"{noun}s" if not noun.endswith("s") else noun
+
+    if not records:
+        return (
+            f"I couldn’t find any matching {plural}. "
+            "Please try a different filter or number."
+        )
+
+    head = f"Here are {returned} {plural}"
+    try:
+        total_n = int(total) if total is not None else None
+    except (TypeError, ValueError):
+        total_n = None
+    if total_n is not None and total_n > returned:
+        head += f" (of {total_n} matching)"
+    head += ":"
+
+    lines = [head, ""]
+    for i, row in enumerate(records, start=1):
+        parts: List[str] = []
+        for key in profile.list_fields:
+            val = row.get(key)
+            if val in (None, "", [], {}):
+                continue
+            parts.append(f"{key}={val}")
+            if len(parts) >= max_fields_per_row:
+                break
+        if not parts:
+            for key, val in list(row.items())[:max_fields_per_row]:
+                if val not in (None, "", [], {}):
+                    parts.append(f"{key}={val}")
+        lines.append(f"{i}. " + " | ".join(parts))
     return "\n".join(lines)
 
 

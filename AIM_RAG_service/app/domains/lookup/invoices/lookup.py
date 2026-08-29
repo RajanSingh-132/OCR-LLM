@@ -1,4 +1,4 @@
-"""Invoice lookup — InvoiceID / InvoiceNumber (not generic words like 'status')."""
+"""Invoice lookup — InvoiceID / InvoiceNumber (flexible formats)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ LOOKUP_VERB_RE = re.compile(
     re.I,
 )
 LIST_RE = re.compile(
-    r"\b(list|show|display|find|search|filter|which|all|some|any)\b.*\binvoices?\b",
+    r"\b(list|show|display|find|search|filter|which|all|some|any|give|get)\b.*\binvoices?\b",
     re.I,
 )
 INVOICE_STATUS_RE = re.compile(
@@ -31,11 +31,15 @@ def _valid_token(raw: str) -> bool:
     tok = raw.strip().lower()
     if tok in GENERIC_LOOKUP_STOPWORDS:
         return False
+    if tok in {
+        "status", "paid", "open", "overdue", "baddebt", "details", "detail",
+        "freight", "amount", "customer", "company", "invoice", "invoices",
+    }:
+        return False
+    # Must look like an ID (digits required) — never bare words like "invoice".
     if tok.isdigit() and len(tok) >= 3:
         return True
     if re.search(r"\d", tok) and len(tok) >= 2:
-        return True
-    if re.match(r"^inv[\w-]+$", tok, re.I):
         return True
     return False
 
@@ -63,6 +67,22 @@ def extract_token(question: str) -> Optional[str]:
     if m and _valid_token(m.group(1)):
         return m.group(1).strip()
 
+    # Common invoice number shapes: MR3932, INO4, AIN12225, UGY10960, INV12
+    # Require a digit so "invoice"/"INV" alone never match.
+    m = re.search(
+        r"\b((?:MR(?!P)|INO|AIN|UGY|INV)[A-Za-z0-9-]*\d[A-Za-z0-9-]*)\b",
+        q,
+        re.I,
+    )
+    if m and _valid_token(m.group(1)):
+        return m.group(1).strip()
+
+    m = re.search(r"\b([A-Za-z]{2,5}\d{2,})\b", q)
+    if m and _valid_token(m.group(1)):
+        tok = m.group(1)
+        if not re.match(r"^(MRP|TORD|ETP|TRO|TRIP)", tok, re.I):
+            return tok.strip()
+
     return None
 
 
@@ -72,11 +92,19 @@ def is_list_or_status_question(question: str) -> bool:
         return True
     if LIST_RE.search(q):
         return True
-    if re.search(r"\binvoices?\b.*\b(paid|open|overdue|cancelled)\b", q, re.I):
+    if re.search(
+        r"\binvoices?\b.*\b(paid|open|overdue|bad\s*debt|partially\s*paid|customer|company)\b",
+        q,
+        re.I,
+    ):
         return True
-    if re.search(r"\b(paid|open|overdue|cancelled)\b.*\binvoices?\b", q, re.I):
+    if re.search(
+        r"\b(paid|open|overdue|bad\s*debt|partially\s*paid)\b.*\binvoices?\b",
+        q,
+        re.I,
+    ):
         return True
-    if re.search(r"\b(recent|latest|top)\b.*\binvoices?\b", q, re.I):
+    if re.search(r"\b(recent|recently|latest|top|some|any)\b.*\binvoices?\b", q, re.I):
         return True
     return False
 
@@ -90,14 +118,21 @@ def try_lookup_intent(
     if not q:
         return None
 
-    if is_list_or_status_question(q):
-        return None
-
     token = extract_token(q)
-    if not token:
-        return None
-
-    if LOOKUP_VERB_RE.search(q) or len(q.split()) <= 6:
+    fieldish = bool(
+        token
+        and re.search(
+            r"\b(status|detail|details|freight|paid|outstanding|commodity|due|"
+            r"pickup|delivery|customer|amount|pretax|company|exchange|order)\b",
+            q,
+            re.I,
+        )
+    )
+    if token and (
+        LOOKUP_VERB_RE.search(q)
+        or len(q.split()) <= 12
+        or fieldish
+    ):
         return {
             "intent": INTENT_NAME,
             "needs_rag": False,
@@ -110,5 +145,8 @@ def try_lookup_intent(
             "order_token": token,
             "reason": "invoice_lookup",
         }
+
+    if is_list_or_status_question(q):
+        return None
 
     return None

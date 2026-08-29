@@ -142,6 +142,10 @@ def _base_order_match(filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any
     filters = filters or {}
     if filters.get("orderstatus"):
         match["orderstatus"] = filters["orderstatus"]
+    if filters.get("accountingstatus"):
+        # Exact case-insensitive match (Atlas-safe)
+        st = str(filters["accountingstatus"])
+        match["accountingstatus"] = st
     if filters.get("currencycode"):
         match["currencycode"] = filters["currencycode"]
     if filters.get("customercode"):
@@ -201,6 +205,17 @@ def _base_order_match(filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any
     if side not in ("pickup", "delivery", "both"):
         side = "both"
     and_parts: List[Dict[str, Any]] = []
+
+    if filters.get("outstatus"):
+        st = str(filters["outstatus"])
+        and_parts.append(
+            {
+                "$or": [
+                    {"outstatus": st},
+                    {"outsourcedetails.outStatus": st},
+                ]
+            }
+        )
 
     if filters.get("pin"):
         ors = _side_address_ors(side=side, pattern=_pin_pattern(str(filters["pin"])))
@@ -287,6 +302,9 @@ def search_orders(
                 "ordernumber": doc.get("ordernumber"),
                 "customername": doc.get("customername"),
                 "orderstatus": doc.get("orderstatus"),
+                "accountingstatus": doc.get("accountingstatus"),
+                "outstatus": doc.get("outstatus")
+                or ((doc.get("outsourcedetails") or {}).get("outStatus")),
                 "currencycode": doc.get("currencycode"),
                 "totalfreight": doc.get("totalfreight"),
                 "grosstotalfreight": doc.get("grosstotalfreight"),
@@ -354,6 +372,7 @@ def format_order_list_for_context(payload: Dict[str, Any]) -> str:
         line = (
             f"[{i}] orderid={row.get('orderid')} ordernumber={row.get('ordernumber')} "
             f"customer={row.get('customername')} status={row.get('orderstatus')} "
+            f"accounting={row.get('accountingstatus')} outstatus={row.get('outstatus')} "
             f"currency={row.get('currencycode')} freight={row.get('totalfreight')} "
             f"taxes={row.get('taxes')} "
             f"pickup_loc={row.get('pickuplocationname')} "
@@ -405,53 +424,70 @@ def find_order_by_id_or_number(token: str) -> Optional[Dict[str, Any]]:
 
 
 def extract_order_token(question: str) -> Optional[str]:
-    """Extract order number / id tokens including MRP#### and TORD####."""
+    """Extract order number / id tokens — formats may vary (MRP/TORD/alphanumeric)."""
     q = question or ""
     ql = q.lower()
-    # Avaal order numbers like MRP3301 / MRP3298
-    m = re.search(r"\b(MRP\d+)\b", q, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).upper()
-    m = re.search(r"\b(TORD\d+)\b", q, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).upper()
-    # Pin/zip/postal questions — digits are addresses, not order ids
+    # Common Avaal prefixes — require at least one digit so "order" is not a token
+    for pat in (
+        r"\b(MRP[A-Za-z0-9-]*\d[A-Za-z0-9-]*)\b",
+        r"\b(TORD[A-Za-z0-9-]*\d[A-Za-z0-9-]*)\b",
+        r"\b(TMP[A-Za-z0-9-]*\d[A-Za-z0-9-]*)\b",
+    ):
+        m = re.search(pat, q, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
+
     pin_context = bool(
         re.search(r"\b(pin\s*code|pincode|pin|zip\s*code|zip|postal\s*code|postal)\b", ql)
     )
     m = re.search(
-        r"\border(?:\s*(?:id|number|no\.?|#))?\s*[:#]?\s*([A-Za-z]*\d+)\b",
+        r"\border(?:\s*(?:id|number|no\.?|#))\s*[:#]?\s*([A-Za-z0-9][A-Za-z0-9-]{1,30})\b",
         q,
         flags=re.IGNORECASE,
     )
     if m:
         tok = m.group(1)
-        # Ignore bare years mistaken from dates
         if re.fullmatch(r"20\d{2}", tok):
             pass
         elif pin_context and re.fullmatch(r"\d{5}(?:-\d{4})?", tok):
             pass
+        elif tok.lower() in {
+            "status", "details", "detail", "list", "recent", "confirmed",
+            "quoted", "dispatched", "delivered", "cancelled", "invoiced",
+            "confirm", "order", "orders", "some", "any", "wise",
+        }:
+            pass
         else:
-            return tok.upper() if tok.upper().startswith("MRP") else tok
-    # Digits: skip years, date fragments, and pin/zip digits
+            return tok.upper()
+
+    # Generic alphanumeric order-like token (letters + digits), skip trip prefixes
+    m = re.search(r"\b([A-Za-z]{2,6}\d{2,})\b", q)
+    if m:
+        tok = m.group(1).upper()
+        if not re.match(r"^(ETP|TRO|TRIP)", tok) and tok.lower() not in {
+            "order", "orders",
+        }:
+            return tok
+
     for m in re.finditer(r"\b(\d{4,})\b", q):
         tok = m.group(1)
         if re.fullmatch(r"20\d{2}", tok):
             continue
-        # skip if this number sits inside a date pattern
         start, end = m.span()
         window = q[max(0, start - 3) : min(len(q), end + 3)]
         if re.search(r"\d{1,4}[-/]\d{1,2}[-/]\d{1,4}", window) or re.search(
             rf"{re.escape(tok)}[-/]\d", q[start : end + 6]
         ):
             continue
-        # skip zip/pin digits (5-digit US zip) when pin/zip wording is present
-        # or when preceded by pin/zip/postal keywords within a short window
         pre = q[max(0, start - 24) : start].lower()
         if re.fullmatch(r"\d{5}(?:-\d{4})?", tok) and (
-            pin_context
-            or re.search(r"\b(pin|zip|postal|pincode|code)\b", pre)
+            pin_context or re.search(r"\b(pin|zip|postal|pincode|code)\b", pre)
         ):
+            continue
+        # "give me 20 order" — digit is a limit, not an order id
+        if re.search(rf"\b(give|get|show|list|top|last|only|just)\s+{re.escape(tok)}\b", ql):
+            continue
+        if re.search(rf"\b{re.escape(tok)}\s+(orders?|invoices?|trips?)\b", ql):
             continue
         return tok
     return None

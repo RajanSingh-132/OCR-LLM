@@ -7,18 +7,66 @@ from typing import Any, Dict, List, Optional
 
 from app.domains.rules.base import DomainRules, extract_limit
 from app.domains.lookup.orders.lookup import extract_token as extract_order_token
+from app.domains.lookup.base import is_ask_for_record_id_question
 from app.order_ask.calculation_engine import is_calculation_question
 
 DOMAIN = "orders"
 
 STATUS_MAP = {
+    # Order status (orderstatus)
     "confirmed": "Confirmed",
+    "confirm": "Confirmed",
     "delivered": "Delivered",
     "dispatched": "Dispatched",
     "cancelled": "Cancelled",
     "canceled": "Cancelled",
     "quoted": "Quoted",
+    "quated": "Quoted",  # common typo
+    "started": "Started",
+    "in-transit": "In-Transit",
+    "in transit": "In-Transit",
+    "intransit": "In-Transit",
+    "partially delivered": "Partially Delivered",
+    "partiallydelivered": "Partially Delivered",
+    "partial delivered": "Partially Delivered",
+    "rejected": "Rejected",
+    "reject": "Rejected",
 }
+
+# Accounting status (accountingstatus) — NOT orderstatus
+ACCOUNTING_STATUS_MAP = {
+    "invoice restricted": "Restricted",
+    "invoiced restricted": "Restricted",
+    "restricted": "Restricted",
+    "partially paid": "PartiallyPaid",
+    "partiallypaid": "PartiallyPaid",
+    "partial paid": "PartiallyPaid",
+    "invoiced": "Invoiced",
+    "paid": "Paid",
+}
+
+# Order outsource status (outstatus / outsourcedetails.outStatus)
+OUTSOURCE_STATUS_MAP = {
+    "planned": "Planned",
+    "assigned": "Assigned",
+    "open": "Open",
+}
+
+_ALL_STATUS_STOPWORDS = frozenset(
+    STATUS_MAP.keys()
+    | ACCOUNTING_STATUS_MAP.keys()
+    | OUTSOURCE_STATUS_MAP.keys()
+    | {
+        "invoiced",
+        "paid",
+        "restricted",
+        "started",
+        "rejected",
+        "assigned",
+        "planned",
+        "open",
+    }
+)
 
 GEO_FILTER_KEYS = (
     "pin",
@@ -31,11 +79,12 @@ GEO_FILTER_KEYS = (
 )
 
 LIST_RE = re.compile(
-    r"\b(list|show|display|find|search|filter|which|all)\b.*\border",
+    r"\b(list|show|display|find|search|filter|which|all|some|any|give|get)\b.*\border",
     re.I,
 )
 RECENT_RE = re.compile(
-    r"\b(recent|latest|last\s+\d+|top\s+\d+)\b.*\border|\border.*\b(recent|latest)\b",
+    r"\b(recent|recently|latest|last\s+\d+|top\s+\d+|some|any)\b.*\border|"
+    r"\border.*\b(recent|recently|latest)\b",
     re.I,
 )
 COMPARE_RE = re.compile(r"\b(compare|difference|vs\.?|versus)\b", re.I)
@@ -45,6 +94,9 @@ STICKY_KEYS = (
     "customername",
     "customercode",
     "orderstatus",
+    "accountingstatus",
+    "outstatus",
+    "statuscode",
     "currencycode",
     "companycode",
     "pickup_location",
@@ -53,7 +105,85 @@ STICKY_KEYS = (
     "location_side",
     "salesmanname",
     "commodityname",
+    "analytics",
+    "limit",
+    "focus_fields",
 )
+
+
+def _extract_status_entities(ql: str) -> Dict[str, str]:
+    """
+    Map question text → orderstatus / accountingstatus / outstatus.
+    UI statuses:
+      Order: Quoted, Confirmed, Dispatched, Started, In-Transit,
+             Partially Delivered, Delivered, Cancelled, Rejected
+      Outsource: Open, Planned, Assigned, Delivered, Quoted
+      Accounting: Invoiced, PartiallyPaid, Paid, Restricted
+    """
+    out: Dict[str, str] = {}
+    wants_outsource = bool(
+        re.search(r"\b(out\s*source|outsource|out\s*status|outstatus)\b", ql)
+    )
+    wants_accounting = bool(
+        re.search(r"\b(accounting|account\s*status)\b", ql)
+    )
+
+    # Accounting (Invoiced lives here — not on orderstatus)
+    for key, canonical in sorted(
+        ACCOUNTING_STATUS_MAP.items(), key=lambda kv: -len(kv[0])
+    ):
+        if not re.search(rf"\b{re.escape(key)}\b", ql):
+            continue
+        if canonical in ("Invoiced", "PartiallyPaid", "Restricted"):
+            out["accountingstatus"] = canonical
+            break
+        if canonical == "Paid" and (
+            wants_accounting
+            or re.search(
+                r"\b(paid\s+orders?|orders?\s+(?:that\s+are\s+)?paid|"
+                r"how many\s+paid|kitne\s+paid|paid\s+kitne|"
+                r"accounting\s+paid|paid\s+accounting)\b",
+                ql,
+            )
+        ):
+            out["accountingstatus"] = "Paid"
+            break
+
+    # Outsource Open / Planned / Assigned (or Delivered/Quoted with outsource cue)
+    if wants_outsource:
+        if re.search(r"\bpartially\s*delivered\b", ql):
+            pass  # not an outsource label
+        elif re.search(r"\bdelivered\b", ql):
+            out["outstatus"] = "Delivered"
+        elif re.search(r"\bquoted\b", ql):
+            out["outstatus"] = "Quoted"
+        elif re.search(r"\bassigned\b", ql):
+            out["outstatus"] = "Assigned"
+        elif re.search(r"\bplanned\b", ql):
+            out["outstatus"] = "Planned"
+        elif re.search(r"\bopen\b", ql):
+            out["outstatus"] = "Open"
+    else:
+        for key, canonical in OUTSOURCE_STATUS_MAP.items():
+            if re.search(rf"\b{re.escape(key)}\b", ql):
+                out["outstatus"] = canonical
+                break
+
+    # Order lifecycle status (skip when only accounting/outsource was asked)
+    if "accountingstatus" in out and not re.search(
+        r"\b(quoted|confirmed|dispatched|started|in[- ]?transit|"
+        r"partially\s*delivered|delivered|cancelled|canceled|rejected)\b",
+        ql,
+    ):
+        return out
+    if wants_outsource and "outstatus" in out:
+        return out
+
+    for key, canonical in sorted(STATUS_MAP.items(), key=lambda kv: -len(kv[0])):
+        if re.search(rf"\b{re.escape(key)}\b", ql):
+            out["orderstatus"] = canonical
+            break
+    return out
 
 
 def extract_record_token(question: str) -> Optional[str]:
@@ -75,10 +205,7 @@ def extract_entities(
     if token:
         entities["order_token"] = token
 
-    for key, canonical in STATUS_MAP.items():
-        if re.search(rf"\b{key}\b", ql):
-            entities["orderstatus"] = canonical
-            break
+    entities.update(_extract_status_entities(ql))
 
     m = re.search(r"\bcurrency\s*[:=]?\s*([A-Za-z]{3})\b", q, re.I)
     if m:
@@ -114,7 +241,7 @@ def extract_entities(
         name = re.sub(r"^(?:customer|code)\s+", "", name, flags=re.I).strip()
         if re.match(r"^(with|by|for|of|the|a|an|in|on|from|to)\b", name, re.I):
             name = ""
-        if name.lower() not in STATUS_MAP and len(name) >= 2:
+        if name.lower() not in _ALL_STATUS_STOPWORDS and len(name) >= 2:
             entities["customername"] = name
 
     m = re.search(r"\bcompany(?:\s*code)?\s*[:=]?\s*([A-Za-z0-9_-]+)\b", q, re.I)
@@ -138,7 +265,7 @@ def extract_entities(
             loc = m.group(1).strip(" .,")
             if re.match(r"^(zip|pin|postal|pincode|code)\b", loc, re.I):
                 loc = ""
-            if loc.lower() not in STATUS_MAP and not re.match(r"^(ed|y)\b", loc, re.I):
+            if loc.lower() not in _ALL_STATUS_STOPWORDS and not re.match(r"^(ed|y)\b", loc, re.I):
                 if loc:
                     entities["delivery_location"] = loc
 
@@ -150,7 +277,7 @@ def extract_entities(
     )
     if m and not entities.get("pickup_location") and not entities.get("delivery_location"):
         loc = m.group(1).strip(" .,")
-        if loc.lower() not in STATUS_MAP and len(loc) >= 2:
+        if loc.lower() not in _ALL_STATUS_STOPWORDS and len(loc) >= 2:
             entities["location"] = loc
 
     m = re.search(
@@ -199,15 +326,24 @@ def extract_entities(
                 if code:
                     entities["state"] = code
 
-    m = re.search(
-        r"\b(?:city|town)\s*[:=#]?\s*['\"]?([A-Za-z][A-Za-z\s\-.]{1,40})",
-        q,
-        re.I,
-    )
-    if m:
-        city = m.group(1).strip(" .,")
-        if len(city) >= 2:
-            entities["city"] = city
+    if not re.search(r"\b(city|town)[\s\-]*wise\b|\bby\s+(city|town)\b", q, re.I):
+        m = re.search(
+            r"\b(?:city|town)\s*(?:is|=|:|#)\s*['\"]?([A-Za-z][A-Za-z\s\-.]{1,40})",
+            q,
+            re.I,
+        )
+        if not m:
+            m = re.search(
+                r"\b(?:city|town)\s+([A-Za-z][A-Za-z\s\-.]{1,40})",
+                q,
+                re.I,
+            )
+        if m:
+            city = m.group(1).strip(" .,")
+            if city.lower() not in {
+                "wise", "wise order", "wise orders", "order", "orders",
+            } and len(city) >= 2:
+                entities["city"] = city
 
     m = re.search(
         r"\b(?:full\s+)?(?:address|street)\s*[:=#]?\s*['\"]?([A-Za-z0-9][A-Za-z0-9 &\-./,#]{2,60})",
@@ -304,6 +440,47 @@ def extract_entities(
     if is_trip_distance_question(q):
         entities["analytics"] = "trip_distance"
 
+    from app.order_ask.analytics import (
+        is_best_order_question,
+        is_orders_by_country_question,
+        is_today_orders_question,
+        is_worst_order_question,
+    )
+
+    if is_orders_by_country_question(q):
+        entities["analytics"] = "orders_by_country"
+    if is_worst_order_question(q):
+        entities["analytics"] = "worst_order"
+    elif is_best_order_question(q):
+        entities["analytics"] = "best_order"
+    if is_today_orders_question(q):
+        entities["analytics"] = "activity_on_date"
+        if not entities.get("analytics_date"):
+            entities["analytics_date"] = extract_any_date_from_question(q)
+            entities["date_field"] = entities.get("date_field") or "orderdate"
+            entities["orderdate"] = entities.get("analytics_date")
+
+    # Focus fields for exact-order follow-ups
+    focus: List[str] = []
+    if re.search(r"\bpick\s*up\b.*\b(address|location)|\bpickup(fulladdress|locationname)\b", ql):
+        focus.extend(["pickupfulladdress", "pickuplocationname", "pickupdate"])
+    if re.search(r"\bdeliver(?:y|y)?\b.*\b(address|location)|\bdelivery(fulladdress|locationname)\b", ql):
+        focus.extend(["deliveryfulladdress", "deliverylocationname", "deliverydate"])
+    if re.search(r"\bstatus\s*code\b|\bstatuscode\b", ql):
+        focus.append("statuscode")
+    if re.search(r"\baccounting\s*status\b|\baccountingstatus\b", ql):
+        focus.append("accountingstatus")
+    if re.search(r"\bout\s*source\s*status\b|\boutstatus\b|\bout\s*status\b", ql):
+        focus.append("outstatus")
+    if re.search(r"\b(order\s*)?status\b", ql):
+        focus.append("orderstatus")
+        if "accountingstatus" not in focus:
+            focus.append("accountingstatus")
+        if "outstatus" not in focus:
+            focus.append("outstatus")
+    if focus:
+        entities["focus_fields"] = list(dict.fromkeys(focus))
+
     if re.search(
         r"\b(best|highest|max|top|largest|most)\b.*\b(amount|freight|revenue|tax|distance)\b", ql
     ) or re.search(
@@ -331,11 +508,13 @@ def extract_entities(
             entities["sort_by"] = "totalfreight"
         entities["ascending"] = True
 
-    limit = extract_limit(q, default_all=25)
+    limit = extract_limit(q, default_all=25, some_default=10)
     if limit:
         entities["limit"] = limit
     elif re.search(r"\b(all|every)\b.*\border", ql):
         entities["limit"] = 25
+    elif re.search(r"\b(some|any)\b.*\border|\border.*\b(some|any)\b", ql):
+        entities["limit"] = entities.get("limit") or 10
 
     country = detect_country(q)
     if country:
@@ -388,6 +567,8 @@ def entities_to_mongo_filters(entities: Dict[str, Any]) -> Dict[str, Any]:
     filters: Dict[str, Any] = {}
     for key in (
         "orderstatus",
+        "accountingstatus",
+        "outstatus",
         "currencycode",
         "customercode",
         "companycode",
@@ -416,6 +597,8 @@ def has_list_filters(entities: Dict[str, Any]) -> bool:
         entities.get(k)
         for k in (
             "orderstatus",
+            "accountingstatus",
+            "outstatus",
             "currencycode",
             "customercode",
             "companycode",
@@ -437,20 +620,39 @@ def classify_intent_local(
 ) -> Optional[Dict[str, Any]]:
     q = (question or "").strip()
 
+    # Specific order details without an id → ask sweetly for order number/id (no list dump).
+    if is_ask_for_record_id_question(
+        q, domain_noun="orders?", has_token=bool(extract_order_token(q))
+    ):
+        return {
+            "intent": "ask_for_record_id",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "response_style": "short",
+            "max_tokens_hint": 80,
+            "retrieve_k": 0,
+            "reason": "order_details_without_token",
+        }
+
     from app.order_ask.analytics import (
         is_analytics_question,
         is_best_customer_question,
         is_best_city_question,
+        is_best_order_question,
         is_city_wise_question,
         is_country_customer_question,
         is_date_activity_question,
+        is_orders_by_country_question,
         is_period_orders_question,
         is_state_wise_question,
         is_status_summary_question,
+        is_today_orders_question,
         is_trip_distance_question,
+        is_worst_order_question,
     )
 
-    if is_date_activity_question(q):
+    if is_today_orders_question(q) or is_date_activity_question(q):
         return {
             "intent": "analytics",
             "needs_rag": False,
@@ -463,7 +665,56 @@ def classify_intent_local(
             "reason": "activity_on_date",
         }
 
+    if is_worst_order_question(q):
+        return {
+            "intent": "analytics",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "needs_analytics": True,
+            "response_style": "medium",
+            "max_tokens_hint": 350,
+            "retrieve_k": 0,
+            "reason": "worst_order",
+        }
+
+    if is_best_order_question(q):
+        return {
+            "intent": "analytics",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "needs_analytics": True,
+            "response_style": "medium",
+            "max_tokens_hint": 350,
+            "retrieve_k": 0,
+            "reason": "best_order",
+        }
+
+    if is_orders_by_country_question(q):
+        return {
+            "intent": "analytics",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "needs_analytics": True,
+            "response_style": "medium",
+            "max_tokens_hint": 400,
+            "retrieve_k": 0,
+            "reason": "orders_by_country",
+        }
+
     token = extract_order_token(q)
+    # Asking pickup/delivery/status OF a specific order → lookup, not geo list
+    field_of_order_q = bool(
+        token
+        and re.search(
+            r"\b(pickup|delivery|address|status|statuscode|detail|details|"
+            r"customer|freight|date)\b",
+            q,
+            re.I,
+        )
+    )
     geo_filter_q = bool(
         re.search(
             r"\b(pin\s*code|pincode|pin|zip\s*code|zip|postal\s*code|postal|"
@@ -471,7 +722,7 @@ def classify_intent_local(
             q,
             re.I,
         )
-    )
+    ) and not field_of_order_q
     if (
         token
         and not geo_filter_q
@@ -481,8 +732,9 @@ def classify_intent_local(
                 q,
                 re.I,
             )
-            or re.match(r"^(MRP\d+|TORD\d+|\d{4,})\s*$", q, re.I)
-            or len(q.split()) <= 8
+            or re.match(r"^(MRP\d+|TORD\d+|[A-Za-z]{2,6}\d{2,}|\d{4,})\s*$", q, re.I)
+            or len(q.split()) <= 10
+            or field_of_order_q
         )
     ):
         if not re.search(r"\b(all|list|filter|compare|vs)\b", q, re.I) or re.search(
@@ -697,7 +949,10 @@ def classify_intent_local(
     if (
         LIST_RE.search(q)
         or re.search(
-            r"\borderstatus\b|\bstatus\s+(confirmed|delivered|dispatched|cancelled|quoted)\b",
+            r"\borderstatus\b|\baccountingstatus\b|\boutstatus\b|"
+            r"\bstatus\s+(confirmed|delivered|dispatched|cancelled|canceled|quoted|"
+            r"started|rejected|in[- ]?transit|partially\s*delivered|"
+            r"invoiced|paid|partially\s*paid|restricted|open|planned|assigned)\b",
             q,
             re.I,
         )
@@ -806,6 +1061,10 @@ def plan_tools(
     tools: List[str] = []
     intent = (intent or "").lower()
 
+    # User asked for a specific record but gave no id — LLM asks sweetly; no tools.
+    if intent == "ask_for_record_id":
+        return []
+
     if (
         intent == "analytics"
         or intent_info.get("needs_analytics")
@@ -813,13 +1072,16 @@ def plan_tools(
         or entities.get("country")
     ):
         tools.append(TOOL_RUN_ANALYTICS)
+        # Analytics answers are complete — don't also chase fake order tokens.
+        if intent == "analytics" or intent_info.get("needs_analytics") or entities.get("analytics"):
+            return tools
 
     if intent == "calculation" or intent_info.get("needs_calculation"):
         if TOOL_RUN_ANALYTICS not in tools:
             tools.append(TOOL_RUN_CALCULATION)
 
     token = entities.get("order_token") or intent_info.get("order_token")
-    if intent in ("order_lookup", "record_lookup") or intent_info.get("needs_exact_order") or token:
+    if intent in ("order_lookup", "record_lookup") or intent_info.get("needs_exact_order"):
         pin = str(entities.get("pin") or "")
         fake_pin_token = bool(
             token
@@ -827,9 +1089,7 @@ def plan_tools(
             and re.sub(r"\s+", "", str(token)).upper()
             == re.sub(r"\s+", "", pin).upper()
         )
-        if token and not fake_pin_token and not (
-            TOOL_RUN_ANALYTICS in tools and re.fullmatch(r"20\d{2}", str(token))
-        ):
+        if token and not fake_pin_token and not re.fullmatch(r"20\d{2}", str(token or "")):
             if not entities.get("order_token") and intent_info.get("order_token"):
                 entities["order_token"] = intent_info["order_token"]
             tools.append(TOOL_GET_RECORD)
