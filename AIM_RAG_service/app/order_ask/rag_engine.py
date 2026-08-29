@@ -39,6 +39,7 @@ from app.order_ask.prompts import (
 )
 from app.domains.detect import detect_domain
 from app.domains.lookup import get_domain_prompts, get_lookup_module
+from app.domains.retrieval import format_list_answer_for_user
 from app.order_ask.tools import execute_tools, plan_tools
 from app.tenants.context import AskContext
 from app.tenants.mapping import InvalidCorporateIdError, get_tenant_config
@@ -384,57 +385,69 @@ def answer_order_question(
             max_tokens = max(max_tokens, min(2500, 200 + returned * 90))
 
         try:
-            checkpoint("LLM", "Anthropic answer", mode=mode, domain=domain, max_tokens=max_tokens)
-            if calc_payload and mode == "calculation" and not matches:
-                formula_prompt = domain_prompts.formula or ORDER_FORMULA_PROMPT
-                answer = _invoke_anthropic(
-                    formula_prompt,
-                    {
-                        "formula_catalog": list_formula_catalog_for_prompt(),
-                        "calculation_result": format_calculation_result_for_context(
-                            calc_payload
-                        ),
-                        "question": question,
-                        "response_style": style,
-                        "history": history,
-                    },
-                    max_tokens=max_tokens,
+            # List answers: format from Mongo rows in code (full N rows, $0 LLM).
+            # Avoids mid-sentence cutoff when max_tokens is too small for 15+ items.
+            if mode == "list" and list_payload:
+                checkpoint(
+                    "LLM",
+                    "skip — deterministic list answer",
+                    mode=mode,
+                    domain=domain,
+                    returned=list_payload.get("returned"),
                 )
-            elif mode == "exact_record" and intent in lookup_intents:
-                from app.domains.lookup.invoices.prompts import INVOICE_LOOKUP_PROMPT
-                from app.domains.lookup.orders.prompts import ORDER_LOOKUP_PROMPT
-                from app.domains.lookup.trips.prompts import TRIP_LOOKUP_PROMPT
-
-                lookup_prompts = {
-                    "orders": ORDER_LOOKUP_PROMPT,
-                    "invoices": INVOICE_LOOKUP_PROMPT,
-                    "trips": TRIP_LOOKUP_PROMPT,
-                }
-                answer = _invoke_anthropic(
-                    lookup_prompts.get(domain, ORDER_LOOKUP_PROMPT),
-                    {
-                        "context": context,
-                        "question": question,
-                        "history": history,
-                    },
-                    max_tokens=max_tokens,
-                )
+                answer = format_list_answer_for_user(domain, list_payload)
             else:
-                prompt = (
-                    domain_prompts.conversation if conversational else domain_prompts.ask
-                )
-                answer = _invoke_anthropic(
-                    prompt,
-                    {
-                        "context": context,
-                        "question": question,
-                        "intent": intent,
-                        "response_style": style,
-                        "history": history,
-                        "tools_used": tools_label,
-                    },
-                    max_tokens=max_tokens,
-                )
+                checkpoint("LLM", "Anthropic answer", mode=mode, domain=domain, max_tokens=max_tokens)
+                if calc_payload and mode == "calculation" and not matches:
+                    formula_prompt = domain_prompts.formula or ORDER_FORMULA_PROMPT
+                    answer = _invoke_anthropic(
+                        formula_prompt,
+                        {
+                            "formula_catalog": list_formula_catalog_for_prompt(),
+                            "calculation_result": format_calculation_result_for_context(
+                                calc_payload
+                            ),
+                            "question": question,
+                            "response_style": style,
+                            "history": history,
+                        },
+                        max_tokens=max_tokens,
+                    )
+                elif mode == "exact_record" and intent in lookup_intents:
+                    from app.domains.lookup.invoices.prompts import INVOICE_LOOKUP_PROMPT
+                    from app.domains.lookup.orders.prompts import ORDER_LOOKUP_PROMPT
+                    from app.domains.lookup.trips.prompts import TRIP_LOOKUP_PROMPT
+
+                    lookup_prompts = {
+                        "orders": ORDER_LOOKUP_PROMPT,
+                        "invoices": INVOICE_LOOKUP_PROMPT,
+                        "trips": TRIP_LOOKUP_PROMPT,
+                    }
+                    answer = _invoke_anthropic(
+                        lookup_prompts.get(domain, ORDER_LOOKUP_PROMPT),
+                        {
+                            "context": context,
+                            "question": question,
+                            "history": history,
+                        },
+                        max_tokens=max_tokens,
+                    )
+                else:
+                    prompt = (
+                        domain_prompts.conversation if conversational else domain_prompts.ask
+                    )
+                    answer = _invoke_anthropic(
+                        prompt,
+                        {
+                            "context": context,
+                            "question": question,
+                            "intent": intent,
+                            "response_style": style,
+                            "history": history,
+                            "tools_used": tools_label,
+                        },
+                        max_tokens=max_tokens,
+                    )
         except Exception as exc:
             logger.error("Anthropic answer failed: %s", exc, exc_info=True)
             checkpoint("LLM", "FAILED", error=str(exc))

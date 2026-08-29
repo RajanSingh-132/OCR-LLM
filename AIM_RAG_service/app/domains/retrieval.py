@@ -273,6 +273,56 @@ def format_record_list_for_context(payload: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_list_answer_for_user(
+    domain: str,
+    payload: Dict[str, Any],
+    *,
+    max_fields_per_row: int = 6,
+) -> str:
+    """
+    Deterministic user-facing list (no LLM).
+    Guarantees all returned rows are present — avoids mid-sentence max_tokens cutoff.
+    """
+    profile = get_domain_profile(domain) if domain else _profile()
+    records = payload.get("records") or payload.get("orders") or []
+    returned = int(payload.get("returned") or len(records) or 0)
+    total = payload.get("total_matching")
+    noun = (profile.label or "record").lower()
+    plural = f"{noun}s" if not noun.endswith("s") else noun
+
+    if not records:
+        return (
+            f"I couldn’t find any matching {plural}. "
+            "Please try a different filter or number."
+        )
+
+    head = f"Here are {returned} {plural}"
+    try:
+        total_n = int(total) if total is not None else None
+    except (TypeError, ValueError):
+        total_n = None
+    if total_n is not None and total_n > returned:
+        head += f" (of {total_n} matching)"
+    head += ":"
+
+    lines = [head, ""]
+    for i, row in enumerate(records, start=1):
+        parts: List[str] = []
+        for key in profile.list_fields:
+            val = row.get(key)
+            if val in (None, "", [], {}):
+                continue
+            parts.append(f"{key}={val}")
+            if len(parts) >= max_fields_per_row:
+                break
+        if not parts:
+            for key, val in list(row.items())[:max_fields_per_row]:
+                if val not in (None, "", [], {}):
+                    parts.append(f"{key}={val}")
+        lines.append(f"{i}. " + " | ".join(parts))
+    return "\n".join(lines)
+
+
 def format_record_doc_for_context(doc: Dict[str, Any], max_fields: int = 120) -> str:
     profile = _profile()
     lines = [f"{profile.label.upper()} RECORD:"]
