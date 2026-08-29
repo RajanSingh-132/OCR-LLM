@@ -54,6 +54,17 @@ NUMBER / ID REQUEST (strict — user-facing):
 - When the user later sends only a number/id, treat it as that lookup and answer from context.
 """.strip()
 
+# Every list/detail row must show Key: value so users know what each value means.
+LABELED_FIELDS_POLICY = """
+LABELED FIELDS (strict — lists and details):
+- NEVER write bare values chained with dashes only (bad: "MR4067 - Open - CAD 260").
+- ALWAYS write clear labels before each value (good:
+  "InvoiceNumber: MR4067, CustomerName: …, Status: Open, Currency: CAD, Amount: 260, DueDate: …").
+- Use readable labels matching the fields (InvoiceNumber, Status, CustomerName, Amount,
+  OrderNumber, TripNumber, Driver, etc.).
+- One list item per line; keep labels short but present on every field shown.
+""".strip()
+
 
 def is_ask_for_record_id_question(
     question: str,

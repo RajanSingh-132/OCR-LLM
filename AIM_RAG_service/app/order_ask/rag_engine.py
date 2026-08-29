@@ -379,6 +379,11 @@ def answer_order_question(
         lookup_mod = get_lookup_module(domain)
         lookup_intents = {lookup_mod.intent_name, "order_lookup", "invoice_lookup", "trip_lookup"}
 
+        # List replies need more room so Claude can write all returned rows.
+        if mode == "list" and list_payload:
+            returned = int(list_payload.get("returned") or 0)
+            max_tokens = max(max_tokens, min(2500, 200 + returned * 90))
+
         try:
             # List answers: format from Mongo rows in code (full N rows, $0 LLM).
             # Avoids mid-sentence cutoff when max_tokens is too small for 15+ items.
