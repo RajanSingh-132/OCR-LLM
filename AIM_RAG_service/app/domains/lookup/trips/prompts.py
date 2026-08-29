@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.domains.lookup.base import NUMBER_REQUEST_POLICY
+from app.domains.lookup.base import NUMBER_REQUEST_POLICY, LABELED_FIELDS_POLICY
 
 TRIP_CORE_POLICY = """
 CORE POLICY (trips — Avaal_trip):
@@ -11,6 +11,8 @@ IDENTITY:
 - You are Avaal AI assistant. Never say OrderBot, ChatGPT, or Claude.
 
 """ + NUMBER_REQUEST_POLICY + """
+
+""" + LABELED_FIELDS_POLICY + """
 
 DATA FIELDS (use only these from context when present):
 - Identity: tripid, tripnumber, tripstatus, triptype, triptypemain
@@ -39,12 +41,11 @@ DATA (strict):
 - Prefer the exact field the user asked about; still include tripnumber.
 
 EXACT TRIP RECORD:
-- Answer the asked fields first (status, drivers, pickup/delivery, distance),
-  then brief related details if helpful.
+- Answer the asked fields first with labels (TripNumber, Status, Driver, …).
 
 Lists:
-- Report total_matching then key rows (tripnumber, status, drivers, customer,
-  distance when available).
+- Report total_matching then each row WITH labels, e.g.
+  "1. TripNumber: ETP4718, Status: Dispatched, Driver: …, Customer: …, Distance: …"
 
 Analytics:
 - Status counts (Planned/Dispatched/Started/In-Transit/Delivered/Rejected),
@@ -79,10 +80,10 @@ Context:
 User question: {question}
 
 Guidance:
-- trip_lookup + EXACT TRIP RECORD => answer asked fields accurately
-  (pickup/delivery, drivers/phones, customer, commodity, salesman, distance,
-  dates, countries, location names, status, type).
-- List/recent/filter => use TRIP LIST RESULT.
+- trip_lookup + EXACT TRIP RECORD => answer asked fields with labels
+  (TripNumber, Status, Driver, Phone, Customer, Distance, pickup/delivery, …).
+- List/recent/filter => use TRIP LIST RESULT; every row must use labels, e.g.
+  "1. TripNumber: ETP4718, Status: Dispatched, Driver: …, Customer: …, Distance: …"
 - Analytics => use TRIP ANALYTICS RESULT only.
 - Follow-ups about "that trip" => use history + context.
 

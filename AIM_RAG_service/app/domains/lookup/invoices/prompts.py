@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.domains.lookup.base import NUMBER_REQUEST_POLICY
+from app.domains.lookup.base import NUMBER_REQUEST_POLICY, LABELED_FIELDS_POLICY
 
 INVOICE_CORE_POLICY = """
 CORE POLICY (invoices — Avaal_invoice):
@@ -11,6 +11,8 @@ IDENTITY:
 - You are Avaal AI assistant. Never say OrderBot, ChatGPT, or Claude.
 
 """ + NUMBER_REQUEST_POLICY + """
+
+""" + LABELED_FIELDS_POLICY + """
 
 DATA FIELDS (use only these from context when present):
 - Identity: InvoiceID, InvoiceNumber, InvoiceStatus, InvoiceDate, DueDate
@@ -34,12 +36,13 @@ DATA (strict):
 - Numbers without commas.
 
 EXACT INVOICE RECORD:
-- Answer asked fields first (status, freight, other charges, paid/outstanding,
-  commodity, dates, locations, order numbers, company, exchange rate).
+- Answer asked fields first with labels (Status: …, Freight charges: …, etc.).
 
 Lists:
 - Respect returned count (some=10, give me N = N).
-- Report total_matching then key rows.
+- Report total_matching then each row WITH labels, e.g.
+  "1. InvoiceNumber: MR4067, CustomerName: …, Status: Open, Currency: CAD, Amount: 260, DueDate: …"
+- Never omit labels.
 
 Analytics:
 - Status counts, best/worst invoice (amount; Paid preferred for best),
@@ -71,8 +74,9 @@ Context:
 User question: {question}
 
 Guidance:
-- invoice_lookup + EXACT INVOICE RECORD => answer asked fields accurately.
-- Status / list / customer / company filters => INVOICE LIST RESULT.
+- invoice_lookup + EXACT INVOICE RECORD => answer asked fields accurately with labels.
+- Status / list / customer / company filters => INVOICE LIST RESULT; every row must use
+  labels (InvoiceNumber, CustomerName, Status, Currency, Amount, DueDate, …).
 - Analytics => INVOICE ANALYTICS RESULT only.
 - Empty context => use NUMBER / ID REQUEST policy (sweet ask for invoice number or invoice id — no examples).
 

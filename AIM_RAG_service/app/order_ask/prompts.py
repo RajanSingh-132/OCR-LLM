@@ -198,7 +198,8 @@ User Question: {question}
 
 Extra guidance:
 - Order lookup / specific order + EXACT ORDER RECORD present => detailed factual summary now.
-- Lists => mention how many matched, then key rows (order number, customer, status, amount, distance/location as relevant).
+- Lists => mention how many matched, then each row WITH labels
+  (OrderNumber, CustomerName, Status, Amount, … — never bare values only).
 - Pin/zip/state/city/address/location filters => use ORDER LIST RESULT; say how many matched; include address/location from rows. Do not invent pins or cities.
 - Ranked best/highest OR worst/lowest orders => clearly state the ranked order(s) and amounts without commas.
 - ANALYTICS RESULT present => answer from those exact totals only (status summary, best/worst customer, best city, state-wise/city-wise counts, country customer counts, date/period counts, trip/distance).
