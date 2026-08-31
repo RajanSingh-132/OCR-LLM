@@ -119,13 +119,21 @@ def search_records(
     limit: int = 15,
     sort_by: str = "",
     ascending: bool = False,
+    *,
+    match: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Structured Mongo list/search for the active domain.
+
+    Pass a prebuilt ``match`` to bypass ``_base_match(filters)`` (used by the
+    invoice LLM query planner, which builds its own operator-DSL match).
+    """
     domain = get_active_domain()
     profile = _profile()
     sort_by = _pick_sort_field(sort_by or profile.default_sort)
 
     collection = get_domain_collection(domain)
-    match = _base_match(filters)
+    if match is None:
+        match = _base_match(filters)
     total = collection.count_documents(match)
     cursor = (
         collection.find(match, _LIST_PROJECTION)

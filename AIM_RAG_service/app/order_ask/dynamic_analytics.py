@@ -242,10 +242,16 @@ def _sample_schema(sample_size: int) -> Dict[str, Any]:
     return schema
 
 
-def resolve_field(name: Any, schema: Dict[str, Any]) -> Optional[str]:
+def resolve_field(
+    name: Any,
+    schema: Dict[str, Any],
+    *,
+    aliases: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
     """Map a possibly-misspelled / aliased field name to a real schema field."""
     if not isinstance(name, str) or not name.strip():
         return None
+    aliases = aliases if aliases is not None else _FIELD_ALIASES
     fields = schema.get("fields", {})
     if name in fields:
         return name
@@ -253,12 +259,12 @@ def resolve_field(name: Any, schema: Dict[str, Any]) -> Optional[str]:
     n = _norm(name)
     if n in index:
         return index[n]
-    alias = _FIELD_ALIASES.get(n)
+    alias = aliases.get(n)
     if alias and alias in fields:
         return alias
     # last path segment alias (e.g. "outStatus" -> outstatus)
     if "." in name:
-        seg_alias = _FIELD_ALIASES.get(_norm(name.split(".")[-1]))
+        seg_alias = aliases.get(_norm(name.split(".")[-1]))
         if seg_alias and seg_alias in fields:
             return seg_alias
     import difflib
@@ -300,9 +306,14 @@ def get_orders_schema(*, force: bool = False) -> Dict[str, Any]:
     return schema
 
 
-def _schema_for_prompt(schema: Dict[str, Any], *, max_fields: int = 180) -> str:
+def _schema_for_prompt(
+    schema: Dict[str, Any],
+    *,
+    max_fields: int = 180,
+    collection_label: str = "Avaal_order",
+) -> str:
     lines = [
-        f"Avaal_order fields (sampled {schema.get('sample_size')} docs; "
+        f"{collection_label} fields (sampled {schema.get('sample_size')} docs; "
         "dotted names are nested — you may use them):"
     ]
     items = list(schema.get("fields", {}).items())
@@ -418,7 +429,11 @@ def _clean_sort(
 
 
 def _validate_spec(
-    spec: Any, schema: Dict[str, Any]
+    spec: Any,
+    schema: Dict[str, Any],
+    *,
+    iso_date_fields: Optional[frozenset] = None,
+    aliases: Optional[Dict[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
     if not isinstance(spec, dict):
         return None
@@ -426,11 +441,12 @@ def _validate_spec(
     if op not in _ALLOWED_OPS:
         return None
 
+    iso_date_fields = iso_date_fields if iso_date_fields is not None else _ISO_DATE_FIELDS
     fields = schema.get("fields", {})
     unwind: set = set()
 
     def R(name: Any) -> Optional[str]:
-        return resolve_field(name, schema)
+        return resolve_field(name, schema, aliases=aliases)
 
     out: Dict[str, Any] = {"operation": op}
 
@@ -510,7 +526,7 @@ def _validate_spec(
         fld = R(db.get("field"))
         unit = str(db.get("unit") or "day").lower()
         if fld and unit in _BUCKET_UNITS and (
-            fld in _ISO_DATE_FIELDS or fld.split(".")[-1] in _ISO_DATE_FIELDS
+            fld in iso_date_fields or fld.split(".")[-1] in iso_date_fields
         ):
             out["date_bucket"] = {"field": fld, "unit": unit}
             if op == "metric":
