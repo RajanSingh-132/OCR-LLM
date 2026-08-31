@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.domains.lookup.base import DomainPrompts, LookupModule
+from app.domains.lookup.base import DomainPrompts, LookupModule, AVAAL_GREETING_PROMPT
 from app.domains.lookup.invoices import lookup as invoice_lookup
 from app.domains.lookup.orders import lookup as order_lookup
 from app.domains.lookup.trips import lookup as trip_lookup
