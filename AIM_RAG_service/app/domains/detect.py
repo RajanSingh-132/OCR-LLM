@@ -188,6 +188,29 @@ def detect_domain_detailed(
         if top_score < _STRONG_SCORE or tied:
             use_llm = True
 
+    # Pure greeting/thanks — never burn an LLM call on domain classify.
+    # Default to last sticky domain or orders; greeting answer does not need DB.
+    from app.order_ask.intent import GREETING_RE, THANKS_RE
+
+    q_stripped = (question or "").strip()
+    if GREETING_RE.match(q_stripped) or THANKS_RE.match(q_stripped):
+        sticky = (history_hint or "").strip().lower()
+        domain = sticky if sticky in DOMAINS else DEFAULT_DOMAIN
+        result = {
+            "domain": domain,
+            "method": "local",
+            "reason": "greeting_or_thanks_skip_domain_llm",
+            "scores": scores,
+        }
+        checkpoint(
+            "DOMAIN",
+            "detected",
+            domain=domain,
+            method="local",
+            reason=result["reason"],
+        )
+        return result
+
     if not use_llm:
         result = {
             "domain": local_domain,

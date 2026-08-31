@@ -22,7 +22,9 @@ from app.tenants.context import get_active_domain
 logger = logging.getLogger("order_ask.intent")
 
 GREETING_RE = re.compile(
-    r"^\s*(hi|hii|hiii|hello|hey|heyya|yo|hola|namaste|good\s*(morning|afternoon|evening)|sup|hiya)\b[\s!?.]*$",
+    r"^\s*(hi|hii|hiii|hello|helo|hlo|hey|heyya|yo|hola|namaste|"
+    r"good\s*(morning|afternoon|evening|night)|sup|hiya|"
+    r"howdy|greetings)\b[\s!?.]*$",
     re.IGNORECASE,
 )
 THANKS_RE = re.compile(

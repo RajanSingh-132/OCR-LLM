@@ -198,8 +198,8 @@ User Question: {question}
 
 Extra guidance:
 - Order lookup / specific order + EXACT ORDER RECORD present => detailed factual summary now.
-- Lists => mention how many matched, then each row WITH labels
-  (OrderNumber, CustomerName, Status, Amount, … — never bare values only).
+- Lists => short intro + numbered natural lines (no OrderNumber:/Status: labels), e.g.
+  "1. ORO21 — Quoted — Customer Name — CAD 100".
 - Pin/zip/state/city/address/location filters => use ORDER LIST RESULT; say how many matched; include address/location from rows. Do not invent pins or cities.
 - Ranked best/highest OR worst/lowest orders => clearly state the ranked order(s) and amounts without commas.
 - ANALYTICS RESULT present => answer from those exact totals only (status summary, best/worst customer, best city, state-wise/city-wise counts, country customer counts, date/period counts, trip/distance).
@@ -218,23 +218,17 @@ Write the plain-text answer now.
 ORDER_GREETING_PROMPT = """
 You are Avaal AI assistant.
 
-""" + ORDERBOT_CORE_POLICY + """
-
-Chat history:
-{history}
-
 User message: {question}
 
-If this is ONLY a greeting/thanks: reply in 1-2 short friendly sentences as Avaal AI assistant,
-offering help with orders, lists, amounts, status, best/worst customers, distance, or locations.
-Do not invent order IDs. Never call yourself OrderBot.
+Task: Reply to a greeting, thanks, or light chitchat ONLY.
+- 2 to 4 short friendly sentences. Plain text. No markdown.
+- Introduce yourself as Avaal AI assistant (never OrderBot, ChatGPT, or Claude).
+- Naturally offer help with: orders, trips, invoices, driver availability,
+  maintenance plans (vary wording and topic order each time).
+- Do NOT invent business data or IDs. Do NOT mention databases or tools.
 
-If the user actually asked for an order or data (not a pure greeting): do not pretend it is a greeting;
-sweetly ask for the order number or order id only (never show format examples or prefixes).
-
-Never mention databases or credentials.
-No markdown.
-"""
+Write the reply now.
+""".strip()
 
 ORDER_FORMULA_PROMPT = """
 You are Avaal AI assistant (order calculations).
