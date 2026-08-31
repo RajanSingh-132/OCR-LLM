@@ -26,7 +26,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field as dc_field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from langchain_core.prompts import PromptTemplate
@@ -42,6 +42,7 @@ from app.order_ask.dynamic_analytics import (
     _validate_spec,
     format_dynamic_analytics_for_context,
     get_orders_schema,
+    resolve_field,
 )
 from app.order_ask.rag_retrieval import (
     _base_order_match,
@@ -57,10 +58,13 @@ PLANNER_ENABLED = os.environ.get(
     "AVAAL_QUERY_PLANNER", "1"
 ).strip().lower() not in ("0", "false", "no", "off")
 
-MAX_FILTERS = 12
+MAX_FILTERS = 14
 
 _TASKS = frozenset(
-    {"lookup", "list", "aggregate", "compare", "conversation", "greeting", "unsupported"}
+    {
+        "lookup", "list", "aggregate", "compare", "percentage",
+        "conversation", "greeting", "unsupported",
+    }
 )
 
 # op -> which field kinds it may target
@@ -75,11 +79,20 @@ _DATE_OPS = frozenset(
         "date_lte",
         "date_gt",
         "date_lt",
+        "date_range",
         "last_days",
+        "period",
         "exists",
     }
 )
 _ALL_OPS = _STRING_OPS | _NUMERIC_OPS | _DATE_OPS
+
+_PERIODS = frozenset(
+    {
+        "today", "yesterday", "this_week", "last_week",
+        "this_month", "last_month", "this_year", "last_year",
+    }
+)
 
 # Virtual fields resolved through the address-string regex helpers in
 # rag_retrieval._base_order_match (not real top-level Mongo fields).
@@ -111,13 +124,19 @@ class QueryPlan:
     limit: int = 15
     response_style: str = "medium"
     reason: str = ""
+    # task=compare (segments) / task=percentage
+    segments: List[Dict[str, Any]] = dc_field(default_factory=list)
+    numerator: List[Dict[str, Any]] = dc_field(default_factory=list)
+    pct_of: str = "orders"
+    metric: Optional[Dict[str, Any]] = None
 
     def to_intent_info(self) -> Dict[str, Any]:
         intent = {
             "lookup": "order_lookup",
             "list": "list_filter",
             "aggregate": "analytics",
-            "compare": "compare",
+            "compare": "compare" if self.record_tokens else "analytics",
+            "percentage": "analytics",
         }.get(self.task, "open_qa")
         max_tokens = {"short": 150, "medium": 500, "detailed": 1200}.get(
             self.response_style, 500
@@ -129,8 +148,10 @@ class QueryPlan:
             "response_style": self.response_style,
             "max_tokens_hint": max_tokens,
             "retrieve_k": 0,
-            "needs_exact_order": self.task in ("lookup", "compare"),
-            "needs_analytics": self.task == "aggregate",
+            "needs_exact_order": self.task == "lookup"
+            or (self.task == "compare" and bool(self.record_tokens)),
+            "needs_analytics": self.task in ("aggregate", "percentage")
+            or (self.task == "compare" and not self.record_tokens),
             "reason": f"planner:{self.reason or self.task}",
         }
 
@@ -155,7 +176,7 @@ class QueryPlan:
 
 # ------------------------------------------------------------------- LLM
 _PLANNER_PROMPT = """You are a query planner for the Avaal_order MongoDB collection (freight orders).
-Convert the user's question into a STRICT JSON plan. Output JSON only — no prose, no code fence.
+Convert the user's question into ONE strict JSON plan. Output JSON only — no prose, no code fence.
 
 Today (UTC): {today}
 
@@ -164,57 +185,80 @@ Today (UTC): {today}
 Conversation so far:
 {history}
 
-Plan shape:
+PLAN SHAPE (include only the keys the task needs):
 {{
-  "task": "lookup" | "list" | "aggregate" | "compare" | "conversation" | "greeting" | "unsupported",
+  "task": "lookup" | "list" | "aggregate" | "compare" | "percentage" | "conversation" | "greeting" | "unsupported",
   "record_tokens": ["MRP12345", ...],
-  "filters": [
-    {{"field": "<field>", "op": "<op>", "value": <scalar|list>}}
-  ],
+  "filters": [ {{"field": "<field>", "op": "<op>", "value": <scalar|list>}} ],
   "aggregate": {{
-    "operation": "group" | "metric" | "count" | "distinct_count",
+    "operation": "count" | "metric" | "group" | "distinct_count",
     "group_by": ["<groupable field>", ...],
     "metrics": [{{"fn": "sum|avg|min|max|count", "field": "<numeric field>"}}],
-    "distinct_field": "<field>"
+    "distinct_field": "<field>",
+    "date_bucket": {{"field": "orderdate", "unit": "day|week|month"}},
+    "having": [{{"key": "orders|count|sum_<field>|avg_<field>", "op": "gt|gte|lt|lte", "value": <num>}}]
   }},
-  "sort": {{"key": "<field or metric key like avg_totalfreight>", "dir": "asc|desc"}},
+  "segments": [ {{"label": "August", "filters": [ ... ]}}, {{"label": "July", "filters": [ ... ]}} ],
+  "metric": {{"fn": "count|sum|avg", "field": "<numeric field>"}},
+  "numerator": [ {{"field": "...", "op": "...", "value": ...}} ],
+  "pct_of": "orders" | "<numeric field>",
+  "sort": {{"key": "<field / metric key like avg_totalfreight / count / orders / period>", "dir": "asc|desc"}},
   "limit": <int 1-100>,
-  "response_style": "short" | "medium" | "detailed",
+  "response_style": "short|medium|detailed",
   "reason": "<short>"
 }}
 
-Tasks:
-- lookup    : user wants ONE specific order (they gave a number/id) -> set record_tokens.
-- compare   : user compares 2 specific orders -> record_tokens has 2.
-- list      : user wants a filtered list of orders -> filters (+ optional sort/limit).
-- aggregate : counts / totals / averages / group-by / distinct -> aggregate block.
-- conversation : freeform question needing document context ("why was it delayed") -> planner cannot answer; leave rest empty.
-- greeting  : hi / thanks / smalltalk.
-- unsupported : cannot be mapped.
+TASKS
+- lookup     : user names ONE order (number/id) -> record_tokens.
+- compare(records) : compares 2 named orders -> record_tokens has 2.
+- compare(segments): compares metrics across time windows / places ("August vs July", "Canada vs US",
+                     "Aug 1-15 vs Aug 16-31") -> segments[] each with its own filters, plus one metric.
+- list       : wants the actual orders -> filters (+ sort/limit). "show / list / find / top N orders".
+- aggregate  : how many / total / average / min / max / per / by / wise / distinct / daily / weekly.
+- percentage : "what % of ..." -> numerator (the subset) + pct_of ("orders" or a numeric field).
+                filters = the population; numerator = the extra condition.
+- conversation: needs document text ("why delayed") - leave the rest empty.
+- greeting / unsupported.
 
-Filter ops:
-  eq, ne, in, nin            any field
-  contains, starts_with      text fields only (case-insensitive substring / prefix)
-  gt, gte, lt, lte           numeric fields only
-  date_eq, date_gte, date_lte, date_gt, date_lt   date fields (value = "YYYY-MM-DD", based on Today above)
-  last_days                  date fields, value = integer N -> on/after (Today - N days). Use for "last 7 days", "past week", "last month" (30).
-  exists                     value true/false
+FILTER OPS
+  eq, ne, in, nin           any field         contains, starts_with   text only
+  gt, gte, lt, lte          numeric only      exists                  value true/false
+  date_gte/date_lte/date_gt/date_lt/date_eq   date field, value "YYYY-MM-DD"
+  date_range                date field, value ["YYYY-MM-DD","YYYY-MM-DD"] (inclusive) - use for "between Aug 1 and Aug 15"
+  period                    date field, value one of: today, yesterday, this_week, last_week, this_month, last_month, this_year, last_year
+  last_days                 date field, value integer N - "last 7 days", "past 30 days"
+Order date field = "orderdate"; use "pickupdate" / "deliverydate" only if the user says picked up / delivered.
+A month name like "August" with no year -> date_range for that whole month in the current year.
 
-Date field for orders is "orderdate" unless the user says pickup / delivery.
+VOCAB (map the user's word to the real field/value)
+- status words: pending = orderstatus in ["Quoted","Confirmed","Dispatched","Started","In-Transit","Partially Delivered"]
+  (use op "nin" value ["Delivered","Cancelled","Rejected"]); "in transit" = orderstatus eq "In-Transit";
+  delivered / cancelled / confirmed / quoted / dispatched = orderstatus eq that exact word.
+  "delayed" / "late" = deliverydate date_lt Today AND orderstatus ne "Delivered".
+- accounting: "not invoiced" = accountingstatus in [null,"NotInvoiced"] OR accountingtypebreakdown.notInvoiced gt 0
+  (prefer: field "accountingstatus" op "in" value [null]); invoiced / paid = accountingstatus eq that.
+- flags: "active" = isactive eq true; "archived" = isarchived eq true; "FTL" = loadtypelucode eq "FTL"; "LTL" = "LTL".
+- money: revenue/gross -> grosstotalfreight; amount/price/value/cost -> totalfreight; freight -> totalfreight;
+  rate -> freightratevalue; tax -> totaltaxamount; fuel -> fuelcharges. "C$50,000" -> 50000.
+- other: client/buyer -> customername; carrier -> outcarriername; trip -> tripno; miles/km -> distance;
+  PO -> pono; reference -> referno; salesman/agent -> salesmanname; commodity/product -> commodityname;
+  "route" -> group_by ["pickuplocationname","deliverylocationname"]; "freight per mile" -> not directly supported,
+  use metric avg on totalfreight and note distance separately, or mark unsupported.
+- geo virtual fields: city, state, country, pin, location, pickup_location, delivery_location, location_side
+  ("from X" -> pickup side, "to / going to X" -> delivery side). "Canadian" -> country eq "Canada".
 
-Field notes:
-- orderstatus = transport lifecycle (Quoted, Confirmed, Dispatched, In-Transit, Delivered, Cancelled...). Plain "order status" / "status" means THIS field.
-- accountingstatus = invoicing / payment (Invoiced, PartiallyPaid, Paid, Restricted).
-- outstatus = outsourcing (Open, Planned, Assigned, ...).
-
-Rules:
-- Use ONLY field names shown above, or these virtual location fields: state, city, country, pin, address, location, pickup_location, delivery_location, location_side (value pickup|delivery|both).
-- Numeric ops only on fields tagged numeric. contains/starts_with only on text fields.
-- group_by only on fields tagged groupable. metric key = fn + "_" + field, or "count".
-- group_by may hold 2 fields for a two-dimensional breakdown
-  (e.g. "order status and accounting status wise" -> group_by ["orderstatus","accountingstatus"]).
-- Do not invent filters the user did not ask for.
-- Prefer "aggregate" for "how many / total / average / per / by / wise / distinct".
+RULES
+- Use ONLY fields shown above (dotted nested allowed) or the geo virtual fields. Never invent one.
+- Numeric fn/ops only on numeric fields. group_by only on groupable fields (max 2).
+- date_bucket: for "daily / weekly / monthly" series. operation stays "group"; group_by may be [] (pure time series)
+  or hold ONE other field. Works on orderdate/createdon only.
+- having: threshold AFTER grouping ("customers with more than 5 orders AND freight above 5000" ->
+  group_by ["customername"], metrics [count, sum totalfreight], having [{{count>5}},{{sum_totalfreight>5000}}]).
+- "top N X by Y": task aggregate, group_by [X], metric sum/avg on Y, sort desc, limit N.
+- "highest-value orders" (individual orders, not a group) -> task list, sort by grosstotalfreight desc.
+- Do NOT invent filters the user didn't ask for. Put the population filters in "filters", the compared
+  dimension in "segments"/"numerator".
+- If truly not expressible, task "unsupported".
 
 Question: {question}
 JSON:"""
@@ -266,6 +310,12 @@ def _valid_filter(f: Any, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(name, str) or op not in _ALL_OPS:
         return None
 
+    # Fuzzy / alias resolution for misspelled or business-term field names
+    if name not in _VIRTUAL_GEO and name not in schema.get("fields", {}):
+        resolved = resolve_field(name, schema)
+        if resolved:
+            name = resolved
+
     kind = _field_kind(name, schema)
     if kind is None:
         return None
@@ -303,6 +353,16 @@ def _valid_filter(f: Any, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         except (TypeError, ValueError):
             return None
         if value <= 0:
+            return None
+    if op == "date_range":
+        if not (isinstance(value, list) and len(value) == 2):
+            return None
+        value = [str(value[0]).strip()[:10], str(value[1]).strip()[:10]]
+        if not all(re.match(r"^\d{4}-\d{2}-\d{2}$", v) for v in value):
+            return None
+    if op == "period":
+        value = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+        if value not in _PERIODS:
             return None
     return {"field": name, "op": op, "value": value}
 
@@ -361,6 +421,63 @@ def _validate_plan(
     if task == "lookup" and not tokens:
         return None
 
+    # ---- metric shared by compare/percentage ----
+    def _valid_metric(raw_m: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(raw_m, dict):
+            return {"fn": "count", "field": None}
+        fn = str(raw_m.get("fn") or "count").lower()
+        if fn not in ("count", "sum", "avg", "min", "max"):
+            fn = "count"
+        if fn == "count":
+            return {"fn": "count", "field": None}
+        fld = resolve_field(raw_m.get("field"), schema)
+        if not fld or not schema["fields"].get(fld, {}).get("numeric"):
+            return {"fn": "count", "field": None}
+        return {"fn": fn, "field": fld}
+
+    segments: List[Dict[str, Any]] = []
+    numerator: List[Dict[str, Any]] = []
+    pct_of = "orders"
+    metric: Optional[Dict[str, Any]] = None
+
+    if task == "compare" and isinstance(raw.get("segments"), list) and raw["segments"]:
+        for seg in raw["segments"][:4]:
+            if not isinstance(seg, dict):
+                continue
+            sf = [
+                c
+                for c in (_valid_filter(f, schema) for f in (seg.get("filters") or []))
+                if c is not None
+            ]
+            segments.append(
+                {
+                    "label": str(seg.get("label") or f"segment {len(segments) + 1}")[:40],
+                    "filters": sf,
+                }
+            )
+        segments = [s for s in segments if s["filters"]]
+        if len(segments) < 2:
+            return None
+        metric = _valid_metric(raw.get("metric"))
+
+    if task == "compare" and not segments and not tokens:
+        return None  # nothing concrete to compare — let the regex engine try
+
+    if task == "percentage":
+        numerator = [
+            c
+            for c in (_valid_filter(f, schema) for f in (raw.get("numerator") or []))
+            if c is not None
+        ]
+        if not numerator:
+            return None
+        of = raw.get("pct_of") or raw.get("of") or "orders"
+        if str(of).lower() in ("orders", "order", "count", "records"):
+            pct_of = "orders"
+        else:
+            r = resolve_field(of, schema)
+            pct_of = r if (r and schema["fields"].get(r, {}).get("numeric")) else "orders"
+
     return QueryPlan(
         task=task,
         record_tokens=tokens[:2],
@@ -370,6 +487,10 @@ def _validate_plan(
         limit=limit,
         response_style=style,
         reason=str(raw.get("reason") or "")[:80],
+        segments=segments,
+        numerator=numerator,
+        pct_of=pct_of,
+        metric=metric,
     )
 
 
@@ -397,6 +518,47 @@ def run_query_planner(
     if plan is None or plan.task in ("greeting", "conversation", "unsupported"):
         return None
     return plan
+
+
+# ------------------------------------------------------------------- dates
+def _month_add(d: date, n: int) -> date:
+    total = (d.year * 12 + (d.month - 1)) + n
+    return date(total // 12, total % 12 + 1, 1)
+
+
+def _period_bounds(name: str) -> Optional[tuple]:
+    """(start_inclusive, end_exclusive) ISO dates for a named period."""
+    today = datetime.now(timezone.utc).date()
+    if name == "today":
+        s, e = today, today + timedelta(days=1)
+    elif name == "yesterday":
+        s, e = today - timedelta(days=1), today
+    elif name == "this_week":
+        s = today - timedelta(days=today.weekday())
+        e = s + timedelta(days=7)
+    elif name == "last_week":
+        e = today - timedelta(days=today.weekday())
+        s = e - timedelta(days=7)
+    elif name == "this_month":
+        s = today.replace(day=1)
+        e = _month_add(s, 1)
+    elif name == "last_month":
+        e = today.replace(day=1)
+        s = _month_add(e, -1)
+    elif name == "this_year":
+        s, e = date(today.year, 1, 1), date(today.year + 1, 1, 1)
+    elif name == "last_year":
+        s, e = date(today.year - 1, 1, 1), date(today.year, 1, 1)
+    else:
+        return None
+    return s.isoformat(), e.isoformat()
+
+
+def _plus_one_day(iso: str) -> str:
+    try:
+        return (date.fromisoformat(iso) + timedelta(days=1)).isoformat()
+    except ValueError:
+        return iso + "~"  # lexical upper-bound fallback
 
 
 # ------------------------------------------------------------------- match builder
@@ -440,6 +602,14 @@ def _op_to_mongo(op: str, value: Any, field: str, kind: str):
             datetime.now(timezone.utc) - timedelta(days=int(value))
         ).strftime("%Y-%m-%d")
         return {"$gte": cutoff}
+    if op == "date_range":
+        start, end = value[0], value[1]
+        return {"$gte": start, "$lt": _plus_one_day(end)}
+    if op == "period":
+        bounds = _period_bounds(value)
+        if not bounds:
+            return None
+        return {"$gte": bounds[0], "$lt": bounds[1]}
     if op in ("gt", "gte", "lt", "lte"):
         mop = {"gt": "$gt", "gte": "$gte", "lt": "$lt", "lte": "$lte"}[op]
         if kind == "numeric":
@@ -510,6 +680,32 @@ def _list_orders(plan: QueryPlan, schema: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _metric_value(match: Dict[str, Any], metric: Dict[str, Any]) -> float:
+    """One-shot count / sum / avg / min / max over a match."""
+    collection = get_orders_collection()
+    fn = metric.get("fn") or "count"
+    if fn == "count":
+        return float(collection.count_documents(match))
+    field = metric.get("field")
+    if not field:
+        return float(collection.count_documents(match))
+    rows = list(
+        collection.aggregate(
+            [
+                {"$match": match},
+                {"$group": {"_id": None, "v": {f"${fn}": _numeric_expr(field)}}},
+            ],
+            maxTimeMS=AGG_TIMEOUT_MS,
+        )
+    )
+    return float(rows[0]["v"]) if rows and rows[0].get("v") is not None else 0.0
+
+
+def _metric_label(metric: Dict[str, Any]) -> str:
+    fn = metric.get("fn") or "count"
+    return "order_count" if fn == "count" else f"{fn}_{metric.get('field')}"
+
+
 # ------------------------------------------------------------------- execute
 def execute_query_plan(plan: QueryPlan, *, question: str) -> Dict[str, Any]:
     """Run a validated plan. Returns the same shape as tools.execute_tools."""
@@ -543,6 +739,28 @@ def execute_query_plan(plan: QueryPlan, *, question: str) -> Dict[str, Any]:
             )
         tools_run.append("get_record")
 
+    elif plan.task == "compare" and plan.segments:
+        metric = plan.metric or {"fn": "count", "field": None}
+        label = _metric_label(metric)
+        seg_rows = []
+        for seg in plan.segments:
+            m = _build_match(plan.filters + seg["filters"], schema)
+            seg_rows.append(
+                {"segment": seg["label"], label: round(_metric_value(m, metric), 4)}
+            )
+        analytics_payload = {
+            "analytics_type": "dynamic",
+            "engine": "dynamic_planner",
+            "operation": "compare",
+            "metric": label,
+            "filters": _filters_summary(plan.filters),
+            "rows": seg_rows,
+        }
+        context_blocks.append(
+            format_dynamic_analytics_for_context(analytics_payload)
+        )
+        tools_run.append("run_analytics")
+
     elif plan.task == "compare":
         parts: List[str] = []
         for token in plan.record_tokens[:2]:
@@ -559,6 +777,33 @@ def execute_query_plan(plan: QueryPlan, *, question: str) -> Dict[str, Any]:
                 parts.append(f"ORDER {token}: not found")
         context_blocks.append("COMPARE ORDERS:\n" + "\n\n".join(parts))
         tools_run.append("compare_records")
+
+    elif plan.task == "percentage":
+        metric = (
+            {"fn": "count", "field": None}
+            if plan.pct_of == "orders"
+            else {"fn": "sum", "field": plan.pct_of}
+        )
+        den_match = _build_match(plan.filters, schema)
+        num_match = _build_match(plan.filters + plan.numerator, schema)
+        den = _metric_value(den_match, metric)
+        num = _metric_value(num_match, metric)
+        pct = round((num / den * 100.0), 2) if den else 0.0
+        analytics_payload = {
+            "analytics_type": "dynamic",
+            "engine": "dynamic_planner",
+            "operation": "percentage",
+            "of": ("orders" if plan.pct_of == "orders" else f"sum {plan.pct_of}"),
+            "numerator": round(num, 4),
+            "denominator": round(den, 4),
+            "percentage": pct,
+            "numerator_filters": _filters_summary(plan.numerator),
+            "filters": _filters_summary(plan.filters),
+        }
+        context_blocks.append(
+            format_dynamic_analytics_for_context(analytics_payload)
+        )
+        tools_run.append("run_analytics")
 
     elif plan.task == "aggregate" and plan.aggregate is not None:
         match = _build_match(plan.filters, schema)

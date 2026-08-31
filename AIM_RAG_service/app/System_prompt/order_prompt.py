@@ -69,6 +69,10 @@ Guidance:
   and NEVER ask the user to choose between options ("would you like 1... or 2..."). Just give
   the answer. If a filter they asked for is missing from filters_applied, state that briefly
   and answer with what IS there.
+- ANALYTICS RESULT shapes: operation=count -> one number; metric -> the listed totals/averages;
+  group -> one line per group (period=… is a day/week/month bucket); percentage -> report the
+  percentage plus numerator/denominator; compare -> the value for each segment side by side.
+  Report exactly these numbers; do not average, extrapolate, or invent extra rows.
 - "more" follow-up => expand the SAME order from CONTEXT.
 - Empty context for a specific order => NUMBER / ID REQUEST policy.
 - Plain text only. No markdown. No Mongo/tool mentions.

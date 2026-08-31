@@ -47,6 +47,12 @@ GROUPABLE_MAX_DISTINCT = 200
 
 _ALLOWED_FNS = frozenset({"sum", "avg", "min", "max", "count"})
 _ALLOWED_OPS = frozenset({"group", "metric", "count", "distinct_count"})
+_HAVING_OPS = {"gt": "$gt", "gte": "$gte", "lt": "$lt", "lte": "$lte", "eq": "$eq", "ne": "$ne"}
+_BUCKET_UNITS = frozenset({"day", "week", "month"})
+# Date fields stored ISO-8601 (safe for $toDate / string prefix compare).
+_ISO_DATE_FIELDS = frozenset(
+    {"orderdate", "createdon", "modifiedon", "enquirydate", "quotationdate"}
+)
 
 _SKIP_FIELDS = frozenset(
     {"_id", "embedding", "page_content", "metadata", "namespace"}
@@ -71,6 +77,48 @@ _DEFER_RE = re.compile(
 
 _NUM_STR_RE = re.compile(r"^-?\$?\s?[\d,]+(\.\d+)?%?$")
 
+# Nested-object walk depth (0 = top level). commoditydetails[]/outsourcedetails{}/
+# compliancedetails{}/accountingtypebreakdown{} all live one level down.
+_MAX_DEPTH = int(os.environ.get("AVAAL_ANALYTICS_SCHEMA_DEPTH", "2"))
+_MAX_FIELDS = int(os.environ.get("AVAAL_ANALYTICS_MAX_FIELDS", "260"))
+
+# Common business phrasings → real field (keys are _norm()'d). Only used when a
+# planner-named field is not found exactly / fuzzily.
+_FIELD_ALIASES: Dict[str, str] = {
+    "revenue": "grosstotalfreight", "grossrevenue": "grosstotalfreight",
+    "grossfreight": "grosstotalfreight", "totalrevenue": "grosstotalfreight",
+    "amount": "totalfreight", "price": "totalfreight", "cost": "totalfreight",
+    "freight": "totalfreight", "freightamount": "totalfreight",
+    "rate": "freightratevalue", "freightrate": "freightratevalue",
+    "client": "customername", "clientname": "customername", "customer": "customername",
+    "buyer": "customername",
+    "status": "orderstatus", "orderstate": "orderstatus", "state": "orderstatus",
+    "accountstatus": "accountingstatus", "billingstatus": "accountingstatus",
+    "invoicestatus": "accountingstatus",
+    "carrier": "outcarriername", "carriername": "outcarriername",
+    "trip": "tripno", "tripnumber": "tripno", "tripid": "tripno",
+    "miles": "distance", "km": "distance", "kilometers": "distance", "mileage": "distance",
+    "po": "pono", "ponumber": "pono", "purchaseorder": "pono", "ordernoexternal": "customerorderno",
+    "reference": "referno", "ref": "referno", "referenceno": "referno",
+    "salesman": "salesmanname", "salesrep": "salesmanname", "agent": "salesmanname",
+    "commodity": "commodityname", "product": "commodityname", "goods": "commodityname",
+    "material": "commodityname",
+    "company": "companycode", "branch": "companycode",
+    "origin": "pickupfulladdress", "shipper": "pickuplocationname",
+    "pickup": "pickuplocationname", "pickupcity": "pickupfulladdress",
+    "destination": "deliveryfulladdress", "consignee": "deliverylocationname",
+    "delivery": "deliverylocationname", "deliverycity": "deliveryfulladdress",
+    "drop": "deliverylocationname",
+    "tax": "totaltaxamount", "taxamount": "totaltaxamount",
+    "fuel": "fuelcharges", "fuelamount": "fuelcharges",
+    "currency": "currencycode",
+    "orderno": "ordernumber", "ordernum": "ordernumber", "ordernо": "ordernumber",
+    "createddate": "createdon", "created": "createdon", "createddatetime": "createdon",
+    "modifieddate": "modifiedon", "updatedon": "modifiedon",
+    "loadtype": "loadtypelucode", "equipmentkind": "equipmenttype",
+    "weightkg": "weight", "qty": "quantity",
+}
+
 
 # ----------------------------------------------------------------- schema
 _schema_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
@@ -86,6 +134,56 @@ def _looks_numeric_string(value: Any) -> bool:
         and bool(value.strip())
         and bool(_NUM_STR_RE.match(value.strip()))
     )
+
+
+def _norm(name: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def _record_field(fields: Dict[str, Dict[str, Any]], path: str, value: Any) -> None:
+    info = fields.setdefault(
+        path, {"n": 0, "num": 0, "numstr": 0, "values": set(), "examples": []}
+    )
+    if value in (None, ""):
+        return
+    info["n"] += 1
+    if _is_number(value):
+        info["num"] += 1
+    elif _looks_numeric_string(value):
+        info["numstr"] += 1
+    if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+        if len(info["values"]) < 2000:
+            info["values"].add(str(value))
+        if len(info["examples"]) < 3 and str(value) not in info["examples"]:
+            info["examples"].append(str(value)[:40])
+
+
+def _walk(
+    fields: Dict[str, Dict[str, Any]],
+    array_prefixes: set,
+    prefix: str,
+    value: Any,
+    depth: int,
+) -> None:
+    if isinstance(value, dict):
+        if depth > _MAX_DEPTH or len(fields) > _MAX_FIELDS:
+            return
+        for k, v in value.items():
+            if k in _SKIP_FIELDS:
+                continue
+            _walk(fields, array_prefixes, f"{prefix}.{k}" if prefix else k, v, depth + 1)
+    elif isinstance(value, list):
+        if not value or depth > _MAX_DEPTH:
+            return
+        first = value[0]
+        if isinstance(first, dict):
+            if prefix:
+                array_prefixes.add(prefix)
+            _walk(fields, array_prefixes, prefix, first, depth)
+        elif isinstance(first, (str, int, float)) and not isinstance(first, bool):
+            _record_field(fields, prefix, first)
+    else:
+        _record_field(fields, prefix, value)
 
 
 def _sample_schema(sample_size: int) -> Dict[str, Any]:
@@ -104,35 +202,26 @@ def _sample_schema(sample_size: int) -> Dict[str, Any]:
         docs = list(collection.find(base).limit(size))
 
     fields: Dict[str, Dict[str, Any]] = {}
+    array_prefixes: set = set()
     for doc in docs:
-        for key, value in doc.items():
-            if key in _SKIP_FIELDS or "." in key:
-                continue
-            info = fields.setdefault(
-                key,
-                {"n": 0, "num": 0, "numstr": 0, "values": set(), "examples": []},
-            )
-            if value in (None, ""):
-                continue
-            info["n"] += 1
-            if _is_number(value):
-                info["num"] += 1
-            elif _looks_numeric_string(value):
-                info["numstr"] += 1
-            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
-                if len(info["values"]) < 2000:
-                    info["values"].add(str(value))
-                if len(info["examples"]) < 3 and str(value) not in info["examples"]:
-                    info["examples"].append(str(value)[:40])
+        _walk(fields, array_prefixes, "", doc, 0)
 
-    schema: Dict[str, Any] = {"sample_size": len(docs), "fields": {}}
+    schema: Dict[str, Any] = {
+        "sample_size": len(docs),
+        "fields": {},
+        "array_prefixes": sorted(array_prefixes),
+    }
     for key, info in fields.items():
         n = info["n"] or 1
         numeric_hits = info["num"] + info["numstr"]
         numeric = numeric_hits > 0 and numeric_hits >= 0.8 * n
         string_numeric = numeric and info["numstr"] >= info["num"]
         distinct = len(info["values"])
-        id_like = key in _ID_LIKE_FIELDS or (n > 20 and distinct >= 0.9 * n)
+        seg = key.split(".")[-1]
+        id_like = key in _ID_LIKE_FIELDS or seg in _ID_LIKE_FIELDS or (
+            n > 20 and distinct >= 0.9 * n
+        )
+        in_array = any(key == p or key.startswith(p + ".") for p in array_prefixes)
         groupable = (not id_like) and 1 <= distinct <= GROUPABLE_MAX_DISTINCT
         schema["fields"][key] = {
             "numeric": bool(numeric),
@@ -140,9 +229,57 @@ def _sample_schema(sample_size: int) -> Dict[str, Any]:
             "distinct_in_sample": distinct,
             "groupable": bool(groupable),
             "id_like": bool(id_like),
+            "array": bool(in_array),
             "examples": info["examples"],
         }
+
+    # Normalized-name index for fuzzy resolution
+    index: Dict[str, str] = {}
+    for real in schema["fields"]:
+        index.setdefault(_norm(real), real)
+        index.setdefault(_norm(real.split(".")[-1]), real)
+    schema["_index"] = index
     return schema
+
+
+def resolve_field(
+    name: Any,
+    schema: Dict[str, Any],
+    *,
+    aliases: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    """Map a possibly-misspelled / aliased field name to a real schema field."""
+    if not isinstance(name, str) or not name.strip():
+        return None
+    aliases = aliases if aliases is not None else _FIELD_ALIASES
+    fields = schema.get("fields", {})
+    if name in fields:
+        return name
+    index = schema.get("_index") or {}
+    n = _norm(name)
+    if n in index:
+        return index[n]
+    alias = aliases.get(n)
+    if alias and alias in fields:
+        return alias
+    # last path segment alias (e.g. "outStatus" -> outstatus)
+    if "." in name:
+        seg_alias = aliases.get(_norm(name.split(".")[-1]))
+        if seg_alias and seg_alias in fields:
+            return seg_alias
+    import difflib
+
+    close = difflib.get_close_matches(n, list(index.keys()), n=1, cutoff=0.82)
+    if close:
+        return index[close[0]]
+    return None
+
+
+def _array_prefix_for(field: str, schema: Dict[str, Any]) -> Optional[str]:
+    for p in schema.get("array_prefixes", []):
+        if field == p or field.startswith(p + "."):
+            return p
+    return None
 
 
 def get_orders_schema(*, force: bool = False) -> Dict[str, Any]:
@@ -151,7 +288,12 @@ def get_orders_schema(*, force: bool = False) -> Dict[str, Any]:
     key = (tenant.database, tenant.collection_for("orders"))
     now = time.time()
     cached = _schema_cache.get(key)
-    if cached and not force and now - cached[0] < SCHEMA_TTL_SECONDS:
+    if (
+        cached
+        and not force
+        and "_index" in cached[1]
+        and now - cached[0] < SCHEMA_TTL_SECONDS
+    ):
         return cached[1]
     schema = _sample_schema(SCHEMA_SAMPLE_SIZE)
     _schema_cache[key] = (now, schema)
@@ -164,11 +306,26 @@ def get_orders_schema(*, force: bool = False) -> Dict[str, Any]:
     return schema
 
 
-def _schema_for_prompt(schema: Dict[str, Any], *, max_fields: int = 90) -> str:
-    lines = [f"Avaal_order fields (sampled {schema.get('sample_size')} docs):"]
+def _schema_for_prompt(
+    schema: Dict[str, Any],
+    *,
+    max_fields: int = 180,
+    collection_label: str = "Avaal_order",
+) -> str:
+    lines = [
+        f"{collection_label} fields (sampled {schema.get('sample_size')} docs; "
+        "dotted names are nested — you may use them):"
+    ]
     items = list(schema.get("fields", {}).items())
-    # numeric first, then groupable, then the rest — most useful to the planner
-    items.sort(key=lambda kv: (not kv[1]["numeric"], not kv[1]["groupable"], kv[0]))
+    # numeric first, then groupable, then top-level, then the rest
+    items.sort(
+        key=lambda kv: (
+            not kv[1]["numeric"],
+            not kv[1]["groupable"],
+            "." in kv[0],
+            kv[0],
+        )
+    )
     for name, info in items[:max_fields]:
         tags: List[str] = []
         if info["numeric"]:
@@ -177,6 +334,8 @@ def _schema_for_prompt(schema: Dict[str, Any], *, max_fields: int = 90) -> str:
             tags.append(f"groupable(~{info['distinct_in_sample']} distinct)")
         if info["id_like"]:
             tags.append("id-not-groupable")
+        if info.get("array"):
+            tags.append("array")
         ex = ", ".join(info["examples"][:3])
         lines.append(
             f"- {name}: {', '.join(tags) or 'text'}" + (f" | e.g. {ex}" if ex else "")
@@ -195,17 +354,27 @@ Return ONLY JSON (no prose, no code fence):
   "group_by": ["field", ...],
   "metrics": [{{"fn": "sum|avg|min|max|count", "field": "<numeric field>"}}],
   "distinct_field": "<field>",
-  "sort": {{"key": "<metric key e.g. avg_weight / sum_totalfreight / count, or a group field>", "dir": "asc|desc"}},
+  "date_bucket": {{"field": "orderdate", "unit": "day|week|month"}},
+  "having": [{{"key": "orders|count|sum_<field>|avg_<field>", "op": "gt|gte|lt|lte", "value": <num>}}],
+  "sort": {{"key": "<metric key e.g. avg_weight / sum_totalfreight / count / orders / period, or a group field>", "dir": "asc|desc"}},
   "limit": <int 1-100>
 }}
+- date_bucket -> daily/weekly/monthly time series (operation "group", group_by may be []).
+- having -> keep only groups meeting a threshold ("customers with > 5 orders").
 
 Field notes:
 - orderstatus = transport lifecycle (Quoted, Confirmed, Dispatched, In-Transit, Delivered, Cancelled...). Plain "order status" / "status" means THIS field.
 - accountingstatus = invoicing / payment (Invoiced, PartiallyPaid, Paid, Restricted).
 - outstatus = outsourcing (Open, Planned, Assigned, ...).
 
+Common phrasings (map to the real field): revenue/gross -> grosstotalfreight; amount/price/cost/freight -> totalfreight;
+rate -> freightratevalue; client/buyer -> customername; carrier -> outcarriername; trip -> tripno;
+miles/km/mileage -> distance; PO -> pono / customerorderno; reference -> referno; salesman/agent -> salesmanname;
+commodity/product/goods -> commodityname; tax -> totaltaxamount; fuel -> fuelcharges; created -> createdon.
+If the user's word is a near-miss for a field name, the closest real field is used automatically — still, prefer exact names.
+
 Rules:
-- Use ONLY field names listed above. Never invent a field.
+- Use ONLY field names listed above (dotted nested names allowed). Never invent a field.
 - sum/avg/min/max only on fields tagged numeric. group_by only on fields tagged groupable, never id-not-groupable.
 - 1-2 group_by fields. Use 2 when the user asks to break down by two dimensions
   (e.g. "order status and accounting status wise" -> group_by ["orderstatus","accountingstatus"]).
@@ -260,7 +429,11 @@ def _clean_sort(
 
 
 def _validate_spec(
-    spec: Any, schema: Dict[str, Any]
+    spec: Any,
+    schema: Dict[str, Any],
+    *,
+    iso_date_fields: Optional[frozenset] = None,
+    aliases: Optional[Dict[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
     if not isinstance(spec, dict):
         return None
@@ -268,10 +441,12 @@ def _validate_spec(
     if op not in _ALLOWED_OPS:
         return None
 
+    iso_date_fields = iso_date_fields if iso_date_fields is not None else _ISO_DATE_FIELDS
     fields = schema.get("fields", {})
+    unwind: set = set()
 
-    def known(name: Any) -> bool:
-        return isinstance(name, str) and name in fields
+    def R(name: Any) -> Optional[str]:
+        return resolve_field(name, schema, aliases=aliases)
 
     out: Dict[str, Any] = {"operation": op}
 
@@ -279,20 +454,26 @@ def _validate_spec(
         return out
 
     if op == "distinct_count":
-        target = spec.get("distinct_field")
-        if not known(target):
+        target = R(spec.get("distinct_field"))
+        if not target:
             return None
         out["distinct_field"] = target
-        group_by = [
-            g
-            for g in (spec.get("group_by") or [])
-            if known(g) and fields[g]["groupable"]
-        ][:MAX_GROUP_BY]
+        pfx = _array_prefix_for(target, schema)
+        if pfx:
+            unwind.add(pfx)
+        group_by = []
+        for g in (spec.get("group_by") or []):
+            rg = R(g)
+            if rg and fields[rg]["groupable"]:
+                group_by.append(rg)
+                gp = _array_prefix_for(rg, schema)
+                if gp:
+                    unwind.add(gp)
+        group_by = group_by[:MAX_GROUP_BY]
         out["group_by"] = group_by
         out["limit"] = _clamp_limit(spec.get("limit"))
-        out["sort"] = _clean_sort(
-            spec.get("sort"), {"distinct_count", *group_by}
-        )
+        out["sort"] = _clean_sort(spec.get("sort"), {"distinct_count", *group_by})
+        out["_unwind"] = sorted(unwind)
         return out
 
     # metric / group
@@ -306,31 +487,86 @@ def _validate_spec(
         if fn == "count":
             metrics.append({"fn": "count", "field": None, "key": "count"})
             continue
-        field = raw.get("field")
-        if not known(field) or not fields[field]["numeric"]:
+        field = R(raw.get("field"))
+        if not field or not fields[field]["numeric"]:
             continue
-        metrics.append({"fn": fn, "field": field, "key": f"{fn}_{field}"})
+        pfx = _array_prefix_for(field, schema)
+        if pfx:
+            unwind.add(pfx)
+        metrics.append(
+            {"fn": fn, "field": field, "key": f"{fn}_{_norm(field)}"}
+        )
 
-    # de-dupe metric keys, keep order
     seen: set = set()
     metrics = [m for m in metrics if not (m["key"] in seen or seen.add(m["key"]))]
     if not metrics:
         metrics = [{"fn": "count", "field": None, "key": "count"}]
     out["metrics"] = metrics
 
+    has_bucket = isinstance(spec.get("date_bucket"), dict) and bool(
+        spec["date_bucket"].get("field")
+    )
     if op == "group":
-        group_by = [
-            g
-            for g in (spec.get("group_by") or [])
-            if known(g) and fields[g]["groupable"]
-        ][:MAX_GROUP_BY]
-        if not group_by:
+        group_by = []
+        for g in (spec.get("group_by") or []):
+            rg = R(g)
+            if rg and fields[rg]["groupable"]:
+                group_by.append(rg)
+                gp = _array_prefix_for(rg, schema)
+                if gp:
+                    unwind.add(gp)
+        group_by = group_by[:MAX_GROUP_BY]
+        if not group_by and not has_bucket:
             return None
         out["group_by"] = group_by
 
+    # date_bucket = a synthetic daily/weekly/monthly time dimension
+    db = spec.get("date_bucket")
+    if isinstance(db, dict):
+        fld = R(db.get("field"))
+        unit = str(db.get("unit") or "day").lower()
+        if fld and unit in _BUCKET_UNITS and (
+            fld in iso_date_fields or fld.split(".")[-1] in iso_date_fields
+        ):
+            out["date_bucket"] = {"field": fld, "unit": unit}
+            if op == "metric":
+                out["operation"] = op = "group"
+                out.setdefault("group_by", [])
+
     out["limit"] = _clamp_limit(spec.get("limit"))
-    valid_keys = {m["key"] for m in metrics} | set(out.get("group_by", []))
+    metric_keys = {m["key"] for m in metrics}
+
+    # HAVING — post-group threshold on a metric / count / orders
+    having: List[Dict[str, Any]] = []
+    for h in (spec.get("having") or [])[:4]:
+        if not isinstance(h, dict):
+            continue
+        raw_key = str(h.get("key") or "").lower()
+        mop = _HAVING_OPS.get(str(h.get("op") or "").lower())
+        try:
+            hval = float(h.get("value"))
+        except (TypeError, ValueError):
+            continue
+        if raw_key in ("orders", "order_count", "count_orders"):
+            pkey = "_matched"
+        elif raw_key in ("count", "distinct_count"):
+            pkey = raw_key
+        elif raw_key in metric_keys:
+            pkey = raw_key
+        elif R(raw_key) and f"sum_{_norm(R(raw_key))}" in metric_keys:
+            pkey = f"sum_{_norm(R(raw_key))}"
+        else:
+            continue
+        if mop:
+            having.append({pkey: {mop: hval}})
+    if having:
+        out["having"] = having
+
+    valid_keys = metric_keys | set(out.get("group_by", [])) | {"count", "orders"}
+    if out.get("date_bucket"):
+        valid_keys.add("period")
     out["sort"] = _clean_sort(spec.get("sort"), valid_keys)
+    out["_unwind"] = sorted(unwind)
     return out
 
 
@@ -347,12 +583,6 @@ def _numeric_expr(field: str) -> Dict[str, Any]:
     }
 
 
-def _sort_doc(sort: Optional[Dict[str, str]], default_key: str) -> Dict[str, int]:
-    if isinstance(sort, dict) and isinstance(sort.get("key"), str):
-        return {sort["key"]: 1 if sort.get("dir") == "asc" else -1}
-    return {default_key: -1}
-
-
 def _group_key_expr(field: str) -> Dict[str, Any]:
     """Collapse null / empty group-key values to 'Unknown' so rows read cleanly."""
     ref = f"${field}"
@@ -360,6 +590,39 @@ def _group_key_expr(field: str) -> Dict[str, Any]:
         "$let": {
             "vars": {"v": ref},
             "in": {"$cond": [{"$in": ["$$v", [None, ""]]}, "Unknown", "$$v"]},
+        }
+    }
+
+
+def _group_sort_doc(
+    sort: Optional[Dict[str, str]], default_key: str, alias: Dict[str, str]
+) -> Dict[str, int]:
+    """Sort a grouped result; a group field maps to its _id.<alias> path."""
+    if isinstance(sort, dict) and isinstance(sort.get("key"), str):
+        key = sort["key"]
+        direction = 1 if sort.get("dir") == "asc" else -1
+        if key in alias:
+            return {f"_id.{alias[key]}": direction}
+        if key == "period":
+            return {"_id.__bucket": direction}
+        if key in ("orders", "order_count"):
+            return {"_matched": direction}
+        return {key: direction}
+    return {default_key: -1}
+
+
+def _bucket_expr(field: str, unit: str) -> Dict[str, Any]:
+    """Truncate an ISO date-string field to a day / week / month label."""
+    src = {"$toString": f"${field}"}
+    if unit == "day":
+        return {"$substrBytes": [src, 0, 10]}          # 2026-08-28
+    if unit == "month":
+        return {"$substrBytes": [src, 0, 7]}           # 2026-08
+    # week — ISO year-week (needs $toDate; ok on ISO strings)
+    return {
+        "$dateToString": {
+            "format": "%G-W%V",
+            "date": {"$toDate": f"${field}"},
         }
     }
 
@@ -374,26 +637,31 @@ def _build_pipeline(
         pipeline.append({"$count": "count"})
         return pipeline
 
+    # Flatten array-of-object paths (commoditydetails[], ...) before grouping.
+    for prefix in spec.get("_unwind") or []:
+        pipeline.append({"$unwind": f"${prefix}"})
+
     if op == "distinct_count":
         target = spec["distinct_field"]
         group_by = spec.get("group_by") or []
+        alias = {g: _norm(g) for g in group_by}
         if group_by:
             pipeline += [
                 {
                     "$group": {
                         "_id": {
-                            **{g: _group_key_expr(g) for g in group_by},
+                            **{alias[g]: _group_key_expr(g) for g in group_by},
                             "__v": f"${target}",
                         }
                     }
                 },
                 {
                     "$group": {
-                        "_id": {g: f"$_id.{g}" for g in group_by},
+                        "_id": {alias[g]: f"$_id.{alias[g]}" for g in group_by},
                         "distinct_count": {"$sum": 1},
                     }
                 },
-                {"$sort": _sort_doc(spec.get("sort"), "distinct_count")},
+                {"$sort": _group_sort_doc(spec.get("sort"), "distinct_count", alias)},
                 {"$limit": spec["limit"]},
             ]
         else:
@@ -406,26 +674,43 @@ def _build_pipeline(
     # metric / group
     metrics = spec["metrics"]
     coerce = {m["field"] for m in metrics if m["field"]}
-    if coerce:
-        pipeline.append(
-            {"$addFields": {f"__num_{f}": _numeric_expr(f) for f in coerce}}
-        )
 
-    group_id = (
-        {g: _group_key_expr(g) for g in spec["group_by"]} if op == "group" else None
-    )
+    add_fields: Dict[str, Any] = {
+        f"__num_{_norm(f)}": _numeric_expr(f) for f in coerce
+    }
+    bucket = spec.get("date_bucket")
+    if bucket:
+        add_fields["__bucket"] = _bucket_expr(bucket["field"], bucket["unit"])
+    if add_fields:
+        pipeline.append({"$addFields": add_fields})
+
+    group_by = spec.get("group_by") or []
+    alias = {g: _norm(g) for g in group_by}
+    group_id: Optional[Dict[str, Any]] = None
+    if op == "group":
+        group_id = {alias[g]: _group_key_expr(g) for g in group_by}
+        if bucket:
+            group_id["__bucket"] = "$__bucket"
+
     group_stage: Dict[str, Any] = {"_id": group_id, "_matched": {"$sum": 1}}
     for m in metrics:
         if m["fn"] == "count":
             group_stage["count"] = {"$sum": 1}
         else:
-            group_stage[m["key"]] = {f"${m['fn']}": f"$__num_{m['field']}"}
+            group_stage[m["key"]] = {f"${m['fn']}": f"$__num_{_norm(m['field'])}"}
     pipeline.append({"$group": group_stage})
 
+    if spec.get("having"):
+        pipeline.append({"$match": {"$and": spec["having"]}})
+
     if op == "group":
-        pipeline.append(
-            {"$sort": _sort_doc(spec.get("sort"), metrics[0]["key"])}
-        )
+        default_sort = "_id.__bucket" if bucket else metrics[0]["key"]
+        if bucket and not spec.get("sort"):
+            pipeline.append({"$sort": {"_id.__bucket": 1}})
+        else:
+            pipeline.append(
+                {"$sort": _group_sort_doc(spec.get("sort"), default_sort, alias)}
+            )
         pipeline.append({"$limit": spec["limit"]})
 
     return pipeline
@@ -462,10 +747,12 @@ def _shape_result(
     if op == "distinct_count":
         payload["distinct_field"] = spec["distinct_field"]
         if spec.get("group_by"):
-            payload["group_by"] = spec["group_by"]
+            gb = spec["group_by"]
+            alias = {g: _norm(g) for g in gb}
+            payload["group_by"] = gb
             payload["rows"] = [
                 {
-                    **{g: (r.get("_id") or {}).get(g) for g in spec["group_by"]},
+                    **{g: (r.get("_id") or {}).get(alias[g]) for g in gb},
                     "distinct_count": int(r.get("distinct_count") or 0),
                 }
                 for r in rows
@@ -485,11 +772,22 @@ def _shape_result(
         payload["matching_orders"] = int(row.get("_matched") or 0)
         return payload
 
-    payload["group_by"] = spec["group_by"]
+    gb = spec.get("group_by") or []
+    alias = {g: _norm(g) for g in gb}
+    bucket = spec.get("date_bucket")
+    payload["group_by"] = (["period"] if bucket else []) + gb
+    if bucket:
+        payload["date_bucket"] = bucket
+    if spec.get("having"):
+        payload["having"] = spec["having"]
     out_rows: List[Dict[str, Any]] = []
     for r in rows:
         rid = r.get("_id") or {}
-        row = {g: rid.get(g) for g in spec["group_by"]}
+        row: Dict[str, Any] = {}
+        if bucket:
+            row["period"] = rid.get("__bucket")
+        for g in gb:
+            row[g] = rid.get(alias[g])
         for k in metric_keys:
             row[k] = _round(r.get(k))
         row["orders"] = int(r.get("_matched") or 0)
@@ -586,6 +884,8 @@ def format_dynamic_analytics_for_context(payload: Dict[str, Any]) -> str:
             lines.append(f"- {key}: {value}")
 
     elif op == "group":
+        if payload.get("having"):
+            lines.append(f"having (post-group filter): {payload['having']}")
         lines.append(
             f"grouped by {payload.get('group_by')}, "
             f"metrics {payload.get('metrics')} (orders = row count):"
@@ -596,6 +896,23 @@ def format_dynamic_analytics_for_context(payload: Dict[str, Any]) -> str:
             )
         if not payload.get("rows"):
             lines.append("(no rows matched these filters)")
+
+    elif op == "percentage":
+        lines.append(f"basis: {payload.get('of')}")
+        if payload.get("numerator_filters"):
+            lines.append(f"numerator condition: {payload['numerator_filters']}")
+        lines.append(f"numerator: {payload.get('numerator')}")
+        lines.append(f"denominator (total): {payload.get('denominator')}")
+        lines.append(f"percentage: {payload.get('percentage')}%")
+
+    elif op == "compare":
+        lines.append(f"metric: {payload.get('metric')}")
+        for row in payload.get("rows") or []:
+            lines.append(
+                "- " + " | ".join(f"{k}={v}" for k, v in row.items())
+            )
+        if not payload.get("rows"):
+            lines.append("(no segments matched)")
 
     lines.append("Use these numbers as ground truth. Write numbers without commas.")
     return "\n".join(lines)

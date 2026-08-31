@@ -290,11 +290,13 @@ def answer_order_question(
                 prior=replay_of[:80],
             )
 
-        # 2) Route — LLM query planner is primary for orders; the regex engine
-        #    (understand_question + extract_entities + plan_tools) is the fallback.
+        # 2) Route — LLM query planner is primary for orders + invoices; the
+        #    regex engine (understand_question + extract_entities + plan_tools)
+        #    stays wired as the automatic fallback.
         planner_plan = None
         precomputed_tool_result = None
-        if domain == "orders" and (
+        execute_query_plan = None
+        if domain in ("orders", "invoices") and (
             replay_of
             or (
                 classify_intent_common(question) is None
@@ -303,11 +305,18 @@ def answer_order_question(
             )
         ):
             try:
-                from app.order_ask.query_planner import (
-                    PLANNER_ENABLED,
-                    execute_query_plan,
-                    run_query_planner,
-                )
+                if domain == "orders":
+                    from app.order_ask.query_planner import (
+                        PLANNER_ENABLED,
+                        execute_query_plan,
+                        run_query_planner,
+                    )
+                else:
+                    from app.order_ask.invoice_query_planner import (
+                        INVOICE_PLANNER_ENABLED as PLANNER_ENABLED,
+                        execute_invoice_query_plan as execute_query_plan,
+                        run_invoice_query_planner as run_query_planner,
+                    )
 
                 if PLANNER_ENABLED:
                     planner_plan = run_query_planner(

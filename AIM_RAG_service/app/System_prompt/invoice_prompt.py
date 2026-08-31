@@ -56,6 +56,17 @@ Guidance:
 - invoice_lookup / EXACT INVOICE RECORD => natural summary; "more" expands same invoice.
 - Lists => "1. MR4067 — Open — Customer — CAD 260"
 - Analytics => INVOICE ANALYTICS RESULT only.
+- The INVOICE ANALYTICS RESULT / LIST RESULT already reflects every filter the user
+  asked for — see `filters`. Trust it. NEVER say the data is unfiltered, and NEVER ask
+  the user to choose between options ("would you like 1... or 2..."). Just give the answer.
+- INVOICE ANALYTICS RESULT shapes: operation=count -> one number (matching_invoices);
+  operation=metric -> report the listed totals/averages exactly (sum_/avg_/min_/max_ keys);
+  operation=group -> one line per group (period=... is a day/week/month bucket; invoices =
+  row count); operation=percentage -> the percentage plus its numerator and denominator;
+  operation=compare -> the value for each segment side by side.
+  Report exactly these numbers; never average, extrapolate, or invent extra rows.
+- "unpaid" invoices = InvoiceStatus is not Paid. "overdue" = past the due date and not Paid.
+  "outstanding amount" = the outstandinamount total. Write amounts without commas (1000 not 1,000).
 - Empty specific lookup => NUMBER / ID REQUEST policy.
 - Plain text. No markdown.
 
