@@ -23,31 +23,37 @@ BEDROCK_SECRET_KEY = os.environ.get("secretaccesskey", "")
 BEDROCK_REGION = os.environ.get("awsregion", "us-east-1")
 
 
-def get_models():
-    """Return (embeddings, llm). Embeddings=Bedrock; LLM=Anthropic Sonnet."""
-    global _embeddings_cache, _llm_cache
-    if _embeddings_cache is None or _llm_cache is None:
+def get_embeddings():
+    """Return Bedrock embeddings only (no LLM loaded)."""
+    global _embeddings_cache
+    if _embeddings_cache is None:
         if BEDROCK_ACCESS_KEY:
             os.environ["AWS_ACCESS_KEY_ID"] = BEDROCK_ACCESS_KEY
         if BEDROCK_SECRET_KEY:
             os.environ["AWS_SECRET_ACCESS_KEY"] = BEDROCK_SECRET_KEY
 
-        embeddings = BedrockEmbeddings(
+        _embeddings_cache = BedrockEmbeddings(
             model_id=BEDROCK_MODEL,
             region_name=BEDROCK_REGION,
             model_kwargs={"dimensions": 1024},
         )
+        print(f"[embeddings] Bedrock ready — model={BEDROCK_MODEL}")
 
-        llm = get_anthropic_llm()
+    return _embeddings_cache
 
-        _embeddings_cache = embeddings
-        _llm_cache = llm
+
+def get_models():
+    """Return (embeddings, llm). Embeddings=Bedrock; LLM=Anthropic Sonnet."""
+    global _llm_cache
+    embeddings = get_embeddings()
+    if _llm_cache is None:
+        _llm_cache = get_anthropic_llm()
         print(
             "[pdf_extract] get_models() ready — Bedrock embeddings + "
             f"Claude LLM ({ANTHROPIC_LLM_MODEL})"
         )
 
-    return _embeddings_cache, _llm_cache
+    return embeddings, _llm_cache
 
 
 def get_anthropic_llm():
