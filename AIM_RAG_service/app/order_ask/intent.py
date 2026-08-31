@@ -16,7 +16,7 @@ from app.domains.rules.prompts import DOMAIN_INTENT_SUFFIX
 from app.embedding_client import get_anthropic_llm
 from app.order_ask.calculation_engine import is_calculation_question
 from app.order_ask.checkpoint import checkpoint
-from app.order_ask.prompts import INTENT_CLASSIFY_PROMPT
+from app.System_prompt.intent_prompt import INTENT_CLASSIFY_PROMPT
 from app.tenants.context import get_active_domain
 
 logger = logging.getLogger("order_ask.intent")
@@ -164,6 +164,24 @@ def classify_intent_with_anthropic(
     }
     if data.get("order_token"):
         result["order_token"] = data["order_token"]
+
+    # Structured filters from intent LLM → merged into entities in rag_engine
+    raw_filters = data.get("filters")
+    if isinstance(raw_filters, dict):
+        cleaned: Dict[str, Any] = {}
+        for key, value in raw_filters.items():
+            if value in (None, "", [], {}):
+                continue
+            if key == "limit":
+                try:
+                    cleaned["limit"] = int(value)
+                except (TypeError, ValueError):
+                    continue
+            else:
+                cleaned[str(key)] = value
+        if cleaned:
+            result["filters"] = cleaned
+
     return _normalize_intent_result(result, active)
 
 

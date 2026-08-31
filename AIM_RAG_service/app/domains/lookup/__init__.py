@@ -1,14 +1,12 @@
-"""Domain lookup modules and prompts."""
+"""Domain lookup modules — answer prompts come from app.System_prompt."""
 
 from __future__ import annotations
 
 from app.domains.lookup.base import DomainPrompts, LookupModule, AVAAL_GREETING_PROMPT
 from app.domains.lookup.invoices import lookup as invoice_lookup
-from app.domains.lookup.invoices import prompts as invoice_prompts
 from app.domains.lookup.orders import lookup as order_lookup
-from app.domains.lookup.orders import prompts as order_prompts
 from app.domains.lookup.trips import lookup as trip_lookup
-from app.domains.lookup.trips import prompts as trip_prompts
+from app.System_prompt import get_domain_answer_prompts
 
 _MODULES = {
     "orders": LookupModule(
@@ -35,25 +33,6 @@ _MODULES = {
     ),
 }
 
-_PROMPTS = {
-    "orders": DomainPrompts(
-        conversation=order_prompts.ORDER_CONVERSATION_PROMPT,
-        ask=order_prompts.ORDER_ASK_PROMPT,
-        greeting=AVAAL_GREETING_PROMPT,
-        formula=order_prompts.ORDER_FORMULA_PROMPT,
-    ),
-    "invoices": DomainPrompts(
-        conversation=invoice_prompts.INVOICE_CONVERSATION_PROMPT,
-        ask=invoice_prompts.INVOICE_ASK_PROMPT,
-        greeting=AVAAL_GREETING_PROMPT,
-    ),
-    "trips": DomainPrompts(
-        conversation=trip_prompts.TRIP_CONVERSATION_PROMPT,
-        ask=trip_prompts.TRIP_ASK_PROMPT,
-        greeting=AVAAL_GREETING_PROMPT,
-    ),
-}
-
 
 def get_lookup_module(domain: str) -> LookupModule:
     key = (domain or "orders").lower()
@@ -61,8 +40,16 @@ def get_lookup_module(domain: str) -> LookupModule:
 
 
 def get_domain_prompts(domain: str) -> DomainPrompts:
+    """Load conversation/ask/greeting/lookup/formula from System_prompt."""
     key = (domain or "orders").lower()
-    return _PROMPTS.get(key, _PROMPTS["orders"])
+    p = get_domain_answer_prompts(key)
+    return DomainPrompts(
+        conversation=p["conversation"],
+        ask=p["ask"],
+        greeting=p["greeting"],
+        formula=p.get("formula") or "",
+        lookup=p.get("lookup") or "",
+    )
 
 
 def extract_record_token(domain: str, question: str):

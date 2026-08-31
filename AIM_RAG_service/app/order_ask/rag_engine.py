@@ -13,6 +13,7 @@ Flow:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, Optional
 
 from langchain_core.prompts import PromptTemplate
@@ -46,6 +47,11 @@ from app.tenants.models import TenantConfig
 
 logger = logging.getLogger("order_ask.rag_engine")
 
+_MORE_FOLLOWUP_RE = re.compile(
+    r"^\s*(more|more\s+details?|tell\s+me\s+more|continue|elaborate|"
+    r"aur\s+(batao|do|details?)|details?\s+aur|full\s+details?)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
 
 def _invoke_anthropic(
     prompt_text: str,
@@ -236,7 +242,52 @@ def answer_order_question(
         )
         if intent_info.get("order_token") and not entities.get("order_token"):
             entities["order_token"] = intent_info["order_token"]
+        # Intent-LLM filters fill gaps local entity extraction missed (city/state/country/status)
+        intent_filters = intent_info.get("filters") or {}
+        if isinstance(intent_filters, dict):
+            for key, value in intent_filters.items():
+                if value in (None, "", [], {}):
+                    continue
+                if key == "limit":
+                    if not entities.get("limit"):
+                        try:
+                            entities["limit"] = int(value)
+                        except (TypeError, ValueError):
+                            pass
+                    continue
+                if not entities.get(key):
+                    entities[key] = value
         timer.mark("ENTITIES_DONE", entities=entities)
+
+        # Follow-up "more" / "more details" → continue same record (not greeting)
+        sticky_token = (
+            entities.get("order_token")
+            or session.get("last_order_token")
+            or ""
+        )
+        if _MORE_FOLLOWUP_RE.match(question) and sticky_token:
+            lookup_mod = get_lookup_module(domain)
+            intent = lookup_mod.intent_name
+            entities["order_token"] = sticky_token
+            entities["record_token"] = sticky_token
+            intent_info = {
+                **intent_info,
+                "intent": intent,
+                "needs_exact_order": True,
+                "needs_rag": False,
+                "response_style": "detailed",
+                "max_tokens_hint": max(max_tokens, 900),
+                "retrieve_k": 0,
+                "reason": "more_followup_sticky_token",
+            }
+            max_tokens = int(intent_info["max_tokens_hint"])
+            style = "detailed"
+            checkpoint(
+                "ROUTE",
+                "more follow-up → lookup sticky token",
+                domain=domain,
+                token=sticky_token,
+            )
 
         # Greeting / thanks / ask-for-id: quick reply, no tools
         domain_prompts = get_domain_prompts(domain)
@@ -404,17 +455,10 @@ def answer_order_question(
                     max_tokens=max_tokens,
                 )
             elif mode == "exact_record" and intent in lookup_intents:
-                from app.domains.lookup.invoices.prompts import INVOICE_LOOKUP_PROMPT
-                from app.domains.lookup.orders.prompts import ORDER_LOOKUP_PROMPT
-                from app.domains.lookup.trips.prompts import TRIP_LOOKUP_PROMPT
-
-                lookup_prompts = {
-                    "orders": ORDER_LOOKUP_PROMPT,
-                    "invoices": INVOICE_LOOKUP_PROMPT,
-                    "trips": TRIP_LOOKUP_PROMPT,
-                }
                 answer = _invoke_anthropic(
-                    lookup_prompts.get(domain, ORDER_LOOKUP_PROMPT),
+                    domain_prompts.lookup
+                    or domain_prompts.conversation
+                    or domain_prompts.ask,
                     {
                         "context": context,
                         "question": question,

@@ -28,12 +28,25 @@ def _profile():
 
 def _base_match(filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     domain = get_active_domain()
+    # Orders: geo filters (state/city/pin) live inside address strings —
+    # use the order-specific matcher (not naive top-level field equality).
+    if domain == "orders" and filters:
+        from app.order_ask.rag_retrieval import _base_order_match
+
+        return _base_order_match(filters)
+
     match: Dict[str, Any] = {
         "namespace": get_domain_namespace(domain),
         "metadata.type": get_domain_metadata_type(domain),
     }
     if filters:
-        match.update(filters)
+        # Drop helper keys that are not real Mongo fields
+        cleaned = {
+            k: v
+            for k, v in filters.items()
+            if k not in ("location_side",) and v not in (None, "", [], {})
+        }
+        match.update(cleaned)
     return match
 
 

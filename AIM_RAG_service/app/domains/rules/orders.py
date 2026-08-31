@@ -83,8 +83,10 @@ LIST_RE = re.compile(
     re.I,
 )
 RECENT_RE = re.compile(
-    r"\b(recent|recently|latest|last\s+\d+|top\s+\d+|some|any)\b.*\border|"
-    r"\border.*\b(recent|recently|latest)\b",
+    r"\b(recent|recently|latest|last\s+\d+|top\s+\d+|some|any|few|"
+    r"only\s+\d+|just\s+\d+|newly\s+create[d]?|create[d]?\s+recently)\b.*\border|"
+    r"\border.*\b(recent|recently|latest|newly\s+create[d]?|create[d]?\s+recently|"
+    r"only\s+\d+|just\s+\d+)\b",
     re.I,
 )
 COMPARE_RE = re.compile(r"\b(compare|difference|vs\.?|versus)\b", re.I)
@@ -293,7 +295,7 @@ def extract_entities(
         if m and not re.fullmatch(r"20\d{2}", m.group(1)[:4]):
             entities["pin"] = m.group(1)
 
-    from app.order_ask.field_catalog import resolve_state_token
+    from app.order_ask.field_catalog import find_state_in_text, resolve_state_token
 
     m = re.search(
         r"\b(?:state|province|region)\s*[:=#]?\s*['\"]?([A-Za-z][A-Za-z\s.]{1,30})",
@@ -302,6 +304,8 @@ def extract_entities(
     )
     if m:
         raw_state = m.group(1).strip(" .,")
+        # Drop leading articles: "the Ontario" / "province the ON"
+        raw_state = re.sub(r"^(?:the|a|an)\s+", "", raw_state, flags=re.I).strip()
         code = resolve_state_token(raw_state) or resolve_state_token(raw_state.split()[0])
         if code:
             entities["state"] = code
@@ -310,8 +314,10 @@ def extract_entities(
         else:
             entities["state"] = raw_state.title()
     else:
+        # "in the Ontario" / "from CA" — skip articles after preposition
         m = re.search(
-            r"\b(?:in|to|from|at|for)\s+([A-Za-z]{2}|[A-Za-z][A-Za-z\s]{2,24})\b",
+            r"\b(?:in|to|from|at|for)\s+(?:the\s+|a\s+|an\s+)?"
+            r"([A-Za-z]{2}|[A-Za-z][A-Za-z\s]{2,24})\b",
             q,
             re.I,
         )
@@ -320,13 +326,24 @@ def extract_entities(
             if cand.lower() not in (
                 "the", "us", "usa", "canada", "customer", "orders", "order",
                 "status", "confirmed", "delivered", "dispatched", "cancelled",
-                "quoted", "invoiced",
+                "quoted", "invoiced", "summary", "list",
             ):
                 code = resolve_state_token(cand)
                 if code:
                     entities["state"] = code
 
-    if not re.search(r"\b(city|town)[\s\-]*wise\b|\bby\s+(city|town)\b", q, re.I):
+    # Fallback: scan full question for known state/province names (incl. typos)
+    if not entities.get("state"):
+        code = find_state_in_text(q)
+        if code:
+            entities["state"] = code
+
+    is_city_wise = bool(
+        re.search(r"\b(city|town)[\s\-]*wise\b|\bby\s+(city|town)\b", q, re.I)
+    )
+    m = None
+    # "city is Toronto" / "city Toronto" — skip when "city wise" (would eat "wise")
+    if not is_city_wise:
         m = re.search(
             r"\b(?:city|town)\s*(?:is|=|:|#)\s*['\"]?([A-Za-z][A-Za-z\s\-.]{1,40})",
             q,
@@ -338,12 +355,36 @@ def extract_entities(
                 q,
                 re.I,
             )
-        if m:
-            city = m.group(1).strip(" .,")
-            if city.lower() not in {
-                "wise", "wise order", "wise orders", "order", "orders",
-            } and len(city) >= 2:
-                entities["city"] = city
+    # Always allow particular city: "in Toronto", "for Toronto", "of Chicago"
+    # (even with "city wise status for Toronto")
+    if not m:
+        m = re.search(
+            r"\b(?:in|from|at|for|of)\s+(?:the\s+|a\s+|an\s+)?"
+            r"([A-Za-z][A-Za-z\-.]{2,40})(?:\s+city)?\b",
+            q,
+            re.I,
+        )
+    # Leading city: "Toronto status", "Chicago orders"
+    if not m:
+        m = re.search(
+            r"^([A-Za-z][A-Za-z\-.]{2,40})\s+(?:status|summary|orders?|list)\b",
+            q.strip(),
+            re.I,
+        )
+    if m:
+        city = m.group(1).strip(" .,")
+        # Prefer state resolution first — don't treat Ontario as a city
+        from app.order_ask.field_catalog import resolve_state_token
+
+        if resolve_state_token(city):
+            pass
+        elif city.lower() not in {
+            "wise", "wise order", "wise orders", "order", "orders",
+            "the", "status", "summary", "list", "canada", "us", "usa",
+            "confirmed", "quoted", "delivered", "dispatched", "ontario",
+            "particular", "one", "this", "that", "each", "every",
+        } and len(city) >= 2:
+            entities["city"] = city.title() if city.islower() or city.isupper() else city
 
     m = re.search(
         r"\b(?:full\s+)?(?:address|street)\s*[:=#]?\s*['\"]?([A-Za-z0-9][A-Za-z0-9 &\-./,#]{2,60})",
@@ -435,6 +476,11 @@ def extract_entities(
         entities["analytics"] = "orders_by_state"
     if is_city_wise_question(q):
         entities["analytics"] = "orders_by_city"
+    # Particular place + status/summary → filtered status_summary (not city-wise list)
+    if (entities.get("city") or entities.get("state") or entities.get("country")) and re.search(
+        r"\b(status|summary|how\s+many|count|breakdown)\b", ql
+    ):
+        entities["analytics"] = "status_summary"
     if is_best_city_question(q):
         entities["analytics"] = "best_city"
     if is_trip_distance_question(q):
@@ -581,6 +627,7 @@ def entities_to_mongo_filters(entities: Dict[str, Any]) -> Dict[str, Any]:
         "pin",
         "state",
         "city",
+        "country",
         "address",
         "location",
         "location_side",
@@ -619,6 +666,19 @@ def classify_intent_local(
     history_hint: str = "",
 ) -> Optional[Dict[str, Any]]:
     q = (question or "").strip()
+
+    # Recent / only-N list BEFORE ask-for-id (avoids "give me 2 orders recently" false positive)
+    if RECENT_RE.search(q) and not is_calculation_question(q):
+        return {
+            "intent": "list_recent",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "response_style": "medium",
+            "max_tokens_hint": 400,
+            "retrieve_k": 0,
+            "reason": "list_recent",
+        }
 
     # Specific order details without an id → ask sweetly for order number/id (no list dump).
     if is_ask_for_record_id_question(
@@ -906,18 +966,6 @@ def classify_intent_local(
             "max_tokens_hint": 350,
             "retrieve_k": 0,
             "reason": "country_or_analytics",
-        }
-
-    if RECENT_RE.search(q) and not is_calculation_question(q):
-        return {
-            "intent": "list_recent",
-            "needs_rag": False,
-            "needs_calculation": False,
-            "needs_exact_order": False,
-            "response_style": "medium",
-            "max_tokens_hint": 400,
-            "retrieve_k": 0,
-            "reason": "list_recent",
         }
 
     if (
