@@ -411,6 +411,36 @@ def answer_order_question(
         timer.mark("INTENT_DONE", intent=intent, style=style)
         timer.mark("ENTITIES_DONE", entities=entities)
 
+        # Follow-up "more" / "more details" → continue same record (not greeting)
+        sticky_token = (
+            entities.get("order_token")
+            or session.get("last_order_token")
+            or ""
+        )
+        if _MORE_FOLLOWUP_RE.match(question) and sticky_token:
+            lookup_mod = get_lookup_module(domain)
+            intent = lookup_mod.intent_name
+            entities["order_token"] = sticky_token
+            entities["record_token"] = sticky_token
+            intent_info = {
+                **intent_info,
+                "intent": intent,
+                "needs_exact_order": True,
+                "needs_rag": False,
+                "response_style": "detailed",
+                "max_tokens_hint": max(max_tokens, 900),
+                "retrieve_k": 0,
+                "reason": "more_followup_sticky_token",
+            }
+            max_tokens = int(intent_info["max_tokens_hint"])
+            style = "detailed"
+            checkpoint(
+                "ROUTE",
+                "more follow-up → lookup sticky token",
+                domain=domain,
+                token=sticky_token,
+            )
+
         # Greeting / thanks / ask-for-id: quick reply, no tools
         domain_prompts = get_domain_prompts(domain)
         if precomputed_tool_result is None and intent in (
