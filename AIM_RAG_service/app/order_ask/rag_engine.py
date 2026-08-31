@@ -25,7 +25,7 @@ from app.order_ask.calculation_engine import (
 )
 from app.order_ask.checkpoint import CheckpointTimer, checkpoint
 from app.order_ask.entities import extract_entities
-from app.order_ask.intent import understand_question
+from app.order_ask.intent import classify_intent_common, understand_question
 from app.order_ask.memory import (
     format_history_for_prompt,
     load_session,
@@ -47,11 +47,67 @@ from app.tenants.models import TenantConfig
 
 logger = logging.getLogger("order_ask.rag_engine")
 
+# A bare record token ("MRP12345", "TORD9981", "123456") — cheap deterministic
+# fast path, never worth a planner LLM call.
+_BARE_TOKEN_RE = re.compile(
+    r"^\s*(MRP[A-Za-z0-9-]*\d[A-Za-z0-9-]*|TORD[A-Za-z0-9-]*\d[A-Za-z0-9-]*|"
+    r"TMP[A-Za-z0-9-]*\d[A-Za-z0-9-]*|[A-Za-z]{2,6}\d{2,}|\d{4,})\s*$",
+    re.IGNORECASE,
+)
+
 _MORE_FOLLOWUP_RE = re.compile(
     r"^\s*(more|more\s+details?|tell\s+me\s+more|continue|elaborate|"
     r"aur\s+(batao|do|details?)|details?\s+aur|full\s+details?)\s*[.!]?\s*$",
     re.IGNORECASE,
 )
+
+# Short "yes / go ahead / do it" replies — meaningless on their own; when the bot
+# just offered to do something they mean "execute what you offered".
+_AFFIRM_RE = re.compile(
+    r"^\s*(yes|yes\s*please|yes\s*go|yep|yeah|ya|yup|sure|ok|okay|k|alright|"
+    r"go\s*ahead|go\s*for\s*it|please(\s*do)?|do\s*it|proceed|continue|"
+    r"sounds?\s*good|absolutely|definitely|correct|right|"
+    r"haan|haan\s*ji|haanji|ha|kar\s*do|dikha\s*do|dikhao|batao|"
+    r"show\s*me|fetch\s*it|get\s*it)\b[\s!.]*$",
+    re.IGNORECASE,
+)
+
+_OFFER_RE = re.compile(
+    r"would you like|shall i\b|should i\b|do you want me|want me to|"
+    r"let me know if you|i can (fetch|pull|show|get|provide|run|give|help|do)|"
+    r"i'?ll (fetch|pull|show|get|run|give)|would you like me to",
+    re.IGNORECASE,
+)
+
+
+def _last_user_and_bot(turns: list) -> tuple[str, str]:
+    """Most recent prior user question + assistant answer from stored turns."""
+    prev_user = ""
+    prev_bot = ""
+    for turn in reversed(turns or []):
+        role = turn.get("role")
+        if role == "assistant" and not prev_bot:
+            prev_bot = (turn.get("content") or "").strip()
+        elif role == "user" and not prev_user:
+            prev_user = (turn.get("content") or "").strip()
+        if prev_user and prev_bot:
+            break
+    return prev_user, prev_bot
+
+
+def _is_affirmation_followup(question: str, turns: list) -> str:
+    """
+    If `question` is a bare 'yes / continue / go ahead' AND the bot's last answer
+    offered to do something, return the prior user question to replay. Else "".
+    """
+    if not _AFFIRM_RE.match((question or "").strip()):
+        return ""
+    prev_user, prev_bot = _last_user_and_bot(turns)
+    if not prev_user or _AFFIRM_RE.match(prev_user):
+        return ""
+    if _OFFER_RE.search(prev_bot):
+        return prev_user
+    return ""
 
 def _invoke_anthropic(
     prompt_text: str,
@@ -222,41 +278,137 @@ def answer_order_question(
     with AskContext(tenant, domain):
         timer.mark("MEMORY_READY", "history loaded", turns=len(session.get("turns") or []))
 
-        # 2) Understand intent
-        intent_info = understand_question(question, history=history)
-        intent = intent_info.get("intent") or "open_qa"
-        style = intent_info.get("response_style") or "medium"
-        max_tokens = int(intent_info.get("max_tokens_hint") or 280)
-        retrieve_k = int(intent_info.get("retrieve_k") or 0)
-        if retrieve_k < 0:
-            retrieve_k = 0
-        if retrieve_k > k:
-            retrieve_k = k
-        timer.mark("INTENT_DONE", intent=intent, style=style)
+        # "yes" / "go ahead" / "continue" right after the bot offered to do
+        # something → replay the prior question with the full conversation context.
+        effective_question = question
+        replay_of = _is_affirmation_followup(question, session.get("turns") or [])
+        if replay_of:
+            effective_question = replay_of
+            checkpoint(
+                "ROUTE",
+                "affirmation follow-up → replay prior ask",
+                prior=replay_of[:80],
+            )
 
-        # 3) Entities (sticky session for follow-ups)
-        entities = extract_entities(
-            question,
-            session_order_token=session.get("last_order_token"),
-            session_entities=session.get("last_entities") or {},
-        )
-        if intent_info.get("order_token") and not entities.get("order_token"):
-            entities["order_token"] = intent_info["order_token"]
-        # Intent-LLM filters fill gaps local entity extraction missed (city/state/country/status)
-        intent_filters = intent_info.get("filters") or {}
-        if isinstance(intent_filters, dict):
-            for key, value in intent_filters.items():
-                if value in (None, "", [], {}):
-                    continue
-                if key == "limit":
-                    if not entities.get("limit"):
-                        try:
-                            entities["limit"] = int(value)
-                        except (TypeError, ValueError):
-                            pass
-                    continue
-                if not entities.get(key):
-                    entities[key] = value
+        # 2) Route — LLM query planner is primary for orders; the regex engine
+        #    (understand_question + extract_entities + plan_tools) is the fallback.
+        planner_plan = None
+        precomputed_tool_result = None
+        if domain == "orders" and (
+            replay_of
+            or (
+                classify_intent_common(question) is None
+                and not _BARE_TOKEN_RE.match(question or "")
+                and not _MORE_FOLLOWUP_RE.match(question or "")
+            )
+        ):
+            try:
+                from app.order_ask.query_planner import (
+                    PLANNER_ENABLED,
+                    execute_query_plan,
+                    run_query_planner,
+                )
+
+                if PLANNER_ENABLED:
+                    planner_plan = run_query_planner(
+                        effective_question, history=history
+                    )
+            except Exception as exc:
+                logger.warning("Query planner failed: %s", exc, exc_info=True)
+                checkpoint("PLANNER", "planning error — regex fallback", error=str(exc))
+                planner_plan = None
+
+        if planner_plan is not None:
+            intent_info = planner_plan.to_intent_info()
+            intent = intent_info["intent"]
+            style = intent_info["response_style"]
+            max_tokens = int(intent_info["max_tokens_hint"])
+            retrieve_k = 0
+            entities = planner_plan.to_entities()
+            try:
+                precomputed_tool_result = execute_query_plan(
+                    planner_plan, question=effective_question
+                )
+                checkpoint(
+                    "ROUTE",
+                    "LLM query planner",
+                    task=planner_plan.task,
+                    intent=intent,
+                    reason=planner_plan.reason,
+                )
+            except Exception as exc:
+                logger.warning("Query plan execution failed: %s", exc, exc_info=True)
+                checkpoint("PLANNER", "execute error — regex fallback", error=str(exc))
+                planner_plan = None
+                precomputed_tool_result = None
+
+        if planner_plan is None:
+            # 2b) Understand intent (regex + Claude fallback)
+            intent_info = understand_question(effective_question, history=history)
+            intent = intent_info.get("intent") or "open_qa"
+            style = intent_info.get("response_style") or "medium"
+            max_tokens = int(intent_info.get("max_tokens_hint") or 280)
+            retrieve_k = int(intent_info.get("retrieve_k") or 0)
+            if retrieve_k < 0:
+                retrieve_k = 0
+            if retrieve_k > k:
+                retrieve_k = k
+
+            # 3) Entities (sticky session for follow-ups)
+            entities = extract_entities(
+                effective_question,
+                session_order_token=session.get("last_order_token"),
+                session_entities=session.get("last_entities") or {},
+            )
+            if intent_info.get("order_token") and not entities.get("order_token"):
+                entities["order_token"] = intent_info["order_token"]
+            # Intent-LLM filters fill gaps local entity extraction missed
+            intent_filters = intent_info.get("filters") or {}
+            if isinstance(intent_filters, dict):
+                for key, value in intent_filters.items():
+                    if value in (None, "", [], {}):
+                        continue
+                    if key == "limit":
+                        if not entities.get("limit"):
+                            try:
+                                entities["limit"] = int(value)
+                            except (TypeError, ValueError):
+                                pass
+                        continue
+                    if not entities.get(key):
+                        entities[key] = value
+
+            # Follow-up "more" / "more details" → continue same record (not greeting)
+            sticky_token = (
+                entities.get("order_token")
+                or session.get("last_order_token")
+                or ""
+            )
+            if _MORE_FOLLOWUP_RE.match(effective_question) and sticky_token:
+                lookup_mod = get_lookup_module(domain)
+                intent = lookup_mod.intent_name
+                entities["order_token"] = sticky_token
+                entities["record_token"] = sticky_token
+                intent_info = {
+                    **intent_info,
+                    "intent": intent,
+                    "needs_exact_order": True,
+                    "needs_rag": False,
+                    "response_style": "detailed",
+                    "max_tokens_hint": max(max_tokens, 900),
+                    "retrieve_k": 0,
+                    "reason": "more_followup_sticky_token",
+                }
+                max_tokens = int(intent_info["max_tokens_hint"])
+                style = "detailed"
+                checkpoint(
+                    "ROUTE",
+                    "more follow-up → lookup sticky token",
+                    domain=domain,
+                    token=sticky_token,
+                )
+
+        timer.mark("INTENT_DONE", intent=intent, style=style)
         timer.mark("ENTITIES_DONE", entities=entities)
 
         # Follow-up "more" / "more details" → continue same record (not greeting)
@@ -291,7 +443,12 @@ def answer_order_question(
 
         # Greeting / thanks / ask-for-id: quick reply, no tools
         domain_prompts = get_domain_prompts(domain)
-        if intent in ("greeting", "thanks", "chitchat", "ask_for_record_id"):
+        if precomputed_tool_result is None and intent in (
+            "greeting",
+            "thanks",
+            "chitchat",
+            "ask_for_record_id",
+        ):
             checkpoint("ROUTE", f"{intent} — skip tools/RAG")
             if intent == "ask_for_record_id":
                 # Fixed sweet ask — never leak MRP/TORD/ETP examples via LLM.
@@ -349,14 +506,17 @@ def answer_order_question(
                 entities=entities,
             )
 
-        # 4) Power-user tools
-        tool_names = plan_tools(intent, entities, intent_info)
-        tool_result = execute_tools(
-            tool_names,
-            question=question,
-            entities=entities,
-            retrieve_k=retrieve_k or 5,
-        )
+        # 4) Power-user tools (skipped when the query planner already ran them)
+        if precomputed_tool_result is not None:
+            tool_result = precomputed_tool_result
+        else:
+            tool_names = plan_tools(intent, entities, intent_info)
+            tool_result = execute_tools(
+                tool_names,
+                question=effective_question,
+                entities=entities,
+                retrieve_k=retrieve_k or 5,
+            )
         timer.mark(
             "TOOLS_DONE",
             tools=tool_result.get("tools_run"),
@@ -390,7 +550,7 @@ def answer_order_question(
             checkpoint("ROUTE", "no context — clarify")
             answer = _invoke_anthropic(
                 domain_prompts.greeting,
-                {"question": question, "history": history},
+                {"question": effective_question, "history": history},
                 max_tokens=min(max_tokens, 120),
             )
             timer.mark("LLM_DONE", mode="clarify")
@@ -448,7 +608,7 @@ def answer_order_question(
                         "calculation_result": format_calculation_result_for_context(
                             calc_payload
                         ),
-                        "question": question,
+                        "question": effective_question,
                         "response_style": style,
                         "history": history,
                     },
@@ -461,7 +621,7 @@ def answer_order_question(
                     or domain_prompts.ask,
                     {
                         "context": context,
-                        "question": question,
+                        "question": effective_question,
                         "history": history,
                     },
                     max_tokens=max_tokens,
@@ -474,7 +634,7 @@ def answer_order_question(
                     prompt,
                     {
                         "context": context,
-                        "question": question,
+                        "question": effective_question,
                         "intent": intent,
                         "response_style": style,
                         "history": history,

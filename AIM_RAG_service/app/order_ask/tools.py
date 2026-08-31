@@ -229,8 +229,24 @@ def execute_tools(
             tools_run.append(name)
 
         elif name == TOOL_RUN_ANALYTICS and domain == "orders":
-            analytics_payload = run_analytics(question, entities=entities)
-            context_blocks.append(format_analytics_for_context(analytics_payload))
+            # Planner first: understand operation + fields from the question.
+            # Falls back to the hardcoded catalog engine on None.
+            from app.order_ask.dynamic_analytics import (
+                format_dynamic_analytics_for_context,
+                run_dynamic_analytics,
+            )
+
+            dyn_payload = run_dynamic_analytics(question, entities=entities)
+            if dyn_payload is not None:
+                analytics_payload = dyn_payload
+                context_blocks.append(
+                    format_dynamic_analytics_for_context(dyn_payload)
+                )
+            else:
+                analytics_payload = run_analytics(question, entities=entities)
+                context_blocks.append(
+                    format_analytics_for_context(analytics_payload)
+                )
             tools_run.append(name)
 
         elif name == TOOL_RUN_ANALYTICS and domain == "trips":
