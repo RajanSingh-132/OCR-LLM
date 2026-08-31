@@ -101,7 +101,7 @@ def detect_location_side(question: str) -> str:
 def is_status_summary_question(question: str) -> bool:
     q = (question or "").lower()
     # "list/show confirmed orders" is a filtered LIST, not a status summary/count
-    if re.search(r"\b(list|show|display|find|search|filter|get)\b", q) and not re.search(
+    if re.search(r"\b(list|show|display|find|search|filter)\b", q) and not re.search(
         r"\b(how many|count|summary|break\s*down|breakdown|distribution|total|kitne|kitna)\b",
         q,
     ):
@@ -109,6 +109,9 @@ def is_status_summary_question(question: str) -> bool:
     if re.search(r"\bstatus\b.*\b(summary|break\s*down|breakdown|count|how many|distribution)\b", q):
         return True
     if re.search(r"\b(summary|break\s*down|breakdown)\b.*\bstatus", q):
+        return True
+    # "summary of orders" / "order summary" / "summary in Ontario orders"
+    if re.search(r"\bsummary\b", q) and re.search(r"\borders?\b", q):
         return True
     status_words = (
         r"quoted|cancelled|canceled|confirmed|confirm|dispatched|started|"
@@ -956,8 +959,9 @@ def status_summary(
     *,
     status_field: str = "orderstatus",
     status: Optional[str] = None,
+    filters: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Count orders per status field across ALL records."""
+    """Count orders per status field (optionally geo/status filtered)."""
     field = status_field if status_field in (
         "orderstatus",
         "accountingstatus",
@@ -971,11 +975,17 @@ def status_summary(
     }.get(field, KNOWN_STATUSES)
 
     collection = get_orders_collection()
+    if filters:
+        from app.order_ask.rag_retrieval import _base_order_match
+
+        match = _base_order_match(filters)
+    else:
+        match = _base_match()
     group_field = f"${field}"
     rows = list(
         collection.aggregate(
             [
-                {"$match": _base_match()},
+                {"$match": match},
                 {"$group": {"_id": group_field, "order_count": {"$sum": 1}}},
                 {"$sort": {"order_count": -1}},
             ]
@@ -1008,16 +1018,26 @@ def status_summary(
         statuses=len(ordered),
         status_field=field,
         status=status,
+        filters=filters or {},
     )
+    geo_note = ""
+    if filters and any(
+        filters.get(k) for k in ("state", "city", "country", "pin", "location", "address")
+    ):
+        geo_note = (
+            " Filtered by "
+            f"{ {k: filters[k] for k in ('state','city','country','pin','location','address') if filters.get(k)} }."
+        )
     return {
         "analytics_type": "status_summary",
         "status_field": field,
         "status_filter": status,
+        "filters": filters or {},
         "matching_orders": matching if status else total,
         "total_orders": total,
         "by_status": ordered,
         "definition": (
-            f"Counts from all Avaal order records grouped by {field}. "
+            f"Counts from Avaal order records grouped by {field}.{geo_note} "
             "Order status: Quoted/Confirmed/Dispatched/Started/In-Transit/"
             "Partially Delivered/Delivered/Cancelled/Rejected. "
             "Outsource: Open/Planned/Assigned/Quoted/Delivered. "
@@ -1395,6 +1415,49 @@ def run_analytics(
         limit = int(entities.get("limit") or 5)
         return best_cities(location_side=side, limit=limit)
 
+    # Named city/state/country + status/summary → filtered status_summary
+    # (beats city-wise / state-wise grouping when a particular place is given)
+    wants_geo_status = (
+        (entities.get("city") or entities.get("state") or entities.get("country"))
+        and (
+            entities.get("analytics") == "status_summary"
+            or is_status_summary_question(q)
+            or bool(re.search(r"\b(status|summary|how\s+many|count|breakdown)\b", q, re.I))
+        )
+    )
+    if wants_geo_status:
+        field = (
+            "accountingstatus"
+            if entities.get("accountingstatus")
+            else "outstatus"
+            if entities.get("outstatus")
+            else detect_status_field(q)
+        )
+        status = (
+            entities.get("accountingstatus")
+            or entities.get("outstatus")
+            or entities.get("orderstatus")
+            or detect_accounting_status_filter(q)
+            or detect_outsource_status_filter(q)
+            or detect_status_filter(q)
+        )
+        if entities.get("accountingstatus"):
+            field = "accountingstatus"
+        elif entities.get("outstatus") and not entities.get("orderstatus"):
+            field = "outstatus"
+        elif entities.get("orderstatus"):
+            field = "orderstatus"
+        geo_filters = {
+            k: entities[k]
+            for k in ("state", "city", "country", "pin", "address", "location", "location_side")
+            if entities.get(k)
+        }
+        return status_summary(
+            status_field=field,
+            status=status,
+            filters=geo_filters or None,
+        )
+
     if is_state_wise_question(q) or entities.get("analytics") == "orders_by_state":
         limit = int(entities.get("limit") or 50)
         return orders_by_state(location_side=side, limit=limit)
@@ -1455,7 +1518,16 @@ def run_analytics(
             field = "outstatus"
         elif entities.get("orderstatus"):
             field = "orderstatus"
-        return status_summary(status_field=field, status=status)
+        geo_filters = {
+            k: entities[k]
+            for k in ("state", "city", "country", "pin", "address", "location", "location_side")
+            if entities.get(k)
+        }
+        return status_summary(
+            status_field=field,
+            status=status,
+            filters=geo_filters or None,
+        )
 
     # Fallback: if analytics tool was forced, prefer status summary
     return status_summary(status_field=detect_status_field(q))

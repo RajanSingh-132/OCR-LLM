@@ -229,6 +229,17 @@ def _base_order_match(filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any
         if ors:
             and_parts.append({"$or": ors})
 
+    if filters.get("country"):
+        country = str(filters["country"]).strip()
+        country_rx = rf"\b{re.escape(country)}\b"
+        if country.lower() in {"us", "usa", "u.s.", "u.s.a."}:
+            country_rx = r"\b(?:United\s+States|USA|U\.S\.A\.?|U\.S\.?)\b"
+        elif country.lower() == "canada":
+            country_rx = r"\bCanada\b"
+        ors = _side_address_ors(side=side, pattern=country_rx)
+        if ors:
+            and_parts.append({"$or": ors})
+
     if filters.get("city"):
         city_rx = rf"\b{re.escape(str(filters['city']).strip())}\b"
         ors = _side_address_ors(

@@ -39,13 +39,32 @@ TENANT_DB_PREFIX = os.environ.get("TENANT_DB_PREFIX", "")
 _CORPORATE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,63}$")
 
 
+def pending_tenant_user_message(corporate_id: str) -> str:
+    """User-facing copy when company data is not provisioned yet."""
+    cid = (corporate_id or "").strip() or "this company"
+    return (
+        f"We are working on the data for corporate ID {cid}. "
+        "I'll be with you shortly! 😊"
+    )
+
+
 class InvalidCorporateIdError(ValueError):
-    def __init__(self, corporate_id: str, reason: str = ""):
+    def __init__(
+        self,
+        corporate_id: str,
+        reason: str = "",
+        *,
+        user_message: str | None = None,
+    ):
         self.corporate_id = corporate_id
         self.reason = reason
-        message = f"Invalid corporate_id: {corporate_id!r}"
-        if reason:
-            message += f" ({reason})"
+        # Prefer friendly user_message (never expose Mongo DB names to the client)
+        if user_message:
+            message = user_message
+        else:
+            message = f"Invalid corporate_id: {corporate_id!r}"
+            if reason:
+                message += f" ({reason})"
         super().__init__(message)
 
 
@@ -89,12 +108,15 @@ def verify_tenant_database_exists(corporate_id: str, database: str) -> None:
     get_mongo_client().admin.command("ping")
     existing = set(list_mongo_database_names())
     if database not in existing:
+        logger.warning(
+            "Tenant DB not ready: corporate_id=%s database=%s",
+            corporate_id,
+            database,
+        )
         raise InvalidCorporateIdError(
             corporate_id,
-            (
-                f"Mongo database {database!r} not found. "
-                "corporate_id must match an existing company database name."
-            ),
+            reason="tenant_database_missing",
+            user_message=pending_tenant_user_message(corporate_id),
         )
 
 

@@ -9,6 +9,7 @@ language → Mongo filter keys. Pin/state/city live inside address strings:
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List
 
 # JSON schema the LLM sees in prompts — keep compact and accurate.
@@ -252,8 +253,8 @@ STATE_ALIASES: Dict[str, List[str]] = {
     "WI": ["wisconsin"],
     "WY": ["wyoming"],
     "DC": ["district of columbia", "washington dc"],
-    "ON": ["ontario"],
-    "QC": ["quebec", "québec"],
+    "ON": ["ontario", "ontorio", "ontaro", "ontoario"],
+    "QC": ["quebec", "québec", "quebeck"],
     "BC": ["british columbia"],
     "AB": ["alberta"],
     "MB": ["manitoba"],
@@ -281,6 +282,29 @@ def resolve_state_token(raw: str) -> str | None:
         return None
     key = raw.strip().lower()
     return _NAME_TO_STATE.get(key)
+
+
+def find_state_in_text(text: str) -> str | None:
+    """
+    Find a known state/province name anywhere in free text.
+    Longest alias wins (e.g. 'british columbia' before 'columbia').
+    Two-letter codes (ON, CA, IN) only match when written UPPERCASE so
+    English words like "in" / "or" / "me" are not treated as states.
+    """
+    if not text:
+        return None
+    ql = text.lower()
+    for name in sorted(_NAME_TO_STATE.keys(), key=len, reverse=True):
+        if len(name) < 2:
+            continue
+        if len(name) == 2:
+            # Require uppercase code token in original text (e.g. " ON ", ",CA,")
+            if not re.search(rf"\b{name.upper()}\b", text):
+                continue
+            return _NAME_TO_STATE[name]
+        if re.search(rf"\b{re.escape(name)}\b", ql):
+            return _NAME_TO_STATE[name]
+    return None
 
 
 def format_field_catalog_for_prompt() -> str:

@@ -368,6 +368,39 @@ def extract_entities(
         else:
             entities[FIELD_PICKUP_COUNTRY] = country
 
+    # City filters: "trips in Toronto", "for Chicago"
+    if not entities.get(FIELD_PICKUP_CITY) and not entities.get(FIELD_DELIVERY_CITY):
+        m = re.search(
+            r"\b(?:pickup|pick\s*up)\s*city\s*(?:is|=|:|#)?\s*['\"]?"
+            r"([A-Za-z][A-Za-z\s\-.]{1,40})",
+            q,
+            re.I,
+        )
+        if m:
+            entities[FIELD_PICKUP_CITY] = m.group(1).strip(" .,")
+        m = re.search(
+            r"\b(?:delivery|drop)\s*city\s*(?:is|=|:|#)?\s*['\"]?"
+            r"([A-Za-z][A-Za-z\s\-.]{1,40})",
+            q,
+            re.I,
+        )
+        if m:
+            entities[FIELD_DELIVERY_CITY] = m.group(1).strip(" .,")
+        if not entities.get(FIELD_PICKUP_CITY) and not entities.get(FIELD_DELIVERY_CITY):
+            m = re.search(
+                r"\b(?:in|from|at|for|of)\s+(?:the\s+|a\s+|an\s+)?"
+                r"([A-Za-z][A-Za-z\-.]{2,40})(?:\s+city)?\b",
+                q,
+                re.I,
+            )
+            if m:
+                city = m.group(1).strip(" .,")
+                if city.lower() not in {
+                    "the", "status", "summary", "list", "canada", "usa", "us",
+                    "trips", "trip", "orders", "order", "confirmed", "planned",
+                }:
+                    entities["city"] = city.title() if city.islower() or city.isupper() else city
+
     # Analytics markers
     if is_worst_trip_question(q):
         entities["analytics"] = "worst_trip"
@@ -476,6 +509,25 @@ def entities_to_mongo_filters(entities: Dict[str, Any]) -> Dict[str, Any]:
         filters.update(
             _text_filter(FIELD_DELIVERY_CITY, str(entities[FIELD_DELIVERY_CITY]))
         )
+    # Intent / free-text city → pickup and/or delivery depending on side
+    elif entities.get("city"):
+        city = str(entities["city"])
+        side = str(entities.get("location_side") or "both").lower()
+        if side == "delivery":
+            filters.update(_text_filter(FIELD_DELIVERY_CITY, city))
+        elif side == "pickup":
+            filters.update(_text_filter(FIELD_PICKUP_CITY, city))
+        else:
+            city_or = {
+                "$or": [
+                    _text_filter(FIELD_PICKUP_CITY, city),
+                    _text_filter(FIELD_DELIVERY_CITY, city),
+                ]
+            }
+            if "$or" in filters:
+                filters = {"$and": [filters, city_or]}
+            else:
+                filters.update(city_or)
     if entities.get(FIELD_PICKUP_LOC):
         filters.update(_text_filter(FIELD_PICKUP_LOC, str(entities[FIELD_PICKUP_LOC])))
     if entities.get(FIELD_DELIVERY_LOC):
