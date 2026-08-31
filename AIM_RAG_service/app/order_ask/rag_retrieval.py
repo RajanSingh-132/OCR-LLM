@@ -273,10 +273,15 @@ def search_orders(
     limit: int = 15,
     sort_by: str = "orderid",
     ascending: bool = False,
+    *,
+    match: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Structured Mongo list/search — accurate filtered order lists.
     Returns count + compact order rows (not embeddings).
+
+    Pass a prebuilt ``match`` to bypass ``_base_order_match(filters)`` (used by
+    the LLM query planner, which builds its own operator-DSL match).
     """
     limit = max(1, min(int(limit or 15), 50))
     allowed_sort = {
@@ -298,7 +303,8 @@ def search_orders(
         sort_by = "orderid"
 
     collection = get_orders_collection()
-    match = _base_order_match(filters)
+    if match is None:
+        match = _base_order_match(filters)
     total = collection.count_documents(match)
     cursor = (
         collection.find(match, _LIST_PROJECTION)

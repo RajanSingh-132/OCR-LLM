@@ -257,6 +257,7 @@ def is_analytics_question(question: str) -> bool:
         or is_date_activity_question(question)
         or is_state_wise_question(question)
         or is_city_wise_question(question)
+        or is_location_wise_question(question)
         or is_best_city_question(question)
         or is_period_orders_question(question)
         or is_trip_distance_question(question)
@@ -546,6 +547,20 @@ def is_city_wise_question(question: str) -> bool:
     )
 
 
+def is_location_wise_question(question: str) -> bool:
+    """'location wise orders', 'warehouse wise', 'orders per location' — group by location name."""
+    q = (question or "").lower()
+    return bool(
+        re.search(
+            r"\b(location|place|facility|warehouse|site|depot)[\s-]*wise\b|"
+            r"\bby\s+(?:pickup|delivery|drop)?\s*location\b|"
+            r"\borders?\s+per\s+location\b|"
+            r"\blocation[\s-]*wise\s+orders?\b",
+            q,
+        )
+    )
+
+
 def is_best_city_question(question: str) -> bool:
     q = (question or "").lower()
     return bool(
@@ -584,29 +599,83 @@ def is_trip_distance_question(question: str) -> bool:
     )
 
 
+_US_ZIP_RE = re.compile(r"^\d{5}(?:-\d{4})?$")
+_CA_POSTAL_RE = re.compile(r"^[A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d$")
+_PHONE_RE = re.compile(r"^\+?\(?\d[\d\s().-]{5,}$")
+_KNOWN_COUNTRIES = {
+    "united states", "usa", "u.s.a.", "u.s.", "us", "america",
+    "canada", "can", "mexico", "india",
+}
+
+
+def _looks_postal(token: str) -> bool:
+    t = (token or "").strip()
+    return bool(_US_ZIP_RE.match(t) or _CA_POSTAL_RE.match(t))
+
+
 def parse_address_geo(addr: Optional[str]) -> Optional[Dict[str, str]]:
     """
-    Address shape: STREET, CITY, STATE, PIN, Country, email, phone
-    e.g. 1241 OLD TEMESCAL ROAD #103, CORONA, CA, 92881, United States, ...
+    Parse city / state / country from an Avaal address string.
+
+    Real shape is roughly  STREET[, SUITE], CITY, STATE, POSTAL, COUNTRY, email, phone
+    but suite lines and missing fields shift positions, so we anchor from the RIGHT
+    and validate each token instead of trusting fixed indexes.
     """
+    from app.order_ask.field_catalog import resolve_state_token
+
     if not addr or not str(addr).strip():
         return None
+
     parts = [p.strip() for p in str(addr).split(",") if p.strip()]
+    # Drop trailing email / phone noise
+    while parts and ("@" in parts[-1] or _PHONE_RE.match(parts[-1])):
+        parts.pop()
     if len(parts) < 3:
         return None
-    city = parts[1] if len(parts) > 1 else ""
-    state = parts[2] if len(parts) > 2 else ""
+
     country = ""
-    if len(parts) >= 5:
-        country = parts[4]
-    elif len(parts) == 4:
-        # STREET, CITY, STATE, Country (no pin)
-        country = parts[3] if not re.match(r"^\d{5}", parts[3]) else ""
-    # Drop email-like country mistakes
-    if "@" in country:
-        country = ""
-    if not city and not state:
+    if parts[-1].lower() in _KNOWN_COUNTRIES:
+        country = parts.pop()
+    elif _looks_postal(parts[-1]) and len(parts) >= 4:
+        country = ""  # no country token, postal is last
+    # Drop a trailing postal code
+    if parts and _looks_postal(parts[-1]):
+        parts.pop()
+    if not country and parts and parts[-1].lower() in _KNOWN_COUNTRIES:
+        country = parts.pop()
+
+    if len(parts) < 2:
         return None
+
+    # State = last remaining token that is a 2-3 letter code or resolves to one
+    state = ""
+    state_idx = None
+    for i in range(len(parts) - 1, 0, -1):
+        tok = parts[i]
+        if _looks_postal(tok):
+            continue
+        code = resolve_state_token(tok) or (
+            tok.upper() if re.fullmatch(r"[A-Za-z]{2}", tok) else None
+        )
+        if code:
+            state = code
+            state_idx = i
+            break
+
+    city = ""
+    if state_idx is not None and state_idx - 1 >= 1:
+        city = parts[state_idx - 1]
+    elif len(parts) >= 2:
+        city = parts[1]
+
+    if not state and not city:
+        return None
+    # Reject obvious garbage (postal / digits as city/state)
+    if _looks_postal(city) or city.isdigit():
+        city = ""
+    if not state and not city:
+        return None
+
     return {
         "city": city.title() if city else "",
         "state": state.upper() if len(state) <= 3 else state.title(),
@@ -614,7 +683,40 @@ def parse_address_geo(addr: Optional[str]) -> Optional[Dict[str, str]]:
     }
 
 
-def _iter_geo_from_orders(location_side: str = "both") -> List[Dict[str, str]]:
+_GEO_FILTER_KEYS = (
+    "orderstatus",
+    "accountingstatus",
+    "outstatus",
+    "currencycode",
+    "customername",
+    "customercode",
+    "companycode",
+    "commodityname",
+    "salesmanname",
+    "orderdate",
+    "pickupdate",
+    "deliverydate",
+)
+
+
+def _geo_status_filters(entities: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Non-geo scalar filters (status/customer/date) to narrow geo analytics."""
+    entities = entities or {}
+    return {k: entities[k] for k in _GEO_FILTER_KEYS if entities.get(k)}
+
+
+def _geo_match(filters: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not filters:
+        return _base_match()
+    from app.order_ask.rag_retrieval import _base_order_match
+
+    return _base_order_match(filters)
+
+
+def _iter_geo_from_orders(
+    location_side: str = "both",
+    filters: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, str]]:
     collection = get_orders_collection()
     projection = {
         "pickupfulladdress": 1,
@@ -622,7 +724,7 @@ def _iter_geo_from_orders(location_side: str = "both") -> List[Dict[str, str]]:
         "_id": 0,
     }
     geos: List[Dict[str, str]] = []
-    for doc in collection.find(_base_match(), projection):
+    for doc in collection.find(_geo_match(filters), projection):
         addrs = []
         if location_side in ("pickup", "both"):
             addrs.append(doc.get("pickupfulladdress"))
@@ -644,13 +746,18 @@ def _iter_geo_from_orders(location_side: str = "both") -> List[Dict[str, str]]:
     return geos
 
 
-def orders_by_state(*, location_side: str = "both", limit: int = 50) -> Dict[str, Any]:
-    """Country → state → order count only."""
+def orders_by_state(
+    *,
+    location_side: str = "both",
+    limit: int = 50,
+    filters: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Country → state → order count (optionally status/customer/date filtered)."""
     limit = max(1, min(int(limit or 50), 100))
     from collections import Counter
 
     counter: Counter = Counter()
-    for geo in _iter_geo_from_orders(location_side):
+    for geo in _iter_geo_from_orders(location_side, filters=filters):
         country = geo.get("country") or "Unknown"
         state = geo.get("state") or "Unknown"
         counter[(country, state)] += 1
@@ -659,13 +766,19 @@ def orders_by_state(*, location_side: str = "both", limit: int = 50) -> Dict[str
         {"country": c, "state": s, "order_count": n}
         for (c, s), n in counter.most_common(limit)
     ]
-    checkpoint("ANALYTICS", "orders_by_state", rows=len(rows), side=location_side)
+    checkpoint(
+        "ANALYTICS", "orders_by_state", rows=len(rows), side=location_side,
+        filters=filters or {},
+    )
+    filter_note = f" Filtered by {filters}." if filters else ""
     return {
         "analytics_type": "orders_by_state",
         "location_side": location_side,
+        "filters": filters or {},
         "definition": (
             "Order counts grouped by country then state, parsed from "
-            "pickup/delivery full addresses. Answer format: country, then state, then count only."
+            "pickup/delivery full addresses." + filter_note
+            + " Answer format: country, then state, then count only."
         ),
         "response_format": "country_name → state_name → order_count (counts only)",
         "total_groups": len(rows),
@@ -673,13 +786,18 @@ def orders_by_state(*, location_side: str = "both", limit: int = 50) -> Dict[str
     }
 
 
-def orders_by_city(*, location_side: str = "both", limit: int = 50) -> Dict[str, Any]:
-    """City → order count only."""
+def orders_by_city(
+    *,
+    location_side: str = "both",
+    limit: int = 50,
+    filters: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """City → order count (optionally status/customer/date filtered)."""
     limit = max(1, min(int(limit or 50), 100))
     from collections import Counter
 
     counter: Counter = Counter()
-    for geo in _iter_geo_from_orders(location_side):
+    for geo in _iter_geo_from_orders(location_side, filters=filters):
         city = geo.get("city") or "Unknown"
         country = geo.get("country") or ""
         state = geo.get("state") or ""
@@ -689,13 +807,18 @@ def orders_by_city(*, location_side: str = "both", limit: int = 50) -> Dict[str,
         {"city": city, "state": st, "country": co, "order_count": n}
         for (city, st, co), n in counter.most_common(limit)
     ]
-    checkpoint("ANALYTICS", "orders_by_city", rows=len(rows), side=location_side)
+    checkpoint(
+        "ANALYTICS", "orders_by_city", rows=len(rows), side=location_side,
+        filters=filters or {},
+    )
+    filter_note = f" Filtered by {filters}." if filters else ""
     return {
         "analytics_type": "orders_by_city",
         "location_side": location_side,
+        "filters": filters or {},
         "definition": (
-            "Order counts grouped by city (from pickup/delivery addresses). "
-            "Answer with city name and total order count only."
+            "Order counts grouped by city (from pickup/delivery addresses)."
+            + filter_note + " Answer with city name and total order count only."
         ),
         "response_format": "city_name → order_count (counts only)",
         "total_groups": len(rows),
@@ -703,9 +826,60 @@ def orders_by_city(*, location_side: str = "both", limit: int = 50) -> Dict[str,
     }
 
 
-def best_cities(*, location_side: str = "both", limit: int = 5) -> Dict[str, Any]:
+def orders_by_location(*, location_side: str = "both", limit: int = 50) -> Dict[str, Any]:
+    """Order count grouped by pickup/delivery location NAME (real fields, no address parsing)."""
+    limit = max(1, min(int(limit or 50), 100))
+    from collections import Counter
+
+    fields: List[str] = []
+    if location_side in ("pickup", "both"):
+        fields.append("pickuplocationname")
+    if location_side in ("delivery", "both"):
+        fields.append("deliverylocationname")
+    if not fields:
+        fields = ["pickuplocationname", "deliverylocationname"]
+
+    projection = {field: 1 for field in fields}
+    projection["_id"] = 0
+
+    counter: Counter = Counter()
+    for doc in get_orders_collection().find(_base_match(), projection):
+        seen = set()
+        for field in fields:
+            name = str(doc.get(field) or "").strip()
+            key = name.lower()
+            if name and key not in seen:
+                seen.add(key)
+                counter[name] += 1
+
+    rows = [
+        {"location": name, "order_count": n}
+        for name, n in counter.most_common(limit)
+    ]
+    checkpoint("ANALYTICS", "orders_by_location", rows=len(rows), side=location_side)
+    return {
+        "analytics_type": "orders_by_location",
+        "location_side": location_side,
+        "definition": (
+            "Order counts grouped by pickup/delivery location name. An order is "
+            "counted once per distinct location name it touches on the chosen side(s)."
+        ),
+        "response_format": "location_name -> order_count (counts only)",
+        "total_groups": len(rows),
+        "rows": rows,
+    }
+
+
+def best_cities(
+    *,
+    location_side: str = "both",
+    limit: int = 5,
+    filters: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Best city = most orders."""
-    payload = orders_by_city(location_side=location_side, limit=limit)
+    payload = orders_by_city(
+        location_side=location_side, limit=limit, filters=filters
+    )
     rows = payload.get("rows") or []
     best = rows[0] if rows else None
     checkpoint(
@@ -724,23 +898,34 @@ def best_cities(*, location_side: str = "both", limit: int = 5) -> Dict[str, Any
     }
 
 
-def orders_by_country(*, location_side: str = "both", limit: int = 50) -> Dict[str, Any]:
-    """Country → order count from pickup/delivery addresses."""
+def orders_by_country(
+    *,
+    location_side: str = "both",
+    limit: int = 50,
+    filters: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Country → order count (optionally status/customer/date filtered)."""
     limit = max(1, min(int(limit or 50), 100))
     from collections import Counter
 
     counter: Counter = Counter()
-    for geo in _iter_geo_from_orders(location_side):
+    for geo in _iter_geo_from_orders(location_side, filters=filters):
         country = geo.get("country") or "Unknown"
         counter[country] += 1
 
     rows = [{"country": c, "order_count": n} for c, n in counter.most_common(limit)]
-    checkpoint("ANALYTICS", "orders_by_country", rows=len(rows), side=location_side)
+    checkpoint(
+        "ANALYTICS", "orders_by_country", rows=len(rows), side=location_side,
+        filters=filters or {},
+    )
+    filter_note = f" Filtered by {filters}." if filters else ""
     return {
         "analytics_type": "orders_by_country",
         "location_side": location_side,
+        "filters": filters or {},
         "definition": (
             "Order counts grouped by country parsed from pickup/delivery full addresses."
+            + filter_note
         ),
         "response_format": "country_name → order_count (counts only)",
         "total_groups": len(rows),
@@ -1458,17 +1643,33 @@ def run_analytics(
             filters=geo_filters or None,
         )
 
+    geo_scalar_filters = _geo_status_filters(entities)
+    if not geo_scalar_filters.get("orderstatus"):
+        detected_status = detect_status_filter(q)
+        if detected_status and re.search(r"\bwise\b|\bby\s+(state|province|city|country)\b", q, re.I):
+            geo_scalar_filters["orderstatus"] = detected_status
+
     if is_state_wise_question(q) or entities.get("analytics") == "orders_by_state":
         limit = int(entities.get("limit") or 50)
-        return orders_by_state(location_side=side, limit=limit)
+        return orders_by_state(
+            location_side=side, limit=limit, filters=geo_scalar_filters or None
+        )
 
     if is_city_wise_question(q) or entities.get("analytics") == "orders_by_city":
         limit = int(entities.get("limit") or 50)
-        return orders_by_city(location_side=side, limit=limit)
+        return orders_by_city(
+            location_side=side, limit=limit, filters=geo_scalar_filters or None
+        )
+
+    if is_location_wise_question(q) or entities.get("analytics") == "orders_by_location":
+        limit = int(entities.get("limit") or 50)
+        return orders_by_location(location_side=side, limit=limit)
 
     if is_orders_by_country_question(q) or entities.get("analytics") == "orders_by_country":
         limit = int(entities.get("limit") or 50)
-        return orders_by_country(location_side=side, limit=limit)
+        return orders_by_country(
+            location_side=side, limit=limit, filters=geo_scalar_filters or None
+        )
 
     if is_trip_distance_question(q) or entities.get("analytics") == "trip_distance":
         days = detect_period_days(q)
@@ -1541,6 +1742,11 @@ def format_analytics_for_context(payload: Dict[str, Any]) -> str:
         lines.append(f"Definition: {payload['definition']}")
     if payload.get("response_format"):
         lines.append(f"Response format required: {payload['response_format']}")
+    if payload.get("filters"):
+        lines.append(
+            f"filters_applied: {payload['filters']} "
+            "(these counts ALREADY reflect this filter — do not tell the user it is unfiltered)"
+        )
 
     if atype == "status_summary":
         lines.append(f"status_field: {payload.get('status_field') or 'orderstatus'}")
@@ -1621,6 +1827,15 @@ def format_analytics_for_context(payload: Dict[str, Any]) -> str:
             )
         if not payload.get("rows"):
             lines.append("(no city address data found)")
+
+    elif atype == "orders_by_location":
+        lines.append("location_wise_counts (location name then count ONLY):")
+        for row in payload.get("rows") or []:
+            lines.append(
+                f"- location={row.get('location')} | order_count={row.get('order_count')}"
+            )
+        if not payload.get("rows"):
+            lines.append("(no location name data found)")
 
     elif atype == "orders_by_country":
         lines.append("country_wise_counts (country then count ONLY):")

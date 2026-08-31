@@ -271,16 +271,35 @@ def extract_entities(
                 if loc:
                     entities["delivery_location"] = loc
 
-    m = re.search(
-        r"\b(?:at\s+)?(?:location|place|facility|warehouse)\s*[:=#]?\s*['\"]?"
-        r"([A-Za-z0-9][A-Za-z0-9 &\-./,]{1,50})",
-        q,
-        re.I,
+    is_loc_wise = bool(
+        re.search(
+            r"\b(?:location|place|facility|warehouse|site|depot)[\s-]*wise\b",
+            q,
+            re.I,
+        )
     )
-    if m and not entities.get("pickup_location") and not entities.get("delivery_location"):
-        loc = m.group(1).strip(" .,")
-        if loc.lower() not in _ALL_STATUS_STOPWORDS and len(loc) >= 2:
-            entities["location"] = loc
+    if not is_loc_wise:
+        m = re.search(
+            r"\b(?:at\s+)?(?:location|place|facility|warehouse)\s*[:=#]?\s*['\"]?"
+            r"([A-Za-z0-9][A-Za-z0-9 &\-./,]{1,50})",
+            q,
+            re.I,
+        )
+        if m and not entities.get("pickup_location") and not entities.get("delivery_location"):
+            loc = m.group(1).strip(" .,")
+            # Drop trailing filler ("wise orders", "list", "summary")
+            loc = re.sub(
+                r"\s+(?:wise|orders?|list|summary|status|breakdown)\b.*$",
+                "",
+                loc,
+                flags=re.I,
+            ).strip()
+            if (
+                loc.lower() not in _ALL_STATUS_STOPWORDS
+                and loc.lower() not in {"wise", "order", "orders", "list", "summary"}
+                and len(loc) >= 2
+            ):
+                entities["location"] = loc
 
     m = re.search(
         r"\b(?:pin\s*code|pincode|pin|zip\s*code|zip|postal\s*code|postal)\s*[:=#]?\s*"
@@ -297,18 +316,40 @@ def extract_entities(
 
     from app.order_ask.field_catalog import find_state_in_text, resolve_state_token
 
-    m = re.search(
-        r"\b(?:state|province|region)\s*[:=#]?\s*['\"]?([A-Za-z][A-Za-z\s.]{1,30})",
-        q,
-        re.I,
+    is_state_wise = bool(
+        re.search(
+            r"\b(state|province|region)[\s-]*wise\b|\bby\s+(state|province|region)\b",
+            q,
+            re.I,
+        )
     )
+
+    m = None
+    if not is_state_wise:
+        m = re.search(
+            r"\b(?:state|province|region)\s*(?:is|=|:|#)?\s*['\"]?([A-Za-z][A-Za-z\s.]{1,30})",
+            q,
+            re.I,
+        )
     if m:
         raw_state = m.group(1).strip(" .,")
         # Drop leading articles: "the Ontario" / "province the ON"
         raw_state = re.sub(r"^(?:the|a|an)\s+", "", raw_state, flags=re.I).strip()
-        code = resolve_state_token(raw_state) or resolve_state_token(raw_state.split()[0])
+        # Drop trailing filler: "Ontario wise", "CA confirmed orders"
+        raw_state = re.sub(
+            r"\s+(?:wise|orders?|list|summary|status|confirmed|delivered|"
+            r"dispatched|quoted|cancelled|pending)\b.*$",
+            "",
+            raw_state,
+            flags=re.I,
+        ).strip()
+        code = resolve_state_token(raw_state) or (
+            resolve_state_token(raw_state.split()[0]) if raw_state.split() else None
+        )
         if code:
             entities["state"] = code
+        elif raw_state.lower() in {"wise", "order", "orders", "list", "summary", ""}:
+            pass
         elif len(raw_state) <= 3:
             entities["state"] = raw_state.upper()
         else:
@@ -431,6 +472,7 @@ def extract_entities(
         extract_any_date_from_question,
         is_best_city_question,
         is_city_wise_question,
+        is_location_wise_question,
         is_date_activity_question,
         is_period_orders_question,
         is_state_wise_question,
@@ -476,6 +518,8 @@ def extract_entities(
         entities["analytics"] = "orders_by_state"
     if is_city_wise_question(q):
         entities["analytics"] = "orders_by_city"
+    if is_location_wise_question(q):
+        entities["analytics"] = "orders_by_location"
     # Particular place + status/summary → filtered status_summary (not city-wise list)
     if (entities.get("city") or entities.get("state") or entities.get("country")) and re.search(
         r"\b(status|summary|how\s+many|count|breakdown)\b", ql
@@ -591,7 +635,13 @@ def extract_entities(
 
     sticky = session_entities or {}
     follow_up = is_follow_up(q)
-    if follow_up or (not entities.get("order_token") and session_order_token):
+    # Aggregate / "X wise" questions are fleet-wide — never inherit a single order token.
+    aggregate_q = bool(entities.get("analytics")) or bool(
+        re.search(r"\bwise\b|\ball\s+orders?\b|\bevery\s+order\b", ql)
+    )
+    if not aggregate_q and (
+        follow_up or (not entities.get("order_token") and session_order_token)
+    ):
         if not entities.get("order_token") and session_order_token:
             if follow_up or re.search(
                 r"\b(status|tax|freight|detail|details|info|amount|customer|delivery|pickup|distance|location)\b",
@@ -701,6 +751,7 @@ def classify_intent_local(
         is_best_city_question,
         is_best_order_question,
         is_city_wise_question,
+        is_location_wise_question,
         is_country_customer_question,
         is_date_activity_question,
         is_orders_by_country_question,
@@ -916,6 +967,19 @@ def classify_intent_local(
             "reason": "city_wise_orders",
         }
 
+    if is_location_wise_question(q):
+        return {
+            "intent": "analytics",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "needs_analytics": True,
+            "response_style": "medium",
+            "max_tokens_hint": 450,
+            "retrieve_k": 0,
+            "reason": "location_wise_orders",
+        }
+
     if is_period_orders_question(q):
         return {
             "intent": "analytics",
@@ -982,7 +1046,9 @@ def classify_intent_local(
             re.I,
         )
         or re.search(r"\borders?\b.*\b(in|from|to|at)\b\s+[A-Za-z]{2,}", q, re.I)
-    ) and not re.search(r"\b(how many\s+customers?|customer\s+count|best|worst|low)\b", q, re.I):
+    ) and not re.search(
+        r"\b(how many\s+customers?|customer\s+count|best|worst|low|wise)\b", q, re.I
+    ):
         return {
             "intent": "list_filter",
             "needs_rag": False,
