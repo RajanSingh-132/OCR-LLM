@@ -25,8 +25,8 @@ from app.mongo_client import _to_python_types, get_mongo_collection
 logger = logging.getLogger("scripts.ingest.order")
 
 # ===================== CONFIG — edit these =====================
-FILE_PATH = r"D:\Desktop\OCR-LLM\AIM_RAG_service\total_count 1576,.txt"
-DB_NAME = "AFN01856"
+FILE_PATH = r"D:\Desktop\OCR-LLM\AFN01514order.txt"
+DB_NAME = "AFN01514"
 COLLECTION_NAME = "Avaal_order"
 NAMESPACE = "avaal_orders"
 DUPLICATE_FIELD = "ordernumber"
@@ -34,6 +34,12 @@ WITH_EMBEDDINGS = True
 SKIP_DUPLICATES = True
 EMBED_BATCH_SIZE = 25
 INSERT_BATCH_SIZE = 100
+# Titan Text Embeddings V2 accepts at most 8192 input tokens per request.
+# Cap the text sent for embedding safely below that ceiling (order text is
+# number/ID heavy, so it packs more tokens per character than prose).
+# The full record is still stored verbatim in `page_content`; only the
+# embedding input is trimmed for unusually large orders.
+MAX_EMBED_CHARS = 18000
 # ===============================================================
 
 
@@ -92,6 +98,19 @@ def build_page_content(order: Dict[str, Any]) -> str:
         if value not in (None, "", [], {}):
             lines.append(f"{key}: {value}")
     return "\n".join(lines)
+
+
+def _truncate_for_embedding(text: str) -> str:
+    """Keep embedding input under the Titan 8192-token limit."""
+    if len(text) <= MAX_EMBED_CHARS:
+        return text
+    logger.warning(
+        "Embedding text is %s chars; truncating to %s chars to stay under the "
+        "Titan token limit",
+        len(text),
+        MAX_EMBED_CHARS,
+    )
+    return text[:MAX_EMBED_CHARS]
 
 
 def build_document(
@@ -190,7 +209,10 @@ def ingest_orders() -> Dict[str, Any]:
             )
             continue
 
-        texts = [build_page_content(order) for order in pending]
+        texts = [
+            _truncate_for_embedding(build_page_content(order))
+            for order in pending
+        ]
         if embeddings is not None:
             vectors = embeddings.embed_documents(texts)
         else:

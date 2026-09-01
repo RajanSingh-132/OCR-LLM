@@ -275,6 +275,7 @@ def search_orders(
     ascending: bool = False,
     *,
     match: Optional[Dict[str, Any]] = None,
+    sort_expr: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Structured Mongo list/search — accurate filtered order lists.
@@ -282,6 +283,10 @@ def search_orders(
 
     Pass a prebuilt ``match`` to bypass ``_base_order_match(filters)`` (used by
     the LLM query planner, which builds its own operator-DSL match).
+
+    Pass ``sort_expr`` (a Mongo aggregation expression) to sort on a computed
+    value instead of a raw field — e.g. a parsed date for US-format date columns
+    whose lexical order is meaningless.
     """
     limit = max(1, min(int(limit or 15), 50))
     allowed_sort = {
@@ -299,18 +304,30 @@ def search_orders(
         "customername",
         "orderstatus",
     }
-    if sort_by not in allowed_sort:
+    if sort_expr is None and sort_by not in allowed_sort:
         sort_by = "orderid"
 
     collection = get_orders_collection()
     if match is None:
         match = _base_order_match(filters)
     total = collection.count_documents(match)
-    cursor = (
-        collection.find(match, _LIST_PROJECTION)
-        .sort(sort_by, 1 if ascending else -1)
-        .limit(limit)
-    )
+    if sort_expr is not None:
+        cursor = collection.aggregate(
+            [
+                {"$match": match},
+                {"$addFields": {"__sort": sort_expr}},
+                {"$sort": {"__sort": 1 if ascending else -1, "orderid": -1}},
+                {"$limit": limit},
+                {"$project": _LIST_PROJECTION},
+            ],
+            maxTimeMS=8000,
+        )
+    else:
+        cursor = (
+            collection.find(match, _LIST_PROJECTION)
+            .sort(sort_by, 1 if ascending else -1)
+            .limit(limit)
+        )
     rows = []
     for doc in cursor:
         rows.append(

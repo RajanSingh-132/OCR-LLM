@@ -40,9 +40,17 @@ from app.order_ask.dynamic_analytics import (
     _schema_for_prompt,
     _shape_result,
     _validate_spec,
+    date_format_for,
     format_dynamic_analytics_for_context,
     get_orders_schema,
+    is_date_field,
     resolve_field,
+)
+from app.order_ask.invoice_query_planner import (
+    _iso_date_expr,
+    _iso_string_condition,
+    _target_date_expr,
+    _us_date_condition,
 )
 from app.order_ask.rag_retrieval import (
     _base_order_match,
@@ -227,7 +235,11 @@ FILTER OPS
   date_range                date field, value ["YYYY-MM-DD","YYYY-MM-DD"] (inclusive) - use for "between Aug 1 and Aug 15"
   period                    date field, value one of: today, yesterday, this_week, last_week, this_month, last_month, this_year, last_year
   last_days                 date field, value integer N - "last 7 days", "past 30 days"
-Order date field = "orderdate"; use "pickupdate" / "deliverydate" only if the user says picked up / delivered.
+Date ops work on ANY field tagged date(...) in the schema above. Pick the one the user means:
+"ordered / placed / order date" -> orderdate (this is the default when none is named);
+"created / entered in the system" -> createdon; "last updated / modified" -> modifiedon;
+"picked up / pickup" -> pickupdate; "delivered / drop / delivery" -> deliverydate;
+"enquiry" -> enquirydate; "quoted / quotation" -> quotationdate.
 A month name like "August" with no year -> date_range for that whole month in the current year.
 
 VOCAB (map the user's word to the real field/value)
@@ -251,7 +263,7 @@ RULES
 - Use ONLY fields shown above (dotted nested allowed) or the geo virtual fields. Never invent one.
 - Numeric fn/ops only on numeric fields. group_by only on groupable fields (max 2).
 - date_bucket: for "daily / weekly / monthly" series. operation stays "group"; group_by may be [] (pure time series)
-  or hold ONE other field. Works on orderdate/createdon only.
+  or hold ONE other field. "field" may be any field tagged date(...) above.
 - having: threshold AFTER grouping ("customers with more than 5 orders AND freight above 5000" ->
   group_by ["customername"], metrics [count, sum totalfreight], having [{{count>5}},{{sum_totalfreight>5000}}]).
 - "top N X by Y": task aggregate, group_by [X], metric sum/avg on Y, sort desc, limit N.
@@ -296,7 +308,7 @@ def _field_kind(name: str, schema: Dict[str, Any]) -> Optional[str]:
         return None
     if info.get("numeric"):
         return "numeric"
-    if _DATE_FIELD_RE.search(name):
+    if info.get("date") or is_date_field(name, schema) or _DATE_FIELD_RE.search(name):
         return "date"
     return "text"
 
@@ -359,6 +371,10 @@ def _valid_filter(f: Any, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             return None
         value = [str(value[0]).strip()[:10], str(value[1]).strip()[:10]]
         if not all(re.match(r"^\d{4}-\d{2}-\d{2}$", v) for v in value):
+            return None
+    if op in ("date_eq", "date_gte", "date_lte", "date_gt", "date_lt"):
+        value = str(value).strip()[:10]
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", value):
             return None
     if op == "period":
         value = str(value).strip().lower().replace(" ", "_").replace("-", "_")
@@ -618,6 +634,53 @@ def _op_to_mongo(op: str, value: Any, field: str, kind: str):
     return None
 
 
+def _native_date_condition(field: str, op: str, value: Any):
+    """{"$expr": ...} clause for a column stored as a real BSON date."""
+    src = f"${field}"
+    if op in ("date_gte", "date_gt", "date_lte", "date_lt"):
+        mop = {
+            "date_gte": "$gte", "date_gt": "$gt",
+            "date_lte": "$lte", "date_lt": "$lt",
+        }[op]
+        return {"$expr": {mop: [src, _target_date_expr(value)]}}
+    if op == "date_eq":
+        return {
+            "$expr": {
+                "$and": [
+                    {"$gte": [src, _target_date_expr(value)]},
+                    {"$lt": [src, _target_date_expr(_plus_one_day(value))]},
+                ]
+            }
+        }
+    if op == "date_range":
+        return {
+            "$expr": {
+                "$and": [
+                    {"$gte": [src, _target_date_expr(value[0])]},
+                    {"$lt": [src, _target_date_expr(_plus_one_day(value[1]))]},
+                ]
+            }
+        }
+    if op == "last_days":
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=int(value))
+        ).strftime("%Y-%m-%d")
+        return {"$expr": {"$gte": [src, _target_date_expr(cutoff)]}}
+    if op == "period":
+        bounds = _period_bounds(value)
+        if not bounds:
+            return None
+        return {
+            "$expr": {
+                "$and": [
+                    {"$gte": [src, _target_date_expr(bounds[0])]},
+                    {"$lt": [src, _target_date_expr(bounds[1])]},
+                ]
+            }
+        }
+    return None
+
+
 def _build_match(
     filters: List[Dict[str, Any]], schema: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -634,6 +697,30 @@ def _build_match(
         kind = _field_kind(name, schema)
         if kind is None:
             continue
+
+        if kind == "date":
+            # eq / ne / exists keep exact-string semantics (any format).
+            if op in ("eq", "ne", "exists"):
+                cond = _op_to_mongo(op, value, name, "text")
+                if cond is not None:
+                    field_conds.setdefault(name, []).append(cond)
+                continue
+            fmt = date_format_for(name, schema)
+            if fmt == "us":
+                clause = _us_date_condition(name, op, value)
+                if clause:
+                    and_parts.append(clause)
+                continue
+            if fmt == "native":
+                clause = _native_date_condition(name, op, value)
+                if clause:
+                    and_parts.append(clause)
+                continue
+            cond = _iso_string_condition(op, value)
+            if cond is not None:
+                field_conds.setdefault(name, []).append(cond)
+            continue
+
         cond = _op_to_mongo(op, value, name, kind)
         if cond is None:
             continue
@@ -663,12 +750,36 @@ def _filters_summary(filters: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _date_sort_expr(field: str, fmt: str) -> Dict[str, Any]:
+    """Aggregation expr that yields a real date for sorting a date column."""
+    if fmt == "us":
+        return _iso_date_expr(field)
+    return {
+        "$convert": {
+            "input": {"$substrBytes": [{"$toString": f"${field}"}, 0, 10]},
+            "to": "date",
+            "onError": None,
+            "onNull": None,
+        }
+    }
+
+
 def _list_orders(plan: QueryPlan, schema: Dict[str, Any]) -> Dict[str, Any]:
     match = _build_match(plan.filters, schema)
     sort_by = (plan.sort or {}).get("key") or "orderid"
     ascending = (plan.sort or {}).get("dir") == "asc"
+
+    resolved_sort = resolve_field(sort_by, schema) or sort_by
+    sort_expr = None
+    if _field_kind(resolved_sort, schema) == "date":
+        sort_expr = _date_sort_expr(
+            resolved_sort, date_format_for(resolved_sort, schema)
+        )
+        sort_by = resolved_sort
+
     payload = search_orders(
-        match=match, limit=plan.limit, sort_by=sort_by, ascending=ascending
+        match=match, limit=plan.limit, sort_by=sort_by, ascending=ascending,
+        sort_expr=sort_expr,
     )
     payload["filters"] = _filters_summary(plan.filters)
     checkpoint(
