@@ -296,7 +296,7 @@ def answer_order_question(
         planner_plan = None
         precomputed_tool_result = None
         execute_query_plan = None
-        if domain in ("orders", "invoices") and (
+        if domain in ("orders", "invoices", "trips") and (
             replay_of
             or (
                 classify_intent_common(question) is None
@@ -310,6 +310,12 @@ def answer_order_question(
                         PLANNER_ENABLED,
                         execute_query_plan,
                         run_query_planner,
+                    )
+                elif domain == "trips":
+                    from app.order_ask.trip_query_planner import (
+                        TRIP_PLANNER_ENABLED as PLANNER_ENABLED,
+                        execute_trip_query_plan as execute_query_plan,
+                        run_trip_query_planner as run_query_planner,
                     )
                 else:
                     from app.order_ask.invoice_query_planner import (
