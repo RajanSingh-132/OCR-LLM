@@ -180,3 +180,44 @@ async def ask_order_question(query: OrderQuery):
             status_code=500,
             detail=f"Failed to process order query: {str(e)}"
         )
+
+
+# ==================== LIVE AVAAL API → MONGO SYNC ====================
+
+class OrderSyncRequest(BaseModel):
+    corporate_id: str
+    # "incremental" (default) = only rows changed since last cursor
+    # "full" = pull everything and mark rows no longer present as stale
+    mode: str = "incremental"
+
+
+@app.post("/api/v1/orders/sync")
+async def sync_orders_endpoint(body: OrderSyncRequest, request: Request):
+    """Pull fresh orders from the live Avaal API into this tenant's Mongo store.
+
+    Protected by the `X-Sync-Token` header (must equal env `AVAAL_SYNC_TOKEN`).
+    """
+    expected = os.environ.get("AVAAL_SYNC_TOKEN", "")
+    if not expected or request.headers.get("X-Sync-Token") != expected:
+        raise HTTPException(status_code=401, detail="invalid or missing X-Sync-Token")
+    try:
+        from app.sync.order_sync import sync_orders
+
+        return await asyncio.to_thread(
+            sync_orders, body.corporate_id.strip(), mode=body.mode
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Order sync failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="order sync failed")
+
+
+@app.on_event("startup")
+def _start_avaal_sync_scheduler():
+    try:
+        from app.sync.scheduler import start_scheduler
+
+        start_scheduler()
+    except Exception as e:  # never block API startup on the scheduler
+        logger.warning("Avaal sync scheduler did not start: %s", e)

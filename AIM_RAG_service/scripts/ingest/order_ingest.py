@@ -9,7 +9,6 @@ Skips records when ordernumber already exists in the target collection.
 from __future__ import annotations
 
 import datetime
-import json
 import logging
 import os
 import sys
@@ -21,6 +20,7 @@ if ROOT not in sys.path:
 
 from app.embedding_client import get_embeddings
 from app.mongo_client import _to_python_types, get_mongo_collection
+from app.sync.payload import read_json_payload_text, unwrap_order_payload
 
 logger = logging.getLogger("scripts.ingest.order")
 
@@ -43,49 +43,16 @@ MAX_EMBED_CHARS = 18000
 # ===============================================================
 
 
-def _read_json_payload(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as f:
-        raw = f.read().strip()
-
-    if not raw:
-        raise ValueError(f"Empty file: {path}")
-
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        wrapped = raw.rstrip(",").strip()
-        if not wrapped.startswith("{"):
-            wrapped = "{" + wrapped
-        if not wrapped.endswith("}"):
-            wrapped = wrapped + "}"
-        return json.loads(wrapped)
-
-
 def load_order_records(path: str) -> List[Dict[str, Any]]:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Orders file not found: {path}")
 
-    payload = _read_json_payload(path)
+    with open(path, "r", encoding="utf-8") as f:
+        payload = read_json_payload_text(f.read())
 
-    if isinstance(payload, list):
-        if payload and isinstance(payload[0], dict) and "details" in payload[0]:
-            details = payload[0]["details"]
-        elif payload and isinstance(payload[0], dict):
-            return [r for r in payload if isinstance(r, dict)]
-        else:
-            details = payload
-    elif isinstance(payload, dict):
-        details = payload.get("details", payload)
-    else:
-        raise ValueError("Unsupported file format")
-
-    if isinstance(details, str):
-        details = json.loads(details)
-
-    if not isinstance(details, list):
-        raise ValueError("'details' must be a list of order records")
-
-    records = [r for r in details if isinstance(r, dict)]
+    records = unwrap_order_payload(payload)
+    if not records:
+        raise ValueError(f"No order records found in {path}")
     logger.info("Loaded %s order records from %s", len(records), path)
     return records
 
