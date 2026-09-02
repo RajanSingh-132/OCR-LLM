@@ -10,6 +10,7 @@ from app.lan_chain_rag_semantic_parent import (
     extract_dynamic_kv_from_pdf_async,
     pdf_extract_ckpt,
 )
+from app import postgres_client
 
 logger = logging.getLogger("api")
 
@@ -143,11 +144,18 @@ class OrderQuery(BaseModel):
 async def ask_order_question(query: OrderQuery):
     """
     Query order data using RAG with embeddings.
-    
+
     Process:
-    1. Auto Ingest getorderlist.json or live GET API with embeddings
-    2. Retrieve relevant orders based on the question
-    3. Use LLM to generate intelligent response
+    0. Bucket 1 fast path: date-range / country / last-N-days COUNT
+       questions are answered directly from live Postgres
+       (fn_getorders_regular), no LLM call, no Mongo. See
+       app/order_ask/bucket1_live.py — BUCKET1_PLAN.md.
+    0b. Dynamic query builder (env AVAAL_DYNAMIC_QUERY_BUILDER=1 only):
+       LLM -> validated JSON payload -> constrained Postgres query.
+       When enabled it OWNS every non-Bucket-1 order question — an
+       unsafe/unsupported question gets an honest message, never the
+       Mongo pipeline. Off by default → step 1 behaviour is unchanged.
+    1. Otherwise falls through to the existing Mongo + LLM pipeline.
 
     Send the same session_id and corporate_id on follow-up turns to keep memory
     (e.g. "uska status?" after looking up an order).
@@ -161,6 +169,49 @@ async def ask_order_question(query: OrderQuery):
             query.corporate_id,
             query.session_id,
         )
+
+        # --- Bucket 1 fast path: live Postgres, no LLM ---
+        try:
+            from app.order_ask.bucket1_live import try_answer as bucket1_try_answer
+
+            bucket1_result = await bucket1_try_answer(query.corporate_id, query.question)
+            if bucket1_result is not None:
+                logger.info("Bucket1 fast path answered: %s", bucket1_result.get("source"))
+                return {
+                    "answer": bucket1_result["answer"],
+                    "session_id": query.session_id,
+                    "source": bucket1_result["source"],
+                }
+        except postgres_client.TenantNotProvisionedError:
+            # Not one of our live-Postgres test tenants yet — fall through
+            # to the existing Mongo pipeline rather than failing the request.
+            pass
+        except Exception as bucket1_err:
+            # Bucket 1 is a best-effort fast path — any failure here should
+            # fall through to the normal pipeline, not break the request.
+            logger.warning("Bucket1 fast path failed, falling back: %s", bucket1_err)
+
+        # --- Dynamic query builder (env-flagged, off by default) ---
+        if os.environ.get("AVAAL_DYNAMIC_QUERY_BUILDER", "0").strip().lower() in (
+            "1", "true", "yes", "on",
+        ):
+            try:
+                from app.order_ask.dynamic_query_flow import run_dynamic_query_flow
+
+                dq_result = await run_dynamic_query_flow(
+                    query.corporate_id, query.question, query.session_id
+                )
+                logger.info("Dynamic query builder answered: %s", dq_result.get("source"))
+                return {
+                    "answer": dq_result["answer"],
+                    "session_id": query.session_id,
+                    "source": dq_result["source"],
+                }
+            except postgres_client.TenantNotProvisionedError:
+                # Not a live-Postgres tenant — fall through to Mongo pipeline.
+                pass
+
+        # --- Existing pipeline (Mongo-backed today) ---
         from app.order_ask.rag_engine import answer_order_question
 
         result = await asyncio.to_thread(
