@@ -25,21 +25,34 @@ from app.mongo_client import _to_python_types, get_mongo_collection
 logger = logging.getLogger("scripts.ingest.order")
 
 # ===================== CONFIG — edit these =====================
-FILE_PATH = r"D:\Desktop\OCR-LLM\AFN01514order.txt"
-DB_NAME = "AFN01514"
+FILE_PATH = r"D:\Desktop\OCR-LLM\AFMQAorder.txt"
+DB_NAME = "chatbot_db"
 COLLECTION_NAME = "Avaal_order"
 NAMESPACE = "avaal_orders"
 DUPLICATE_FIELD = "ordernumber"
 WITH_EMBEDDINGS = True
 SKIP_DUPLICATES = True
+# Only ingest records whose `createdon` falls within the last calendar month
+# (relative to "now"). Anything older that is present in the source file is
+# skipped — no embedding, no insert. Set to False to ingest every record.
+FILTER_RECENT_ONLY = True
+DATE_FIELD = "createdon"
+RECENT_MONTHS = 1
 EMBED_BATCH_SIZE = 25
 INSERT_BATCH_SIZE = 100
 # Titan Text Embeddings V2 accepts at most 8192 input tokens per request.
-# Cap the text sent for embedding safely below that ceiling (order text is
-# number/ID heavy, so it packs more tokens per character than prose).
-# The full record is still stored verbatim in `page_content`; only the
+# Order text is number/ID/punctuation heavy, so the tokenizer splits it far
+# more aggressively than prose — empirically ~1.5 chars per token (vs ~4 for
+# English text). A plain character cap therefore cannot guarantee we stay
+# under the token ceiling, so we do two things:
+#   1. Trim to MAX_EMBED_CHARS up front (cheap, handles the common case).
+#   2. If Bedrock still rejects a text for "Too many input tokens", shrink it
+#      further and retry (see `_embed_texts` / `_embed_one_with_retry`).
+# The full record is always stored verbatim in `page_content`; only the
 # embedding input is trimmed for unusually large orders.
-MAX_EMBED_CHARS = 18000
+MAX_EMBED_TOKENS = 8192
+EST_CHARS_PER_TOKEN = 1.4
+MAX_EMBED_CHARS = int(MAX_EMBED_TOKENS * EST_CHARS_PER_TOKEN * 0.85)  # ~9700
 # ===============================================================
 
 
@@ -90,6 +103,52 @@ def load_order_records(path: str) -> List[Dict[str, Any]]:
     return records
 
 
+def _subtract_months(moment: datetime.datetime, months: int) -> datetime.datetime:
+    """Return `moment` shifted back by whole calendar months.
+
+    The day-of-month is clamped when the target month is shorter (e.g. going
+    back one month from the 31st lands on the 28th/30th).
+    """
+    month_index = (moment.year * 12 + (moment.month - 1)) - months
+    year, month = divmod(month_index, 12)
+    month += 1
+    if month == 12:
+        next_month_first = datetime.datetime(year + 1, 1, 1)
+    else:
+        next_month_first = datetime.datetime(year, month + 1, 1)
+    last_day = (next_month_first - datetime.timedelta(days=1)).day
+    day = min(moment.day, last_day)
+    return moment.replace(year=year, month=month, day=day)
+
+
+def _parse_datetime(value: Any) -> datetime.datetime | None:
+    """Best-effort parse of an ISO-ish datetime string into an aware UTC dt."""
+    if isinstance(value, datetime.datetime):
+        dt = value
+    elif isinstance(value, str) and value.strip():
+        raw = value.strip().replace("Z", "+00:00")
+        try:
+            dt = datetime.datetime.fromisoformat(raw)
+        except ValueError:
+            try:
+                dt = datetime.datetime.fromisoformat(raw[:19])
+            except ValueError:
+                return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc)
+
+
+def is_recent_record(order: Dict[str, Any], cutoff: datetime.datetime) -> bool:
+    """True when the record's DATE_FIELD is on/after `cutoff` (or unparseable)."""
+    created = _parse_datetime(order.get(DATE_FIELD))
+    if created is None:
+        return False
+    return created >= cutoff
+
+
 def build_page_content(order: Dict[str, Any]) -> str:
     """Build RAG text from all keys present in the source record."""
     lines = []
@@ -101,7 +160,7 @@ def build_page_content(order: Dict[str, Any]) -> str:
 
 
 def _truncate_for_embedding(text: str) -> str:
-    """Keep embedding input under the Titan 8192-token limit."""
+    """First-pass trim to keep embedding input near the Titan 8192-token limit."""
     if len(text) <= MAX_EMBED_CHARS:
         return text
     logger.warning(
@@ -111,6 +170,46 @@ def _truncate_for_embedding(text: str) -> str:
         MAX_EMBED_CHARS,
     )
     return text[:MAX_EMBED_CHARS]
+
+
+def _is_token_limit_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "input token" in msg or "too many input tokens" in msg
+
+
+def _embed_one_with_retry(embeddings, text: str) -> List[float]:
+    """Embed a single text, shrinking and retrying if Bedrock rejects it."""
+    attempt = text
+    for _ in range(8):
+        try:
+            return embeddings.embed_query(attempt)
+        except Exception as exc:  # noqa: BLE001
+            if not _is_token_limit_error(exc):
+                raise
+            new_len = max(400, int(len(attempt) * 0.6))
+            if new_len >= len(attempt):
+                raise
+            logger.warning(
+                "Embedding rejected for token limit (%s chars); retrying with %s",
+                len(attempt),
+                new_len,
+            )
+            attempt = attempt[:new_len]
+    raise RuntimeError("Could not shrink text below the Titan token limit")
+
+
+def _embed_texts(embeddings, texts: List[str]) -> List[List[float]]:
+    """Batch-embed; on a token-limit rejection fall back to per-text retry."""
+    try:
+        return embeddings.embed_documents(texts)
+    except Exception as exc:  # noqa: BLE001
+        if not _is_token_limit_error(exc):
+            raise
+        logger.warning(
+            "Batch embed hit the token limit; falling back to per-text embedding "
+            "with shrink-and-retry"
+        )
+        return [_embed_one_with_retry(embeddings, t) for t in texts]
 
 
 def build_document(
@@ -170,9 +269,24 @@ def ingest_orders() -> Dict[str, Any]:
         )
 
     embeddings = get_embeddings() if WITH_EMBEDDINGS else None
-    ingested_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ingested_at = now.isoformat()
+    recent_cutoff = (
+        _subtract_months(now, RECENT_MONTHS).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        if FILTER_RECENT_ONLY
+        else None
+    )
+    if recent_cutoff is not None:
+        logger.info(
+            "Only ingesting records with %s >= %s",
+            DATE_FIELD,
+            recent_cutoff.isoformat(),
+        )
     inserted = 0
     skipped = 0
+    skipped_old = 0
     batch_docs: List[Dict[str, Any]] = []
 
     def flush_batch() -> None:
@@ -189,6 +303,12 @@ def ingest_orders() -> Dict[str, Any]:
         pending: List[Dict[str, Any]] = []
 
         for order in chunk:
+            if recent_cutoff is not None and not is_recent_record(
+                order, recent_cutoff
+            ):
+                skipped_old += 1
+                continue
+
             key_value = order.get(DUPLICATE_FIELD)
             key_str = (
                 str(key_value).strip()
@@ -214,7 +334,7 @@ def ingest_orders() -> Dict[str, Any]:
             for order in pending
         ]
         if embeddings is not None:
-            vectors = embeddings.embed_documents(texts)
+            vectors = _embed_texts(embeddings, texts)
         else:
             vectors = [[] for _ in pending]
 
@@ -254,6 +374,10 @@ def ingest_orders() -> Dict[str, Any]:
         "records_loaded": len(records),
         "documents_inserted": inserted,
         "documents_skipped_duplicates": skipped,
+        "documents_skipped_old": skipped_old,
+        "recent_filter": (
+            recent_cutoff.isoformat() if recent_cutoff is not None else None
+        ),
         "documents_in_namespace": stored,
         "with_embeddings": WITH_EMBEDDINGS,
         "skip_duplicates": SKIP_DUPLICATES,
