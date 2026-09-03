@@ -60,7 +60,7 @@ from app.mongo_client import _to_python_types, get_mongo_collection
 logger = logging.getLogger("app.sync.order_live_api")
 
 # ===================== CONFIG — edit these =====================
-API_BASE = "http://173.209.153.108:5000"
+API_BASE = "https://beta.afmsuite.ai"
 LISTORDER_PATH = "/api/Order/listorder"
 API_VERSION = "1.0"
 # Fixed per requirement — this daemon syncs exactly one tenant.
