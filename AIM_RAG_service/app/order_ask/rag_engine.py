@@ -119,22 +119,46 @@ def _invoke_anthropic(
     return response.content if hasattr(response, "content") else str(response)
 
 
+_WORD_RE = re.compile(r"\S+\s+")
+
+
 def _invoke_anthropic_stream(
     prompt_text: str,
     variables: Dict[str, Any],
     max_tokens: int = 300,
 ):
-    """Same call as _invoke_anthropic but yields text pieces as Claude streams them."""
+    """
+    Same call as _invoke_anthropic but yields the answer word-by-word (each
+    piece = one word + its trailing whitespace) instead of Claude's raw,
+    multi-word network chunks — gives a smooth one-word-at-a-time typing
+    effect on the client.
+
+    Claude's stream() yields arbitrarily-sized text pieces (several words at
+    once, or a partial word split across pieces) — buffer them and only emit
+    a word once we've seen the whitespace after it, so a word is never split
+    across two SSE events.
+    """
     llm = get_anthropic_llm()
     try:
         llm_bound = llm.bind(max_tokens=max(32, int(max_tokens)))
     except Exception:
         llm_bound = llm
     chain = PromptTemplate.from_template(prompt_text) | llm_bound
+
+    buffer = ""
     for chunk in chain.stream(variables):
         text = chunk.content if hasattr(chunk, "content") else str(chunk)
-        if text:
-            yield text
+        if not text:
+            continue
+        buffer += text
+        last_end = 0
+        for m in _WORD_RE.finditer(buffer):
+            yield m.group(0)
+            last_end = m.end()
+        buffer = buffer[last_end:]
+    if buffer:
+        # Last word of the answer has no trailing whitespace to wait for.
+        yield buffer
 
 
 def _tenant_fields(
