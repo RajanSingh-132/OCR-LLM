@@ -56,6 +56,19 @@ def custom_openapi():
 app.openapi = custom_openapi
 
 
+@app.get("/api/v1/health")
+async def health():
+    """
+    Warm-up / keep-alive ping — no Mongo, no Bedrock, no Anthropic call.
+
+    Call this (from the frontend on AI-assistant panel open, and/or from an
+    external cron pinger) to force Vercel to spin up / keep warm the
+    serverless container ahead of the user's real /orders/ask(/stream) call,
+    so that call doesn't pay the cold-start cost.
+    """
+    return {"status": "ok"}
+
+
 @app.post("/api/v1/upload/pdf_dynamic_extract")
 async def upload_pdf_dynamic_extract(
         request: Request,
