@@ -1,8 +1,12 @@
 import os
+import json
 import logging
 import asyncio
+import threading
+import queue
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.lan_chain_rag_semantic_parent import (
@@ -180,3 +184,98 @@ async def ask_order_question(query: OrderQuery):
             status_code=500,
             detail=f"Failed to process order query: {str(e)}"
         )
+
+
+_STREAM_SENTINEL = object()
+
+
+async def _sse_from_sync_generator(sync_gen_factory):
+    """
+    Bridges a blocking sync generator (Mongo + Bedrock + Claude .stream() calls)
+    into an async generator the event loop can await on, without blocking it.
+
+    A worker thread drives the sync generator and pushes each event onto a
+    plain queue.Queue; this coroutine awaits queue.get() via the default
+    executor so other requests keep being served while we wait for the next
+    chunk.
+    """
+    q: "queue.Queue" = queue.Queue()
+
+    def worker():
+        try:
+            for event in sync_gen_factory():
+                q.put(event)
+        except Exception as exc:  # noqa: BLE001 — surface any failure to the client
+            q.put({"type": "error", "error": str(exc)})
+        finally:
+            q.put(_STREAM_SENTINEL)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    loop = asyncio.get_event_loop()
+    while True:
+        event = await loop.run_in_executor(None, q.get)
+        if event is _STREAM_SENTINEL:
+            break
+        yield event
+
+
+@app.post("/api/v1/orders/ask/stream")
+async def ask_order_question_stream(query: OrderQuery):
+    """
+    Same Q&A pipeline as POST /api/v1/orders/ask, but streamed over
+    Server-Sent Events (SSE) so the answer appears token-by-token instead of
+    only after the full reply is ready.
+
+    Each SSE frame is `data: <json>\\n\\n` with one of:
+      {"type": "chunk", "text": "..."}     — a piece of the answer text; append
+                                              these in order to build the reply
+                                              live as it streams in
+      {"type": "final", "data": {...}}     — the complete response object,
+                                              identical in shape to what
+                                              POST /api/v1/orders/ask returns
+                                              (session_id, matches, calculation,
+                                              analytics, etc.) — sent once, last
+      {"type": "error", "error": "..."}    — sent instead of "final" on failure
+
+    Everything before the last Claude call (tenant/session resolve, query
+    planner, Mongo retrieval/tools) still runs to completion first — only the
+    final answer-generation call actually streams token-by-token.
+    """
+    logger.info(
+        "Received Avaal order query (stream): %s | corporate_id=%s | session_id=%s",
+        query.question,
+        query.corporate_id,
+        query.session_id,
+    )
+    from app.order_ask.rag_engine import stream_order_question
+
+    async def event_source():
+        try:
+            async for event in _sse_from_sync_generator(
+                lambda: stream_order_question(
+                    query.question, True, 10, query.session_id, query.corporate_id
+                )
+            ):
+                etype = event.get("type")
+                if etype == "chunk":
+                    payload = {"type": "chunk", "text": event.get("text", "")}
+                elif etype == "final":
+                    payload = {"type": "final", "data": event.get("response")}
+                else:
+                    payload = {"type": "error", "error": event.get("error") or "unknown error"}
+                yield f"data: {json.dumps(payload)}\n\n"
+        except Exception as exc:
+            logger.error(f"Error streaming order query: {str(exc)}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # nginx: don't buffer the whole response before forwarding it
+            "X-Accel-Buffering": "no",
+        },
+    )

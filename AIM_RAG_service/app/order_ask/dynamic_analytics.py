@@ -17,6 +17,7 @@ trip-distance, customer ranking).
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import re
@@ -53,6 +54,9 @@ _BUCKET_UNITS = frozenset({"day", "week", "month"})
 _ISO_DATE_FIELDS = frozenset(
     {"orderdate", "createdon", "modifiedon", "enquirydate", "quotationdate"}
 )
+# Value shapes used to auto-detect date columns from sampled data (any name).
+_ISO_DATE_VALUE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}|$)")
+_US_DATE_VALUE_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}\b")
 
 _SKIP_FIELDS = frozenset(
     {"_id", "embedding", "page_content", "metadata", "namespace"}
@@ -142,7 +146,12 @@ def _norm(name: Any) -> str:
 
 def _record_field(fields: Dict[str, Dict[str, Any]], path: str, value: Any) -> None:
     info = fields.setdefault(
-        path, {"n": 0, "num": 0, "numstr": 0, "values": set(), "examples": []}
+        path,
+        {
+            "n": 0, "num": 0, "numstr": 0,
+            "iso_dt": 0, "us_dt": 0, "native_dt": 0,
+            "values": set(), "examples": [],
+        },
     )
     if value in (None, ""):
         return
@@ -151,6 +160,14 @@ def _record_field(fields: Dict[str, Dict[str, Any]], path: str, value: Any) -> N
         info["num"] += 1
     elif _looks_numeric_string(value):
         info["numstr"] += 1
+    if isinstance(value, (_dt.datetime, _dt.date)):
+        info["native_dt"] += 1
+    elif isinstance(value, str):
+        _s = value.strip()
+        if _ISO_DATE_VALUE_RE.match(_s):
+            info["iso_dt"] += 1
+        elif _US_DATE_VALUE_RE.match(_s):
+            info["us_dt"] += 1
     if isinstance(value, (str, int, float)) and not isinstance(value, bool):
         if len(info["values"]) < 2000:
             info["values"].add(str(value))
@@ -223,6 +240,27 @@ def _sample_schema(sample_size: int) -> Dict[str, Any]:
         )
         in_array = any(key == p or key.startswith(p + ".") for p in array_prefixes)
         groupable = (not id_like) and 1 <= distinct <= GROUPABLE_MAX_DISTINCT
+
+        iso_dt = info.get("iso_dt", 0)
+        us_dt = info.get("us_dt", 0)
+        native_dt = info.get("native_dt", 0)
+        date_hits = iso_dt + us_dt + native_dt
+        # Uniqueness (id_like) is irrelevant for date-ness — timestamps are
+        # naturally near-unique but must still be range-filterable.
+        is_date = (
+            date_hits > 0
+            and date_hits >= 0.8 * n
+            and not numeric
+        )
+        if not is_date:
+            date_format = None
+        elif us_dt >= iso_dt and us_dt >= native_dt:
+            date_format = "us"
+        elif native_dt >= iso_dt:
+            date_format = "native"
+        else:
+            date_format = "iso"
+
         schema["fields"][key] = {
             "numeric": bool(numeric),
             "string_numeric": bool(string_numeric),
@@ -230,6 +268,8 @@ def _sample_schema(sample_size: int) -> Dict[str, Any]:
             "groupable": bool(groupable),
             "id_like": bool(id_like),
             "array": bool(in_array),
+            "date": bool(is_date),
+            "date_format": date_format,
             "examples": info["examples"],
         }
 
@@ -282,6 +322,33 @@ def _array_prefix_for(field: str, schema: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _field_info(name: Any, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Field metadata by exact name, else by last dotted segment."""
+    if not isinstance(name, str):
+        return None
+    fields = schema.get("fields", {})
+    info = fields.get(name)
+    if info is not None:
+        return info
+    seg = name.split(".")[-1]
+    for key, val in fields.items():
+        if key == seg or key.split(".")[-1] == seg:
+            return val
+    return None
+
+
+def is_date_field(name: Any, schema: Dict[str, Any]) -> bool:
+    """True when the sampled schema flags this column as holding dates."""
+    info = _field_info(name, schema)
+    return bool(info and info.get("date"))
+
+
+def date_format_for(name: Any, schema: Dict[str, Any]) -> str:
+    """Detected storage format of a date column: 'iso' | 'us' | 'native'."""
+    info = _field_info(name, schema)
+    return (info or {}).get("date_format") or "iso"
+
+
 def get_orders_schema(*, force: bool = False) -> Dict[str, Any]:
     """Sampled Avaal_order field schema for the active tenant (cached, TTL)."""
     tenant = require_tenant()
@@ -317,10 +384,11 @@ def _schema_for_prompt(
         "dotted names are nested — you may use them):"
     ]
     items = list(schema.get("fields", {}).items())
-    # numeric first, then groupable, then top-level, then the rest
+    # numeric first, then date, then groupable, then top-level, then the rest
     items.sort(
         key=lambda kv: (
             not kv[1]["numeric"],
+            not kv[1].get("date"),
             not kv[1]["groupable"],
             "." in kv[0],
             kv[0],
@@ -330,6 +398,8 @@ def _schema_for_prompt(
         tags: List[str] = []
         if info["numeric"]:
             tags.append("numeric")
+        if info.get("date"):
+            tags.append(f"date({info.get('date_format') or 'iso'})")
         if info["groupable"]:
             tags.append(f"groupable(~{info['distinct_in_sample']} distinct)")
         if info["id_like"]:
@@ -360,6 +430,7 @@ Return ONLY JSON (no prose, no code fence):
   "limit": <int 1-100>
 }}
 - date_bucket -> daily/weekly/monthly time series (operation "group", group_by may be []).
+  "field" may be ANY field tagged date(...) above (orderdate, createdon, pickupdate, ...).
 - having -> keep only groups meeting a threshold ("customers with > 5 orders").
 
 Field notes:
@@ -526,9 +597,15 @@ def _validate_spec(
         fld = R(db.get("field"))
         unit = str(db.get("unit") or "day").lower()
         if fld and unit in _BUCKET_UNITS and (
-            fld in iso_date_fields or fld.split(".")[-1] in iso_date_fields
+            is_date_field(fld, schema)
+            or fld in iso_date_fields
+            or fld.split(".")[-1] in iso_date_fields
         ):
-            out["date_bucket"] = {"field": fld, "unit": unit}
+            out["date_bucket"] = {
+                "field": fld,
+                "unit": unit,
+                "format": date_format_for(fld, schema),
+            }
             if op == "metric":
                 out["operation"] = op = "group"
                 out.setdefault("group_by", [])
@@ -611,18 +688,48 @@ def _group_sort_doc(
     return {default_key: -1}
 
 
-def _bucket_expr(field: str, unit: str) -> Dict[str, Any]:
-    """Truncate an ISO date-string field to a day / week / month label."""
+def _bucket_expr(field: str, unit: str, fmt: str = "iso") -> Dict[str, Any]:
+    """Truncate a date field to a day / week / month label.
+
+    ``fmt`` picks how the stored value is read: ISO strings via string slicing,
+    US strings ("08/27/2026 10:48 AM") via ``$dateFromString`` on the date part.
+    """
+    if fmt == "us":
+        as_date = {
+            "$dateFromString": {
+                "dateString": {
+                    "$arrayElemAt": [
+                        {"$split": [{"$toString": f"${field}"}, " "]}, 0
+                    ]
+                },
+                "format": "%m/%d/%Y",
+                "onError": None,
+                "onNull": None,
+            }
+        }
+        unit_fmt = {"day": "%Y-%m-%d", "month": "%Y-%m", "week": "%G-W%V"}[unit]
+        return {
+            "$dateToString": {"format": unit_fmt, "date": as_date, "onNull": None}
+        }
+
     src = {"$toString": f"${field}"}
     if unit == "day":
         return {"$substrBytes": [src, 0, 10]}          # 2026-08-28
     if unit == "month":
         return {"$substrBytes": [src, 0, 7]}           # 2026-08
-    # week — ISO year-week (needs $toDate; ok on ISO strings)
+    # week — ISO year-week; parse only the yyyy-mm-dd head so 6-digit
+    # microseconds / timezone offsets in the raw value can't break $toDate.
     return {
         "$dateToString": {
             "format": "%G-W%V",
-            "date": {"$toDate": f"${field}"},
+            "date": {
+                "$convert": {
+                    "input": {"$substrBytes": [src, 0, 10]},
+                    "to": "date",
+                    "onError": None,
+                    "onNull": None,
+                }
+            },
         }
     }
 
@@ -680,7 +787,9 @@ def _build_pipeline(
     }
     bucket = spec.get("date_bucket")
     if bucket:
-        add_fields["__bucket"] = _bucket_expr(bucket["field"], bucket["unit"])
+        add_fields["__bucket"] = _bucket_expr(
+            bucket["field"], bucket["unit"], bucket.get("format") or "iso"
+        )
     if add_fields:
         pipeline.append({"$addFields": add_fields})
 

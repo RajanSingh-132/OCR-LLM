@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict
 
 from app.domains.models import DomainProfile
 
@@ -146,10 +146,6 @@ DOMAINS: Dict[str, DomainProfile] = {
 }
 
 DEFAULT_DOMAIN = "orders"
-
-
-def list_domains() -> List[str]:
-    return list(DOMAINS.keys())
 
 
 def get_domain_profile(domain: str) -> DomainProfile:

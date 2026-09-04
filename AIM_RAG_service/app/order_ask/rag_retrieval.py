@@ -2,7 +2,10 @@
 Avaal orders retrieval helpers for /api/v1/orders/ask.
 
 Uses dedicated Mongo collection Avaal_order + namespace avaal_orders.
-Builds on MongoVectorStore from app.rag_retrieval (PDF store) without changing PDF flow.
+Semantic (embedding-based) retrieval itself lives in app/domains/retrieval.py
+(domain-generic); this module holds the order-specific Mongo match builder
+(_base_order_match) plus lookup/list/format helpers used by the query
+planner and tools layer.
 """
 from __future__ import annotations
 
@@ -11,10 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.documents import Document
 
-from app.embedding_client import get_models
 from app.order_ask.checkpoint import checkpoint
-from app.order_ask.config import AVAAL_RAG_MIN_SCORE
-from app.rag_retrieval import MongoVectorStore
 from app.tenants.router import (
     get_orders_collection,
     get_orders_metadata_type,
@@ -26,59 +26,6 @@ _LIST_PROJECTION = {
     "embedding": 0,
     "page_content": 0,
 }
-
-
-def get_avaal_vectorstore(embeddings=None) -> Optional[MongoVectorStore]:
-    """Return vectorstore bound to Avaal_order / avaal_orders if data exists."""
-    if embeddings is None:
-        embeddings, _ = get_models()
-
-    collection = get_orders_collection()
-    namespace = get_orders_namespace()
-    metadata_type = get_orders_metadata_type()
-    exists = collection.count_documents(
-        {"namespace": namespace, "metadata.type": metadata_type},
-        limit=1,
-    ) > 0
-    if not exists:
-        return None
-
-    return MongoVectorStore(
-        collection=collection,
-        embeddings=embeddings,
-        namespace=namespace,
-    )
-
-
-def retrieve_avaal_orders(
-    question: str,
-    k: int = 10,
-    embeddings=None,
-    min_score: Optional[float] = None,
-) -> List[Document]:
-    """Semantic retrieve top-k Avaal order chunks (weak matches dropped)."""
-    vectorstore = get_avaal_vectorstore(embeddings=embeddings)
-    if vectorstore is None:
-        checkpoint("RAG", "no vectorstore / empty Avaal_order")
-        return []
-    threshold = AVAAL_RAG_MIN_SCORE if min_score is None else min_score
-    docs = vectorstore.similarity_search(
-        query=question, k=k, fetch_k=max(k * 4, 40)
-    )
-    kept: List[Document] = []
-    for doc in docs:
-        score = (doc.metadata or {}).get("similarity_score")
-        if score is None or float(score) >= threshold:
-            kept.append(doc)
-    checkpoint(
-        "RAG",
-        "semantic retrieve",
-        requested=k,
-        raw=len(docs),
-        kept=len(kept),
-        min_score=threshold,
-    )
-    return kept
 
 
 def _side_address_ors(
@@ -275,6 +222,7 @@ def search_orders(
     ascending: bool = False,
     *,
     match: Optional[Dict[str, Any]] = None,
+    sort_expr: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Structured Mongo list/search — accurate filtered order lists.
@@ -282,6 +230,10 @@ def search_orders(
 
     Pass a prebuilt ``match`` to bypass ``_base_order_match(filters)`` (used by
     the LLM query planner, which builds its own operator-DSL match).
+
+    Pass ``sort_expr`` (a Mongo aggregation expression) to sort on a computed
+    value instead of a raw field — e.g. a parsed date for US-format date columns
+    whose lexical order is meaningless.
     """
     limit = max(1, min(int(limit or 15), 50))
     allowed_sort = {
@@ -299,18 +251,30 @@ def search_orders(
         "customername",
         "orderstatus",
     }
-    if sort_by not in allowed_sort:
+    if sort_expr is None and sort_by not in allowed_sort:
         sort_by = "orderid"
 
     collection = get_orders_collection()
     if match is None:
         match = _base_order_match(filters)
     total = collection.count_documents(match)
-    cursor = (
-        collection.find(match, _LIST_PROJECTION)
-        .sort(sort_by, 1 if ascending else -1)
-        .limit(limit)
-    )
+    if sort_expr is not None:
+        cursor = collection.aggregate(
+            [
+                {"$match": match},
+                {"$addFields": {"__sort": sort_expr}},
+                {"$sort": {"__sort": 1 if ascending else -1, "orderid": -1}},
+                {"$limit": limit},
+                {"$project": _LIST_PROJECTION},
+            ],
+            maxTimeMS=8000,
+        )
+    else:
+        cursor = (
+            collection.find(match, _LIST_PROJECTION)
+            .sort(sort_by, 1 if ascending else -1)
+            .limit(limit)
+        )
     rows = []
     for doc in cursor:
         rows.append(
@@ -358,11 +322,6 @@ def search_orders(
         "returned": len(rows),
         "orders": rows,
     }
-
-
-def list_recent_orders(limit: int = 10) -> Dict[str, Any]:
-    """Most recent orders by orderid desc."""
-    return search_orders(filters=None, limit=limit, sort_by="orderid", ascending=False)
 
 
 def format_order_list_for_context(payload: Dict[str, Any]) -> str:

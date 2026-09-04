@@ -310,7 +310,3 @@ def find_state_in_text(text: str) -> str | None:
 def format_field_catalog_for_prompt() -> str:
     """Compact JSON block injected into answer / intent prompts."""
     return json.dumps(FILTERABLE_FIELDS_JSON, ensure_ascii=False, indent=2)
-
-
-def catalog_filter_keys() -> List[str]:
-    return [f["key"] for f in FILTERABLE_FIELDS_JSON["fields"]]

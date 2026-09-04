@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.prompts import PromptTemplate
 
-from app.embedding_client import get_anthropic_llm
+from app.embedding_client import get_planner_llm
 from app.order_ask.checkpoint import checkpoint
 from app.order_ask.dynamic_analytics import (
     AGG_TIMEOUT_MS,
@@ -273,7 +273,7 @@ JSON:"""
 
 
 def _plan_llm(question: str, history: str, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    llm = get_anthropic_llm()
+    llm = get_planner_llm()
     chain = PromptTemplate.from_template(_PLANNER_PROMPT) | llm
     raw = chain.invoke(
         {

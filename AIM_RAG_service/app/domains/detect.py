@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 from langchain_core.prompts import PromptTemplate
 
 from app.domains.prompts import DOMAIN_CLASSIFY_PROMPT
-from app.domains.registry import DEFAULT_DOMAIN, DOMAINS, get_domain_profile
+from app.domains.registry import DEFAULT_DOMAIN, DOMAINS
 from app.embedding_client import get_anthropic_llm
 from app.order_ask.checkpoint import checkpoint
 
@@ -282,7 +282,3 @@ def detect_domain(
         history_hint=history_hint,
         chat_history=chat_history,
     )["domain"]
-
-
-def domain_label(domain: str) -> str:
-    return get_domain_profile(domain).label
