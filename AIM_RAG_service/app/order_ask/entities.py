@@ -46,8 +46,3 @@ def extract_entities(
 def entities_to_mongo_filters(entities: Dict[str, Any], domain: Optional[str] = None) -> Dict[str, Any]:
     rules = get_domain_rules(domain or get_active_domain())
     return rules.entities_to_mongo_filters(entities)
-
-
-def has_geo_or_list_filters(entities: Dict[str, Any], domain: Optional[str] = None) -> bool:
-    rules = get_domain_rules(domain or get_active_domain())
-    return rules.has_list_filters(entities)

@@ -32,12 +32,7 @@ from app.order_ask.memory import (
     new_session_id,
     save_turn,
 )
-from app.order_ask.prompts import (
-    ORDER_ASK_PROMPT,
-    ORDER_FORMULA_PROMPT,
-    ORDER_GREETING_PROMPT,
-    ORDERBOT_CONVERSATION_PROMPT,
-)
+from app.order_ask.prompts import ORDER_FORMULA_PROMPT
 from app.domains.detect import detect_domain
 from app.domains.lookup import get_domain_prompts, get_lookup_module
 from app.order_ask.tools import execute_tools, plan_tools
@@ -290,13 +285,50 @@ def answer_order_question(
                 prior=replay_of[:80],
             )
 
-        # 2) Route — LLM query planner is primary for orders + invoices; the
-        #    regex engine (understand_question + extract_entities + plan_tools)
-        #    stays wired as the automatic fallback.
+        # 2) Route — a deterministic fast-path handles plain "how many
+        #    <records> were created <period>" questions first (single Mongo
+        #    count_documents(), zero LLM calls); the LLM query planner is
+        #    primary for everything else; the regex engine
+        #    (understand_question + extract_entities + plan_tools) stays
+        #    wired as the automatic fallback.
         planner_plan = None
         precomputed_tool_result = None
         execute_query_plan = None
-        if domain in ("orders", "invoices", "trips") and (
+        fast_path_hit = False
+        if domain in ("orders", "invoices", "trips") and not replay_of:
+            try:
+                from app.order_ask.fast_path import try_count_fast_path
+
+                precomputed_tool_result = try_count_fast_path(
+                    effective_question, domain
+                )
+            except Exception as exc:
+                logger.warning("Fast-path count check failed: %s", exc, exc_info=True)
+                precomputed_tool_result = None
+            if precomputed_tool_result is not None:
+                fast_path_hit = True
+                intent = "analytics"
+                style = "short"
+                max_tokens = 150
+                retrieve_k = 0
+                entities = {"analytics": "dynamic"}
+                # Defensive: nothing downstream should read this for the
+                # fast-path (the "more follow-up" branch can't co-match a
+                # count question), but keep it defined to avoid a NameError
+                # if that ever changes.
+                intent_info = {
+                    "intent": intent,
+                    "response_style": style,
+                    "max_tokens_hint": max_tokens,
+                    "retrieve_k": retrieve_k,
+                }
+                checkpoint(
+                    "ROUTE",
+                    "deterministic fast-path — LLM planner skipped",
+                    domain=domain,
+                )
+
+        if not fast_path_hit and domain in ("orders", "invoices", "trips") and (
             replay_of
             or (
                 classify_intent_common(question) is None
@@ -357,7 +389,7 @@ def answer_order_question(
                 planner_plan = None
                 precomputed_tool_result = None
 
-        if planner_plan is None:
+        if planner_plan is None and not fast_path_hit:
             # 2b) Understand intent (regex + Claude fallback)
             intent_info = understand_question(effective_question, history=history)
             intent = intent_info.get("intent") or "open_qa"

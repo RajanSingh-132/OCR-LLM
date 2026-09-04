@@ -98,10 +98,6 @@ def merge_session_entities(
     return entities
 
 
-def _status_filter(field: str, canonical: str) -> Dict[str, Any]:
-    return {field: {"$regex": f"^{re.escape(canonical)}$", "$options": "i"}}
-
-
 def _text_filter(field: str, value: str) -> Dict[str, Any]:
     return {field: {"$regex": re.escape(value.strip()), "$options": "i"}}
 
