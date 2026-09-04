@@ -32,6 +32,7 @@ config_file/server_com.json
 
 # Logs
 *.log
+*.log.*
 logs/
 
 # Test outputs

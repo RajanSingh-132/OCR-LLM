@@ -119,6 +119,24 @@ def _invoke_anthropic(
     return response.content if hasattr(response, "content") else str(response)
 
 
+def _invoke_anthropic_stream(
+    prompt_text: str,
+    variables: Dict[str, Any],
+    max_tokens: int = 300,
+):
+    """Same call as _invoke_anthropic but yields text pieces as Claude streams them."""
+    llm = get_anthropic_llm()
+    try:
+        llm_bound = llm.bind(max_tokens=max(32, int(max_tokens)))
+    except Exception:
+        llm_bound = llm
+    chain = PromptTemplate.from_template(prompt_text) | llm_bound
+    for chunk in chain.stream(variables):
+        text = chunk.content if hasattr(chunk, "content") else str(chunk)
+        if text:
+            yield text
+
+
 def _tenant_fields(
     tenant: Optional[TenantConfig],
     corporate_id: str = "",
@@ -161,15 +179,25 @@ def _response(
     }
 
 
-def answer_order_question(
+def _answer_order_question_gen(
     question: str,
     conversational: bool = True,
     k: int = 10,
     session_id: Optional[str] = None,
     corporate_id: Optional[str] = None,
-) -> Dict[str, Any]:
+):
     """
-    Main Q&A entry for Avaal orders (conversation + accurate lists + tools).
+    Generator core for /api/v1/orders/ask (conversation + accurate lists + tools).
+
+    Yields events while it runs:
+      {"type": "chunk", "text": "..."}   — a piece of the answer as Claude streams it
+      {"type": "final", "response": {...}} — the full response dict (same shape the
+                                              non-streaming API has always returned),
+                                              yielded exactly once, last.
+
+    `answer_order_question()` below drains this and returns only the final dict
+    (existing non-streaming behavior, unchanged). `stream_order_question()` exposes
+    the raw events for the SSE endpoint.
     """
     timer = CheckpointTimer("ask")
     question = (question or "").strip()
@@ -187,7 +215,7 @@ def answer_order_question(
     )
 
     if not corporate_id:
-        return _response(
+        yield {"type": "final", "response": _response(
             tenant=None,
             corporate_id=corporate_id,
             session_id=session_id,
@@ -199,12 +227,13 @@ def answer_order_question(
             calculation=None,
             list_result=None,
             tools_used=[],
-        )
+        )}
+        return
 
     try:
         tenant = get_tenant_config(corporate_id)
     except InvalidCorporateIdError as exc:
-        return _response(
+        yield {"type": "final", "response": _response(
             tenant=None,
             corporate_id=corporate_id,
             session_id=session_id,
@@ -216,7 +245,8 @@ def answer_order_question(
             calculation=None,
             list_result=None,
             tools_used=[],
-        )
+        )}
+        return
 
     checkpoint(
         "TENANT",
@@ -227,7 +257,7 @@ def answer_order_question(
     )
 
     if not question:
-        return _response(
+        yield {"type": "final", "response": _response(
             tenant=tenant,
             corporate_id=corporate_id,
             session_id=session_id,
@@ -239,14 +269,15 @@ def answer_order_question(
             calculation=None,
             list_result=None,
             tools_used=[],
-        )
+        )}
+        return
 
     # 1) Conversation memory
     session = load_session(session_id)
     session_id = session["session_id"]
     stored_corporate_id = (session.get("corporate_id") or "").strip()
     if stored_corporate_id and stored_corporate_id != corporate_id:
-        return _response(
+        yield {"type": "final", "response": _response(
             tenant=tenant,
             corporate_id=corporate_id,
             session_id=session_id,
@@ -261,7 +292,8 @@ def answer_order_question(
             calculation=None,
             list_result=None,
             tools_used=[],
-        )
+        )}
+        return
 
     history = format_history_for_prompt(session.get("turns") or [])
     domain = detect_domain(
@@ -516,13 +548,18 @@ def answer_order_question(
                     domain,
                     "Please provide the number or id and I’ll look it up for you.",
                 )
+                yield {"type": "chunk", "text": answer}
             else:
                 # Fast path: short greeting prompt only — no DB, no heavy CORE policy.
-                answer = _invoke_anthropic(
+                parts = []
+                for piece in _invoke_anthropic_stream(
                     domain_prompts.greeting,
                     {"question": question},
                     max_tokens=min(max_tokens, 120),
-                )
+                ):
+                    parts.append(piece)
+                    yield {"type": "chunk", "text": piece}
+                answer = "".join(parts)
             timer.mark("LLM_DONE", mode=intent)
             save_turn(
                 session_id,
@@ -535,7 +572,7 @@ def answer_order_question(
                 intent=intent,
             )
             timer.mark("ASK_END", "complete")
-            return _response(
+            yield {"type": "final", "response": _response(
                 tenant=tenant,
                 corporate_id=corporate_id,
                 session_id=session_id,
@@ -551,7 +588,8 @@ def answer_order_question(
                 analytics=None,
                 tools_used=[],
                 entities=entities,
-            )
+            )}
+            return
 
         # 4) Power-user tools (skipped when the query planner already ran them)
         if precomputed_tool_result is not None:
@@ -595,11 +633,15 @@ def answer_order_question(
 
         if not context_blocks:
             checkpoint("ROUTE", "no context — clarify")
-            answer = _invoke_anthropic(
+            parts = []
+            for piece in _invoke_anthropic_stream(
                 domain_prompts.greeting,
                 {"question": effective_question, "history": history},
                 max_tokens=min(max_tokens, 120),
-            )
+            ):
+                parts.append(piece)
+                yield {"type": "chunk", "text": piece}
+            answer = "".join(parts)
             timer.mark("LLM_DONE", mode="clarify")
             save_turn(
                 session_id,
@@ -613,7 +655,7 @@ def answer_order_question(
                 intent=intent,
             )
             timer.mark("ASK_END", "complete")
-            return _response(
+            yield {"type": "final", "response": _response(
                 tenant=tenant,
                 corporate_id=corporate_id,
                 session_id=session_id,
@@ -629,7 +671,8 @@ def answer_order_question(
                 analytics=None,
                 tools_used=tools_used,
                 entities=entities,
-            )
+            )}
+            return
 
         context = "\n\n".join(context_blocks)
         tools_label = ", ".join(tools_used) if tools_used else "none"
@@ -648,47 +691,47 @@ def answer_order_question(
             checkpoint("LLM", "Anthropic answer", mode=mode, domain=domain, max_tokens=max_tokens)
             if calc_payload and mode == "calculation" and not matches:
                 formula_prompt = domain_prompts.formula or ORDER_FORMULA_PROMPT
-                answer = _invoke_anthropic(
-                    formula_prompt,
-                    {
-                        "formula_catalog": list_formula_catalog_for_prompt(),
-                        "calculation_result": format_calculation_result_for_context(
-                            calc_payload
-                        ),
-                        "question": effective_question,
-                        "response_style": style,
-                        "history": history,
-                    },
-                    max_tokens=max_tokens,
-                )
+                stream_prompt = formula_prompt
+                stream_vars = {
+                    "formula_catalog": list_formula_catalog_for_prompt(),
+                    "calculation_result": format_calculation_result_for_context(
+                        calc_payload
+                    ),
+                    "question": effective_question,
+                    "response_style": style,
+                    "history": history,
+                }
             elif mode == "exact_record" and intent in lookup_intents:
-                answer = _invoke_anthropic(
+                stream_prompt = (
                     domain_prompts.lookup
                     or domain_prompts.conversation
-                    or domain_prompts.ask,
-                    {
-                        "context": context,
-                        "question": effective_question,
-                        "history": history,
-                    },
-                    max_tokens=max_tokens,
+                    or domain_prompts.ask
                 )
+                stream_vars = {
+                    "context": context,
+                    "question": effective_question,
+                    "history": history,
+                }
             else:
-                prompt = (
+                stream_prompt = (
                     domain_prompts.conversation if conversational else domain_prompts.ask
                 )
-                answer = _invoke_anthropic(
-                    prompt,
-                    {
-                        "context": context,
-                        "question": effective_question,
-                        "intent": intent,
-                        "response_style": style,
-                        "history": history,
-                        "tools_used": tools_label,
-                    },
-                    max_tokens=max_tokens,
-                )
+                stream_vars = {
+                    "context": context,
+                    "question": effective_question,
+                    "intent": intent,
+                    "response_style": style,
+                    "history": history,
+                    "tools_used": tools_label,
+                }
+
+            parts = []
+            for piece in _invoke_anthropic_stream(
+                stream_prompt, stream_vars, max_tokens=max_tokens
+            ):
+                parts.append(piece)
+                yield {"type": "chunk", "text": piece}
+            answer = "".join(parts)
         except Exception as exc:
             logger.error("Anthropic answer failed: %s", exc, exc_info=True)
             checkpoint("LLM", "FAILED", error=str(exc))
@@ -712,7 +755,7 @@ def answer_order_question(
         timer.mark("ASK_END", "complete", session_id=session_id)
         checkpoint("=" * 48, "")
 
-        return _response(
+        yield {"type": "final", "response": _response(
             tenant=tenant,
             corporate_id=corporate_id,
             session_id=session_id,
@@ -728,4 +771,50 @@ def answer_order_question(
             list_result=list_payload,
             tools_used=tools_used,
             entities=entities,
-        )
+        )}
+
+
+def answer_order_question(
+    question: str,
+    conversational: bool = True,
+    k: int = 10,
+    session_id: Optional[str] = None,
+    corporate_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Main Q&A entry for Avaal orders (conversation + accurate lists + tools).
+
+    Non-streaming — drains _answer_order_question_gen() and returns only its
+    final response dict. Behavior/signature unchanged from before streaming
+    was added; existing callers (e.g. POST /api/v1/orders/ask) need no changes.
+    """
+    final_response: Dict[str, Any] = {}
+    for event in _answer_order_question_gen(
+        question, conversational, k, session_id, corporate_id
+    ):
+        if event.get("type") == "final":
+            final_response = event["response"]
+    return final_response
+
+
+def stream_order_question(
+    question: str,
+    conversational: bool = True,
+    k: int = 10,
+    session_id: Optional[str] = None,
+    corporate_id: Optional[str] = None,
+):
+    """
+    Streaming Q&A entry — same pipeline as answer_order_question(), but yields
+    events as they happen instead of blocking for the full answer:
+
+      {"type": "chunk", "text": "..."}     — one piece of the answer text
+      {"type": "final", "response": {...}} — the complete response dict
+                                              (same shape answer_order_question()
+                                              returns), yielded once, last
+
+    Used by the SSE endpoint (POST /api/v1/orders/ask/stream).
+    """
+    yield from _answer_order_question_gen(
+        question, conversational, k, session_id, corporate_id
+    )
