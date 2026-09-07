@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.prompts import PromptTemplate
 
-from app.embedding_client import get_anthropic_llm
+from app.embedding_client import get_anthropic_llm, get_groq_llm
 from app.order_ask.checkpoint import checkpoint
 from app.order_ask.entities import entities_to_mongo_filters
 from app.order_ask.rag_retrieval import _base_order_match
@@ -461,10 +461,20 @@ JSON:"""
 
 
 def _plan(question: str, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    llm = get_anthropic_llm()
+    # ---- Claude (Anthropic) — disabled, kept for rollback ----
+    # llm = get_anthropic_llm()
+    # -------------------------------------------------------------------
+    llm = get_groq_llm()
     chain = PromptTemplate.from_template(_PLANNER_PROMPT) | llm
+    model_name = getattr(llm, "model", None) or getattr(llm, "model_name", None) or "?"
+    t0 = time.time()
     raw = chain.invoke(
         {"question": question, "schema": _schema_for_prompt(schema)}
+    )
+    print(
+        f"[GROQ_TIMING] dynamic-analytics plan call (model={model_name}) took "
+        f"{time.time() - t0:.2f}s",
+        flush=True,
     )
     text = raw.content if hasattr(raw, "content") else str(raw)
     text = (text or "").strip()

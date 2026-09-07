@@ -1,5 +1,5 @@
 import os
-# from langchain_groq import ChatGroq  # disabled: vision + JSON use Anthropic Sonnet
+from langchain_groq import ChatGroq  # final-answer LLM for /orders/ask(/stream)
 from langchain_anthropic import ChatAnthropic
 from langchain_aws import BedrockEmbeddings
 from dotenv import load_dotenv
@@ -11,9 +11,12 @@ _llm_cache = None
 _vision_llm_cache = {}
 _anthropic_llm_cache = None
 _planner_llm_cache = None
+_groq_llm_cache = None
 
-# Vision OCR + JSON extract + /orders/ask: Anthropic Claude (LLM_MODEL).
-# GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+# Vision OCR + JSON extract: Anthropic Claude (LLM_MODEL).
+# /orders/ask(/stream) final-answer generation: Groq (see get_groq_llm()).
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_LLM_MODEL = os.environ.get("GROQ_LLM_MODEL", "openai/gpt-oss-20b")
 # GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
 # GROQ_VISION_FALLBACK_MODELS = os.environ.get("GROQ_VISION_FALLBACK_MODELS", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -108,6 +111,40 @@ def get_planner_llm():
             )
             _planner_llm_cache = get_anthropic_llm()
     return _planner_llm_cache
+
+
+def get_groq_llm():
+    """
+    Groq — the LLM for /orders/ask(/stream): query planners (order/trip/
+    invoice), the intent-classify fallback, and the final answer generation
+    in rag_engine.py all use this client.
+    """
+    global _groq_llm_cache
+    if _groq_llm_cache is None:
+        if not GROQ_API_KEY:
+            raise ValueError(
+                "GROQ_API_KEY is not set. Add it in .env for the /orders/ask final answer."
+            )
+        _groq_llm_cache = ChatGroq(
+            model_name=GROQ_LLM_MODEL,
+            groq_api_key=GROQ_API_KEY,
+            temperature=0.0,
+            # gpt-oss models "think" before answering, burning part of
+            # max_tokens on hidden reasoning — low effort keeps most of the
+            # budget for the actual visible answer (esp. important for short
+            # intents like greeting, capped at ~120 tokens).
+            reasoning_effort="low",
+            # Observed 12-28s outlier calls that correlate with LangChain's
+            # default max_retries=2 silently retrying (with backoff) on
+            # transient Groq errors/rate-limits — each retry adds several
+            # seconds with nothing printed. Capping retries at 1 and giving
+            # each attempt a hard ceiling keeps worst-case latency bounded
+            # instead of silently stacking multiple slow attempts.
+            max_retries=1,
+            timeout=15,
+        )
+        print(f"[groq] get_groq_llm() ready — model={GROQ_LLM_MODEL}")
+    return _groq_llm_cache
 
 
 def get_vision_model_names():

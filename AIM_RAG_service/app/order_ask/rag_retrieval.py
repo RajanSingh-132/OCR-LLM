@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.documents import Document
 
+from app.domains.retrieval import compact_nested_value
 from app.order_ask.checkpoint import checkpoint
 from app.tenants.router import (
     get_orders_collection,
@@ -515,6 +516,11 @@ def format_order_doc_for_context(doc: Dict[str, Any], max_fields: int = 120) -> 
         nonlocal lines
         if key in skip or key in seen:
             return
+        if isinstance(value, (list, dict)):
+            # truckarray/driverarray/etc. carry 30+ internal sub-fields each —
+            # summarize to an identifying label instead of dumping the full
+            # nested repr (was ~70% of this context's size on a real order).
+            value = compact_nested_value(value)
         if value in (None, "", [], {}):
             return
         seen.add(key)

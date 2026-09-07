@@ -30,13 +30,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field as dc_field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from langchain_core.prompts import PromptTemplate
 
-from app.embedding_client import get_planner_llm
+from app.embedding_client import get_planner_llm, get_groq_llm
 from app.order_ask.checkpoint import checkpoint
 from app.order_ask.dynamic_analytics import (
     AGG_TIMEOUT_MS,
@@ -273,8 +274,13 @@ JSON:"""
 
 
 def _plan_llm(question: str, history: str, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    llm = get_planner_llm()
+    # ---- Claude Haiku (Anthropic) — disabled, kept for rollback ----
+    # llm = get_planner_llm()
+    # -------------------------------------------------------------------
+    llm = get_groq_llm()
     chain = PromptTemplate.from_template(_PLANNER_PROMPT) | llm
+    model_name = getattr(llm, "model", None) or getattr(llm, "model_name", None) or "?"
+    t0 = time.time()
     raw = chain.invoke(
         {
             "question": question,
@@ -282,6 +288,11 @@ def _plan_llm(question: str, history: str, schema: Dict[str, Any]) -> Optional[D
             "schema": invoice_schema_for_prompt(schema),
             "today": datetime.now(timezone.utc).strftime("%Y-%m-%d (%A)"),
         }
+    )
+    print(
+        f"[GROQ_TIMING] invoice query-planner call (model={model_name}) took "
+        f"{time.time() - t0:.2f}s",
+        flush=True,
     )
     text = raw.content if hasattr(raw, "content") else str(raw)
     text = (text or "").strip()

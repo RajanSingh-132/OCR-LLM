@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, Optional
 
 from langchain_core.prompts import PromptTemplate
@@ -13,7 +14,7 @@ from langchain_core.prompts import PromptTemplate
 from app.domains.lookup import get_lookup_module
 from app.domains.rules import get_domain_rules
 from app.domains.rules.prompts import DOMAIN_INTENT_SUFFIX
-from app.embedding_client import get_anthropic_llm
+from app.embedding_client import get_anthropic_llm, get_groq_llm
 from app.order_ask.calculation_engine import is_calculation_question
 from app.order_ask.checkpoint import checkpoint
 from app.System_prompt.intent_prompt import INTENT_CLASSIFY_PROMPT
@@ -112,9 +113,19 @@ def classify_intent_with_anthropic(
     checkpoint("INTENT", "Anthropic classify (ambiguous)", domain=active, question=question[:80])
 
     prompt = INTENT_CLASSIFY_PROMPT + "\n" + domain_hint
-    llm = get_anthropic_llm()
+    # ---- Claude Sonnet (Anthropic) — disabled, kept for rollback ----
+    # llm = get_anthropic_llm()
+    # -------------------------------------------------------------------
+    llm = get_groq_llm()
     chain = PromptTemplate.from_template(prompt) | llm
+    model_name = getattr(llm, "model", None) or getattr(llm, "model_name", None) or "?"
+    t0 = time.time()
     raw = chain.invoke({"question": question, "history": history})
+    print(
+        f"[GROQ_TIMING] intent-classify call (model={model_name}) took "
+        f"{time.time() - t0:.2f}s",
+        flush=True,
+    )
     text = raw.content if hasattr(raw, "content") else str(raw)
     text = (text or "").strip()
     if text.startswith("```"):

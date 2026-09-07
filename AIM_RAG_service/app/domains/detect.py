@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, Optional, Tuple
 
 from langchain_core.prompts import PromptTemplate
 
 from app.domains.prompts import DOMAIN_CLASSIFY_PROMPT
 from app.domains.registry import DEFAULT_DOMAIN, DOMAINS
-from app.embedding_client import get_anthropic_llm
+from app.embedding_client import get_anthropic_llm, get_groq_llm
 from app.order_ask.checkpoint import checkpoint
 
 logger = logging.getLogger("domains.detect")
@@ -75,21 +76,31 @@ def classify_domain_with_anthropic(
     history: str = "(no prior turns)",
     last_domain: str = "",
 ) -> Dict[str, Any]:
-    """Ask Claude which collection domain the question belongs to."""
-    checkpoint("DOMAIN", "Anthropic classify", question=(question or "")[:80])
-    llm = get_anthropic_llm()
+    """Ask the LLM which collection domain the question belongs to."""
+    checkpoint("DOMAIN", "LLM classify", question=(question or "")[:80])
+    # ---- Claude (Anthropic) — disabled, kept for rollback ----
+    # llm = get_anthropic_llm()
+    # -------------------------------------------------------------------
+    llm = get_groq_llm()
     try:
         llm = llm.bind(max_tokens=120)
     except Exception:
         pass
 
     chain = PromptTemplate.from_template(DOMAIN_CLASSIFY_PROMPT) | llm
+    model_name = getattr(llm, "model", None) or getattr(llm, "model_name", None) or "?"
+    t0 = time.time()
     raw = chain.invoke(
         {
             "question": question or "",
             "history": history or "(no prior turns)",
             "last_domain": last_domain or "none",
         }
+    )
+    print(
+        f"[GROQ_TIMING] domain-classify call (model={model_name}) took "
+        f"{time.time() - t0:.2f}s",
+        flush=True,
     )
     text = raw.content if hasattr(raw, "content") else str(raw)
     text = (text or "").strip()
@@ -252,7 +263,7 @@ def detect_domain_detailed(
         )
         return result
     except Exception as exc:
-        logger.error("Anthropic domain classify failed: %s", exc, exc_info=True)
+        logger.error("LLM domain classify failed: %s", exc, exc_info=True)
         fallback = local_domain if scores else DEFAULT_DOMAIN
         result = {
             "domain": fallback,

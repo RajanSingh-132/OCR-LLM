@@ -167,3 +167,92 @@ def try_count_fast_path(question: str, domain: str) -> Optional[Dict[str, Any]]:
         "tools_run": ["run_analytics"],
         "active_order_token": "",
     }
+
+
+# ------------------------------------------------------------- exact lookup
+
+# High-confidence "reasons" from each domain's own classify_intent_local()
+# that mean "a specific record number/id was named explicitly in THIS
+# message" — the ones that need session history to resolve (e.g. a bare
+# follow-up "what is its status?") are deliberately excluded so this never
+# guesses at a token that isn't actually in the current question.
+_CONFIDENT_LOOKUP_REASONS = {
+    "explicit_order_lookup",  # orders.py classify_intent_local
+    "short_order_token",      # orders.py classify_intent_local
+    "trip_lookup",            # domains/lookup/trips/lookup.py try_lookup_intent
+    "trip_field_lookup",      # trips.py classify_intent_local
+    "invoice_lookup",         # domains/lookup/invoices/lookup.py try_lookup_intent
+}
+
+
+def try_exact_lookup_fast_path(question: str, domain: str) -> Optional[Dict[str, Any]]:
+    """
+    Deterministic bypass for confident exact-record lookups — "give me full
+    details of order 00000119", "show order 00000119", a bare "00000119".
+
+    Why: the LLM query planner call (schema + question -> JSON plan) buys
+    nothing here — the record token is already extractable by regex, and
+    Mongo can look it up directly. Reuses each domain's own
+    classify_intent_local() (the same regex engine already trusted as the
+    query-planner's fallback) purely as a local, no-LLM token extractor —
+    passing no history_hint so only reasons that don't depend on prior
+    conversation can fire (see _CONFIDENT_LOOKUP_REASONS).
+
+    Returns an execute_tools()-shaped result, or None when this question
+    isn't a confident exact lookup — caller falls through to the normal LLM
+    query planner / regex-engine routing, unchanged.
+    """
+    if domain not in ("orders", "invoices", "trips"):
+        return None
+
+    from app.domains.retrieval import find_record_by_token, format_record_doc_for_context
+    from app.domains.rules import get_domain_rules
+    from app.domains.lookup import get_lookup_module
+    from app.domains.registry import get_domain_profile
+
+    rules = get_domain_rules(domain)
+    local = rules.classify_intent_local(question, history_hint="")
+    if not local or local.get("reason") not in _CONFIDENT_LOOKUP_REASONS:
+        return None
+
+    lookup_mod = get_lookup_module(domain)
+    if local.get("intent") != lookup_mod.intent_name:
+        return None
+
+    token = local.get("order_token") or local.get("record_token")
+    if not token:
+        return None
+
+    profile = get_domain_profile(domain)
+    label = profile.label.upper()
+    doc = find_record_by_token(token)
+
+    if doc:
+        context_blocks = [f"EXACT {label} RECORD:\n" + format_record_doc_for_context(doc)]
+        matches = [{"domain": domain, "match_type": "exact"}]
+        for field in (*profile.id_fields, *profile.number_fields):
+            if doc.get(field) not in (None, ""):
+                matches[0][field] = doc.get(field)
+    else:
+        context_blocks = [f"EXACT {label} RECORD: not found for token={token}"]
+        matches = []
+
+    checkpoint(
+        "FAST_PATH",
+        "deterministic exact lookup — LLM query planner skipped",
+        domain=domain,
+        token=token,
+        found=bool(doc),
+    )
+
+    return {
+        "context_blocks": context_blocks,
+        "matches": matches,
+        "calculation": None,
+        "analytics": None,
+        "list_result": None,
+        "tools_run": ["get_record"],
+        "active_order_token": token if doc else "",
+        "record_token": token,
+        "intent": lookup_mod.intent_name,
+    }

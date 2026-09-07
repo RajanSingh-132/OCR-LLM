@@ -294,6 +294,34 @@ def format_record_list_for_context(payload: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def compact_nested_value(value: Any) -> Any:
+    """
+    Summarize a nested list/dict field instead of dumping its full repr into
+    the LLM prompt. Fields like truckarray/driverarray on an order can each
+    carry 30+ internal sub-fields (1-3k+ chars) that the final-answer LLM
+    never needs to quote back — this keeps just an identifying label so the
+    field stays in context (not dropped) without bloating prompt size.
+    Scalars pass through unchanged.
+    """
+    if isinstance(value, dict):
+        if not value:
+            return None
+        for hint in ("name", "code", "number"):
+            for key, val in value.items():
+                if hint in key.lower() and val not in (None, "", [], {}):
+                    return str(val)
+        return f"<{len(value)} fields>"
+    if isinstance(value, list):
+        if not value:
+            return None
+        if len(value) == 1 and isinstance(value[0], dict):
+            return compact_nested_value(value[0])
+        if all(isinstance(v, dict) for v in value):
+            return f"{len(value)} item(s)"
+        return ", ".join(str(v) for v in value[:5])
+    return value
+
+
 def format_record_doc_for_context(doc: Dict[str, Any], max_fields: int = 120) -> str:
     profile = _profile()
     lines = [f"{profile.label.upper()} RECORD:"]
@@ -303,6 +331,10 @@ def format_record_doc_for_context(doc: Dict[str, Any], max_fields: int = 120) ->
             continue
         if value in (None, "", [], {}):
             continue
+        if isinstance(value, (list, dict)):
+            value = compact_nested_value(value)
+            if value in (None, "", [], {}):
+                continue
         lines.append(f"{key}: {value}")
         count += 1
         if count >= max_fields:

@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import logging
 import re
+import time
+import uuid
 from typing import Any, Dict, Optional
 
 from langchain_core.prompts import PromptTemplate
 
-from app.embedding_client import get_anthropic_llm
+from app.embedding_client import get_anthropic_llm, get_groq_llm
 from app.order_ask.calculation_engine import (
     format_calculation_result_for_context,
     list_formula_catalog_for_prompt,
@@ -122,34 +124,58 @@ def _invoke_anthropic(
 _WORD_RE = re.compile(r"\S+\s+")
 
 
-def _invoke_anthropic_stream(
-    prompt_text: str,
-    variables: Dict[str, Any],
-    max_tokens: int = 300,
-):
-    """
-    Same call as _invoke_anthropic but yields the answer word-by-word (each
-    piece = one word + its trailing whitespace) instead of Claude's raw,
-    multi-word network chunks — gives a smooth one-word-at-a-time typing
-    effect on the client.
+def _approx_tokens(text: str) -> int:
+    """Cheap chars/4 estimate — good enough for relative before/after comparison."""
+    return max(0, len(text or "")) // 4
 
-    Claude's stream() yields arbitrarily-sized text pieces (several words at
+
+def _stream_words(llm, prompt_text: str, variables: Dict[str, Any], max_tokens: int, log_prefix: str):
+    """
+    Shared streaming core: yields the answer word-by-word (each piece = one
+    word + its trailing whitespace) instead of the LLM's raw, multi-word
+    network chunks — gives a smooth one-word-at-a-time typing effect.
+
+    The LLM's stream() yields arbitrarily-sized text pieces (several words at
     once, or a partial word split across pieces) — buffer them and only emit
     a word once we've seen the whitespace after it, so a word is never split
     across two SSE events.
     """
-    llm = get_anthropic_llm()
     try:
         llm_bound = llm.bind(max_tokens=max(32, int(max_tokens)))
     except Exception:
         llm_bound = llm
-    chain = PromptTemplate.from_template(prompt_text) | llm_bound
+    prompt = PromptTemplate.from_template(prompt_text)
+    chain = prompt | llm_bound
 
+    model_name = getattr(llm, "model", None) or getattr(llm, "model_name", None) or "?"
+    call_id = uuid.uuid4().hex[:8]
+
+    # Size breakdown before the call — sizes only, never the actual content
+    # (context/history can carry customer data; don't log it).
+    filled = prompt.format(**variables)
+    context_chars = len(str(variables.get("context") or ""))
+    history_chars = len(str(variables.get("history") or ""))
+    question_chars = len(str(variables.get("question") or ""))
+    print(
+        f"[{log_prefix}] call_id={call_id} BEFORE model={model_name} "
+        f"input_chars={len(filled)} approx_input_tokens={_approx_tokens(filled)} "
+        f"context_chars={context_chars} history_chars={history_chars} "
+        f"question_chars={question_chars} max_tokens={max_tokens} "
+        f"max_retries={getattr(llm, 'max_retries', '?')}",
+        flush=True,
+    )
+
+    t0 = time.time()
+    first_token_at = None
     buffer = ""
+    output_chars = 0
     for chunk in chain.stream(variables):
         text = chunk.content if hasattr(chunk, "content") else str(chunk)
         if not text:
             continue
+        if first_token_at is None:
+            first_token_at = time.time()
+        output_chars += len(text)
         buffer += text
         last_end = 0
         for m in _WORD_RE.finditer(buffer):
@@ -159,6 +185,26 @@ def _invoke_anthropic_stream(
     if buffer:
         # Last word of the answer has no trailing whitespace to wait for.
         yield buffer
+    total_time = time.time() - t0
+    ttft = (first_token_at - t0) if first_token_at else total_time
+    print(
+        f"[{log_prefix}] call_id={call_id} AFTER model={model_name} "
+        f"output_chars={output_chars} approx_output_tokens={output_chars // 4} "
+        f"ttft={ttft:.2f}s total_time={total_time:.2f}s",
+        flush=True,
+    )
+
+
+def _invoke_groq_stream(prompt_text: str, variables: Dict[str, Any], max_tokens: int = 300):
+    """Groq (openai/gpt-oss-20b) — final answer for the greeting/clarify short prompts."""
+    llm = get_groq_llm()
+    yield from _stream_words(llm, prompt_text, variables, max_tokens, "GROQ_TIMING")
+
+
+def _invoke_anthropic_stream(prompt_text: str, variables: Dict[str, Any], max_tokens: int = 300):
+    """Groq (openai/gpt-oss-20b) — final answer for formula/lookup/list/analytics/conversation."""
+    llm = get_groq_llm()
+    yield from _stream_words(llm, prompt_text, variables, max_tokens, "GROQ_TIMING")
 
 
 def _tenant_fields(
@@ -384,6 +430,45 @@ def _answer_order_question_gen(
                     domain=domain,
                 )
 
+        # 2a) A second deterministic fast-path: a confident exact-record
+        #     lookup ("give me full details of order 00000119") needs no LLM
+        #     reasoning either — the record token is regex-extractable and
+        #     Mongo can look it up directly. Tried only when the count
+        #     fast-path above didn't already match.
+        if not fast_path_hit and domain in ("orders", "invoices", "trips") and not replay_of:
+            try:
+                from app.order_ask.fast_path import try_exact_lookup_fast_path
+
+                precomputed_tool_result = try_exact_lookup_fast_path(
+                    effective_question, domain
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Fast-path exact-lookup check failed: %s", exc, exc_info=True
+                )
+                precomputed_tool_result = None
+            if precomputed_tool_result is not None:
+                fast_path_hit = True
+                intent = precomputed_tool_result.get("intent") or get_lookup_module(domain).intent_name
+                style = "detailed"
+                max_tokens = 700
+                retrieve_k = 0
+                token = precomputed_tool_result.get("record_token") or ""
+                entities = {"order_token": token, "record_token": token}
+                intent_info = {
+                    "intent": intent,
+                    "response_style": style,
+                    "max_tokens_hint": max_tokens,
+                    "retrieve_k": retrieve_k,
+                    "needs_exact_order": True,
+                }
+                checkpoint(
+                    "ROUTE",
+                    "deterministic exact-lookup fast-path — LLM planner skipped",
+                    domain=domain,
+                    token=token,
+                )
+
         if not fast_path_hit and domain in ("orders", "invoices", "trips") and (
             replay_of
             or (
@@ -575,11 +660,15 @@ def _answer_order_question_gen(
                 yield {"type": "chunk", "text": answer}
             else:
                 # Fast path: short greeting prompt only — no DB, no heavy CORE policy.
+                # Floor of 160 (not just a 120 ceiling): the Groq final-answer
+                # model "thinks" before answering and its hidden reasoning
+                # tokens count against max_tokens too, so a tight cap can
+                # exhaust the budget before any visible text comes out.
                 parts = []
                 for piece in _invoke_anthropic_stream(
                     domain_prompts.greeting,
                     {"question": question},
-                    max_tokens=min(max_tokens, 120),
+                    max_tokens=max(160, min(max_tokens, 220)),
                 ):
                     parts.append(piece)
                     yield {"type": "chunk", "text": piece}
@@ -657,11 +746,12 @@ def _answer_order_question_gen(
 
         if not context_blocks:
             checkpoint("ROUTE", "no context — clarify")
+            # Same floor-of-160 reasoning-model headroom as the greeting path above.
             parts = []
             for piece in _invoke_anthropic_stream(
                 domain_prompts.greeting,
                 {"question": effective_question, "history": history},
-                max_tokens=min(max_tokens, 120),
+                max_tokens=max(160, min(max_tokens, 220)),
             ):
                 parts.append(piece)
                 yield {"type": "chunk", "text": piece}
@@ -731,10 +821,23 @@ def _answer_order_question_gen(
                     or domain_prompts.conversation
                     or domain_prompts.ask
                 )
+                # Exact-record answers only need the matched DB record, not
+                # the full 6-turn history — a self-contained fast-path lookup
+                # ("give me full details of order X") needs none at all;
+                # planner/regex-driven lookups (can be a follow-up, e.g.
+                # "what is its status?") keep a short 3-turn window instead
+                # of the default 6. Shrinks prompt size without breaking
+                # follow-ups (those resolve their token via sticky session
+                # entities, not by re-reading this history text).
+                lookup_history = (
+                    "(no prior turns)"
+                    if fast_path_hit
+                    else format_history_for_prompt(session.get("turns") or [], max_turns=3)
+                )
                 stream_vars = {
                     "context": context,
                     "question": effective_question,
-                    "history": history,
+                    "history": lookup_history,
                 }
             else:
                 stream_prompt = (
