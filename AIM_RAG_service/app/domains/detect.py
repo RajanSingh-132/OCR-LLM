@@ -11,7 +11,7 @@ from langchain_core.prompts import PromptTemplate
 
 from app.domains.prompts import DOMAIN_CLASSIFY_PROMPT
 from app.domains.registry import DEFAULT_DOMAIN, DOMAINS
-from app.embedding_client import get_anthropic_llm
+from app.embedding_client import get_anthropic_llm, get_xai_llm
 from app.order_ask.checkpoint import checkpoint
 
 logger = logging.getLogger("domains.detect")
@@ -75,9 +75,10 @@ def classify_domain_with_anthropic(
     history: str = "(no prior turns)",
     last_domain: str = "",
 ) -> Dict[str, Any]:
-    """Ask Claude which collection domain the question belongs to."""
-    checkpoint("DOMAIN", "Anthropic classify", question=(question or "")[:80])
-    llm = get_anthropic_llm()
+    """Ask the LLM which collection domain the question belongs to."""
+    checkpoint("DOMAIN", "LLM classify", question=(question or "")[:80])
+    # llm = get_anthropic_llm()  # Claude Sonnet — disabled, kept for rollback
+    llm = get_xai_llm()
     try:
         llm = llm.bind(max_tokens=120)
     except Exception:

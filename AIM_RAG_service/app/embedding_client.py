@@ -1,5 +1,6 @@
 import os
 # from langchain_groq import ChatGroq  # disabled: vision + JSON use Anthropic Sonnet
+from langchain_xai import ChatXAI  # /orders/ask final-answer + fallback LLM
 from langchain_anthropic import ChatAnthropic
 from langchain_aws import BedrockEmbeddings
 from dotenv import load_dotenv
@@ -11,8 +12,14 @@ _llm_cache = None
 _vision_llm_cache = {}
 _anthropic_llm_cache = None
 _planner_llm_cache = None
+_xai_llm_cache = None
 
-# Vision OCR + JSON extract + /orders/ask: Anthropic Claude (LLM_MODEL).
+# Vision OCR + JSON extract: Anthropic Claude (LLM_MODEL).
+# /orders/ask final answer + intent/domain/analytics fallbacks: xAI Grok
+# (see get_xai_llm()) — Claude Sonnet calls for those are commented out in
+# place, not removed, for a quick rollback.
+XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
+XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4")
 # GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 # GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
 # GROQ_VISION_FALLBACK_MODELS = os.environ.get("GROQ_VISION_FALLBACK_MODELS", "")
@@ -108,6 +115,31 @@ def get_planner_llm():
             )
             _planner_llm_cache = get_anthropic_llm()
     return _planner_llm_cache
+
+
+def get_xai_llm():
+    """
+    xAI Grok — the LLM for /orders/ask(/stream): final-answer generation
+    (rag_engine.py), intent-classify fallback (intent.py), domain-detect
+    fallback (domains/detect.py), and the dynamic-analytics fallback
+    (dynamic_analytics.py) all use this client. Query planners
+    (order/trip/invoice) stay on get_planner_llm() (Claude Haiku) —
+    unchanged.
+    """
+    global _xai_llm_cache
+    if _xai_llm_cache is None:
+        if not XAI_API_KEY:
+            raise ValueError(
+                "XAI_API_KEY is not set. Add it in .env for the /orders/ask LLM."
+            )
+        _xai_llm_cache = ChatXAI(
+            model_name=XAI_MODEL,
+            xai_api_key=XAI_API_KEY,
+            temperature=0.0,
+            max_retries=1,
+        )
+        print(f"[xai] get_xai_llm() ready — model={XAI_MODEL}")
+    return _xai_llm_cache
 
 
 def get_vision_model_names():

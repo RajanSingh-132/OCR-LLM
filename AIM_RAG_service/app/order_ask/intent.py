@@ -13,7 +13,7 @@ from langchain_core.prompts import PromptTemplate
 from app.domains.lookup import get_lookup_module
 from app.domains.rules import get_domain_rules
 from app.domains.rules.prompts import DOMAIN_INTENT_SUFFIX
-from app.embedding_client import get_anthropic_llm
+from app.embedding_client import get_anthropic_llm, get_xai_llm
 from app.order_ask.calculation_engine import is_calculation_question
 from app.order_ask.checkpoint import checkpoint
 from app.System_prompt.intent_prompt import INTENT_CLASSIFY_PROMPT
@@ -112,7 +112,8 @@ def classify_intent_with_anthropic(
     checkpoint("INTENT", "Anthropic classify (ambiguous)", domain=active, question=question[:80])
 
     prompt = INTENT_CLASSIFY_PROMPT + "\n" + domain_hint
-    llm = get_anthropic_llm()
+    # llm = get_anthropic_llm()  # Claude Sonnet — disabled, kept for rollback
+    llm = get_xai_llm()
     chain = PromptTemplate.from_template(prompt) | llm
     raw = chain.invoke({"question": question, "history": history})
     text = raw.content if hasattr(raw, "content") else str(raw)
