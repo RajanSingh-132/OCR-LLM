@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 
 from langchain_core.prompts import PromptTemplate
 
-from app.embedding_client import get_anthropic_llm
+from app.embedding_client import get_anthropic_llm, get_xai_llm
 from app.order_ask.calculation_engine import (
     format_calculation_result_for_context,
     list_formula_catalog_for_prompt,
@@ -129,16 +129,21 @@ def _invoke_anthropic_stream(
 ):
     """
     Same call as _invoke_anthropic but yields the answer word-by-word (each
-    piece = one word + its trailing whitespace) instead of Claude's raw,
+    piece = one word + its trailing whitespace) instead of the LLM's raw,
     multi-word network chunks — gives a smooth one-word-at-a-time typing
     effect on the client.
 
-    Claude's stream() yields arbitrarily-sized text pieces (several words at
+    The LLM's stream() yields arbitrarily-sized text pieces (several words at
     once, or a partial word split across pieces) — buffer them and only emit
     a word once we've seen the whitespace after it, so a word is never split
     across two SSE events.
+
+    Final-answer model: xAI Grok (see get_xai_llm()) — swapped in from Claude
+    Sonnet. The Claude implementation is commented out below for a quick
+    rollback (just swap which line runs).
     """
-    llm = get_anthropic_llm()
+    # llm = get_anthropic_llm()  # Claude Sonnet — disabled, kept for rollback
+    llm = get_xai_llm()
     try:
         llm_bound = llm.bind(max_tokens=max(32, int(max_tokens)))
     except Exception:
