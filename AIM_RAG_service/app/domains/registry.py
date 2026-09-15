@@ -17,8 +17,25 @@ DOMAINS: Dict[str, DomainProfile] = {
             r"\bquoted\b",
             r"\bmrp\d+",
             r"\btord\d+",
+            r"\bprofit(?:able|ability)?\b",
+            r"\bmargin\b",
+            r"\blos(?:e|es|ing|s)\b[^.?!]{0,20}\bmoney\b",
         ),
-        strong_keywords=(r"\borders?\b", r"\bordernumber\b", r"\bmrp\d+", r"\btord\d+"),
+        strong_keywords=(
+            r"\borders?\b",
+            r"\bordernumber\b",
+            r"\bmrp\d+",
+            r"\btord\d+",
+            # Profitability is an orders-only analysis in this system (revenue
+            # = grosstotalfreight, freight = totalfreight — both order fields)
+            # — force it to always route to the orders domain deterministically
+            # instead of falling through to the LLM domain-classifier, which
+            # would otherwise decide this on a question with no order/trip/
+            # invoice keyword at all (e.g. "most profitable customer").
+            r"\bprofit(?:able|ability)?\b",
+            r"\bmargin\b",
+            r"\blos(?:e|es|ing|s)\b[^.?!]{0,20}\bmoney\b",
+        ),
         id_fields=("orderid",),
         number_fields=("ordernumber", "tempordernumber"),
         sort_fields=("orderid", "orderdate", "pickupdate", "totalfreight", "grosstotalfreight"),

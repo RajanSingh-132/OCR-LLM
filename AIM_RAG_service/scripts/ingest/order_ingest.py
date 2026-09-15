@@ -25,8 +25,8 @@ from app.mongo_client import _to_python_types, get_mongo_collection
 logger = logging.getLogger("scripts.ingest.order")
 
 # ===================== CONFIG — edit these =====================
-FILE_PATH = r"D:\Desktop\OCR-LLM\AFMQAorder.txt"
-DB_NAME = "chatbot_db"
+FILE_PATH = r"D:\Desktop\OCR-LLM\AFN01992order.txt"
+DB_NAME = "AFN00681"
 COLLECTION_NAME = "Avaal_order"
 NAMESPACE = "avaal_orders"
 DUPLICATE_FIELD = "ordernumber"

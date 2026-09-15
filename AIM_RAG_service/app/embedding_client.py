@@ -1,4 +1,6 @@
 import os
+import boto3
+from botocore.config import Config as BotoConfig
 # from langchain_groq import ChatGroq  # disabled: vision + JSON use Anthropic Sonnet
 from langchain_xai import ChatXAI  # /orders/ask final-answer + fallback LLM
 from langchain_anthropic import ChatAnthropic
@@ -14,27 +16,16 @@ _anthropic_llm_cache = None
 _planner_llm_cache = None
 _xai_llm_cache = None
 
-# Vision OCR + JSON extract: Anthropic Claude (LLM_MODEL).
-# /orders/ask final answer + intent/domain/analytics fallbacks: xAI Grok
-# (see get_xai_llm()) — Claude Sonnet calls for those are commented out in
-# place, not removed, for a quick rollback.
 XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
 XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4")
-# GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-# GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
-# GROQ_VISION_FALLBACK_MODELS = os.environ.get("GROQ_VISION_FALLBACK_MODELS", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_LLM_MODEL = os.environ.get("LLM_MODEL", "claude-sonnet-4-5")
-# Query planner (question -> JSON plan) is a structured-output task, not a
-# reasoning-heavy one — a faster/cheaper model answers it well and cuts the
-# planner call's latency, which was ~5s of a ~7.5s total request in testing.
-# The final user-facing answer still always uses ANTHROPIC_LLM_MODEL (Sonnet)
-# via get_anthropic_llm() — only the JSON-plan step uses this one.
 PLANNER_LLM_MODEL = os.environ.get("PLANNER_LLM_MODEL", "claude-haiku-4-5-20251001")
 BEDROCK_MODEL = os.environ.get("bedrockmodel", "amazon.titan-embed-text-v2:0")
 BEDROCK_ACCESS_KEY = os.environ.get("accesskey", "")
 BEDROCK_SECRET_KEY = os.environ.get("secretaccesskey", "")
 BEDROCK_REGION = os.environ.get("awsregion", "us-east-1")
+BEDROCK_MAX_POOL_CONNECTIONS = int(os.environ.get("BEDROCK_MAX_POOL_CONNECTIONS", "130"))
 
 
 def get_embeddings():
@@ -46,12 +37,21 @@ def get_embeddings():
         if BEDROCK_SECRET_KEY:
             os.environ["AWS_SECRET_ACCESS_KEY"] = BEDROCK_SECRET_KEY
 
+        boto_client = boto3.client(
+            "bedrock-runtime",
+            region_name=BEDROCK_REGION,
+            config=BotoConfig(max_pool_connections=BEDROCK_MAX_POOL_CONNECTIONS),
+        )
         _embeddings_cache = BedrockEmbeddings(
+            client=boto_client,
             model_id=BEDROCK_MODEL,
             region_name=BEDROCK_REGION,
             model_kwargs={"dimensions": 1024},
         )
-        print(f"[embeddings] Bedrock ready — model={BEDROCK_MODEL}")
+        print(
+            f"[embeddings] Bedrock ready — model={BEDROCK_MODEL}, "
+            f"max_pool_connections={BEDROCK_MAX_POOL_CONNECTIONS}"
+        )
 
     return _embeddings_cache
 

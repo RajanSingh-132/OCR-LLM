@@ -75,7 +75,13 @@ _DEFER_RE = re.compile(
     r"\bpast\s+\d+\s+days?\b|"
     r"\b(best|worst|top|low(est)?)\s+customer|customer\s+(with|by)\s+(most|least|highest|lowest)\b|"
     r"\btrip\s*distance\b|"
-    r"\borders?\s+on\s+20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b",
+    r"\borders?\s+on\s+20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b|"
+    r"\bprofit(able|ability)?\b|\bmargin\b|\blos(e|es|ing|s)\b[^.?!]{0,20}\bmoney\b|"
+    # "which customer generated the most revenue" — same customer+revenue
+    # ranking analytics.py's is_profitability_question() also claims, so the
+    # LLM planner defers to that one consistent engine (revenue/profit/margin
+    # then come back in one unified, correctly-formatted breakdown).
+    r"\bcustomers?\b[^.?!]{0,60}\b(revenue|sales)\b|\b(revenue|sales)\b[^.?!]{0,60}\bcustomers?\b",
     re.I,
 )
 

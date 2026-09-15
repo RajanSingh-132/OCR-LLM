@@ -181,6 +181,296 @@ def is_country_customer_question(question: str) -> bool:
     )
 
 
+_PROFIT_WORDS = r"profit(?:able|ability)?|margin"
+_MONTH_NAMES = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10,
+    "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+
+def is_profitability_question(question: str) -> bool:
+    """Customer/order profitability, margin, or "losing money" questions —
+    checked FIRST in run_analytics() (before the generic date/period/best-
+    customer branches) since phrases like "most profitable customer last
+    month" would otherwise be caught by the period-orders or best-customer
+    branches, which don't compute profit at all."""
+    q = (question or "").lower()
+    if re.search(rf"\b({_PROFIT_WORDS})\b", q):
+        return True
+    if re.search(r"\blos(?:e|es|ing|s)\b[^.?!]{0,20}\bmoney\b", q):
+        return True
+    # "highest/most revenue customer" — same phrasing is_best_customer_question
+    # matches for its revenue branch, but routed here too so the response
+    # includes profit/margin alongside revenue in one consistent breakdown
+    # (the spec groups revenue/profit/margin as one analysis, section 7).
+    if (
+        re.search(r"\bcustomers?\b|\bclients?\b", q)
+        and re.search(r"\b(revenue|sales)\b", q)
+        and re.search(rf"\b({_BEST_WORDS}|{_WORST_WORDS})\b", q)
+    ):
+        return True
+    return False
+
+
+def _is_losing_money_question(question: str) -> bool:
+    q = (question or "").lower()
+    if re.search(r"\blos(?:e|es|ing|s)\b[^.?!]{0,20}\bmoney\b", q):
+        return True
+    return bool(re.search(r"\bnegative\s+(?:profit|margin)\b|\bloss[- ]making\b", q))
+
+
+def _profitability_metric(question: str) -> str:
+    """Which number to rank customers by — profit is the default/primary
+    metric per business rule; margin/revenue only when explicitly asked."""
+    q = (question or "").lower()
+    if re.search(r"\bmargin\b", q) and not re.search(r"\bprofit\b", q):
+        return "margin"
+    if re.search(r"\brevenue\b|\bsales\b|\bmoney\b", q) and not re.search(
+        r"\bprofit\b|\bmargin\b", q
+    ):
+        return "revenue"
+    return "profit"
+
+
+def _detect_profitability_limit(question: str, default: int) -> int:
+    m = re.search(r"\btop\s+(\d{1,3})\b", question or "", re.I)
+    if m:
+        return max(1, min(int(m.group(1)), 100))
+    return default
+
+
+def _detect_customer_name(question: str) -> Optional[str]:
+    """Best-effort single-customer scope extraction — "How profitable is ABC
+    Transport?" / "profitability of ABC Transport last month". Requires
+    Title-Case words to avoid false positives on generic phrasing."""
+    q = question or ""
+    for pattern in (
+        r"\bis\s+([A-Z][A-Za-z0-9&.,'\-]*(?:\s+[A-Z][A-Za-z0-9&.,'\-]*){0,4})\b",
+        r"\b(?:of|for)\s+([A-Z][A-Za-z0-9&.,'\-]*(?:\s+[A-Z][A-Za-z0-9&.,'\-]*){0,4})\b",
+    ):
+        m = re.search(pattern, q)
+        if m:
+            name = m.group(1).strip().rstrip("?.!,")
+            if name.lower() not in ("the", "this", "last", "all", "it"):
+                return name
+    return None
+
+
+def _month_add(year: int, month: int, n: int) -> tuple:
+    total = (year * 12 + (month - 1)) + n
+    return total // 12, total % 12 + 1
+
+
+def _parse_month_day_year(text: str, default_year: int):
+    from datetime import date as _date
+
+    m = re.match(r"([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?", text.strip(), re.I)
+    if not m:
+        return None
+    month = _MONTH_NAMES.get(m.group(1).lower())
+    if not month:
+        return None
+    year = int(m.group(3)) if m.group(3) else default_year
+    try:
+        return _date(year, month, int(m.group(2)))
+    except ValueError:
+        return None
+
+
+def resolve_profitability_period(question: str) -> Optional[Dict[str, str]]:
+    """Parse a relative/explicit date phrase → {"start", "end" (exclusive),
+    "label"}. Always derived from the current system date — nothing here is
+    hardcoded. Returns None when no date phrase is found (caller then uses
+    ALL available order history)."""
+    from datetime import date as _date, datetime, timedelta, timezone
+
+    q = (question or "").lower()
+    today = datetime.now(timezone.utc).date()
+
+    if re.search(r"\btoday\b", q):
+        return {"start": today.isoformat(), "end": (today + timedelta(days=1)).isoformat(), "label": "today"}
+    if re.search(r"\byesterday\b", q):
+        y = today - timedelta(days=1)
+        return {"start": y.isoformat(), "end": today.isoformat(), "label": "yesterday"}
+    if re.search(r"\blast\s+week\b", q):
+        end = today - timedelta(days=today.weekday())
+        start = end - timedelta(days=7)
+        return {"start": start.isoformat(), "end": end.isoformat(), "label": "last week"}
+    if re.search(r"\bthis\s+week\b", q):
+        start = today - timedelta(days=today.weekday())
+        return {"start": start.isoformat(), "end": (today + timedelta(days=1)).isoformat(), "label": "this week"}
+    if re.search(r"\blast\s+month\b", q):
+        first_this = today.replace(day=1)
+        y, m = _month_add(first_this.year, first_this.month, -1)
+        start = _date(y, m, 1)
+        return {"start": start.isoformat(), "end": first_this.isoformat(), "label": "last month"}
+    if re.search(r"\bthis\s+month\b", q):
+        start = today.replace(day=1)
+        return {"start": start.isoformat(), "end": (today + timedelta(days=1)).isoformat(), "label": "this month"}
+
+    # Explicit range: "between August 1 and August 31[, 2026]"
+    m = re.search(
+        r"\bbetween\s+([a-z]+\.?\s+\d{1,2}(?:,?\s*\d{4})?)\s+and\s+"
+        r"([a-z]+\.?\s+\d{1,2}(?:,?\s*\d{4})?)\b",
+        q,
+    )
+    if m:
+        d1 = _parse_month_day_year(m.group(1), today.year)
+        d2 = _parse_month_day_year(m.group(2), today.year)
+        if d1 and d2:
+            if d2 < d1:
+                d1, d2 = d2, d1
+            return {
+                "start": d1.isoformat(),
+                "end": (d2 + timedelta(days=1)).isoformat(),
+                "label": f"{m.group(1)} to {m.group(2)}",
+            }
+
+    # Explicit single date: "on August 15, 2026" / "august 15 2026"
+    m = re.search(r"\b(?:on\s+)?([a-z]+\.?\s+\d{1,2}(?:,?\s*\d{4})?)\b", q)
+    if m:
+        d = _parse_month_day_year(m.group(1), today.year)
+        if d:
+            return {"start": d.isoformat(), "end": (d + timedelta(days=1)).isoformat(), "label": m.group(1)}
+
+    # Numeric date forms: 2026-08-15
+    m = re.search(r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b", q)
+    if m:
+        try:
+            d = _date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            return {"start": d.isoformat(), "end": (d + timedelta(days=1)).isoformat(), "label": d.isoformat()}
+        except ValueError:
+            pass
+
+    return None
+
+
+def customer_profitability(question: str, *, entities: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Customer-level profitability, per business rule:
+      Customer Total Revenue = SUM(grosstotalfreight) across matching orders
+      Customer Total Freight = SUM(totalfreight) across matching orders
+      Customer Total Profit  = Total Revenue - Total Freight
+      Customer Margin %      = Total Profit / Total Revenue * 100
+    Revenue/freight are summed FIRST, then profit/margin computed from the
+    totals — NEVER averaged from individual order margins. Orders with a
+    missing/null grosstotalfreight are excluded (profit can't be reliably
+    computed without a revenue figure) and reported as excluded_count.
+    """
+    entities = entities or {}
+    q = question or ""
+    metric = _profitability_metric(q)
+    losing = _is_losing_money_question(q)
+    direction = "worst" if (losing or re.search(r"\b(worst|lowest|least\s+profitable)\b", q, re.I)) else "best"
+    limit = _detect_profitability_limit(q, 25 if losing else 10)
+
+    period = resolve_profitability_period(q)
+    date_field = "orderdate"
+
+    scope_match: Dict[str, Any] = {**_base_match()}
+    if period:
+        scope_match[date_field] = {"$gte": period["start"], "$lt": period["end"]}
+
+    customer_filter = entities.get("customercode") or entities.get("customername") or _detect_customer_name(q)
+    if customer_filter:
+        scope_match["$or"] = [
+            {"customername": {"$regex": re.escape(str(customer_filter)), "$options": "i"}},
+            {"customercode": {"$regex": f"^{re.escape(str(customer_filter))}$", "$options": "i"}},
+        ]
+
+    collection = get_orders_collection()
+    total_in_scope = collection.count_documents(scope_match)
+
+    valid_match: Dict[str, Any] = {**scope_match, "grosstotalfreight": {"$nin": [None]}}
+    valid_count = collection.count_documents(valid_match)
+    excluded_count = max(0, total_in_scope - valid_count)
+
+    rows = list(
+        collection.aggregate(
+            [
+                {"$match": valid_match},
+                {
+                    "$group": {
+                        "_id": "$customername",
+                        "order_count": {"$sum": 1},
+                        "total_revenue": {"$sum": "$grosstotalfreight"},
+                        "total_freight": {"$sum": {"$ifNull": ["$totalfreight", 0]}},
+                    }
+                },
+                {"$match": {"_id": {"$nin": [None, ""]}}},
+            ]
+        )
+    )
+
+    customers: List[Dict[str, Any]] = []
+    for r in rows:
+        revenue = float(r.get("total_revenue") or 0)
+        freight = float(r.get("total_freight") or 0)
+        profit = revenue - freight
+        margin = (profit / revenue * 100.0) if revenue else None
+        customers.append(
+            {
+                "customername": r.get("_id"),
+                "order_count": int(r.get("order_count") or 0),
+                "total_revenue": round(revenue, 2),
+                "total_freight": round(freight, 2),
+                "total_profit": round(profit, 2),
+                "margin_pct": round(margin, 2) if margin is not None else None,
+            }
+        )
+
+    if losing:
+        customers = [c for c in customers if c["total_profit"] < 0]
+        customers.sort(key=lambda c: c["total_profit"])  # biggest loss first
+    elif metric == "margin":
+        customers.sort(
+            key=lambda c: (c["margin_pct"] is None, c["margin_pct"] or 0),
+            reverse=(direction == "best"),
+        )
+    elif metric == "revenue":
+        customers.sort(key=lambda c: c["total_revenue"], reverse=(direction == "best"))
+    else:  # profit — primary metric; tie-break by margin %, per business rule
+        customers.sort(
+            key=lambda c: (c["total_profit"], c["margin_pct"] or 0),
+            reverse=(direction == "best"),
+        )
+
+    limited = customers if losing else customers[: max(1, limit)]
+
+    checkpoint(
+        "ANALYTICS",
+        "customer_profitability",
+        metric=metric,
+        direction=direction,
+        losing=losing,
+        period=period,
+        customer_filter=customer_filter,
+        matched=len(customers),
+        excluded=excluded_count,
+    )
+
+    return {
+        "analytics_type": "customer_profitability",
+        "metric": metric,
+        "direction": direction,
+        "losing_money_mode": losing,
+        "period": period,
+        "customer_filter": customer_filter,
+        "excluded_count": excluded_count,
+        "customers": limited,
+        "top_customer": limited[0] if limited else None,
+        "definition": (
+            "Profit = SUM(grosstotalfreight) - SUM(totalfreight) per customer; "
+            "Margin % = Total Profit / Total Revenue * 100. Revenue and freight "
+            "are summed first, THEN profit/margin computed from the totals — "
+            "never averaged from individual order margins. Orders with missing "
+            "revenue are excluded from these totals (see excluded_count)."
+        ),
+    }
+
+
 def normalize_date_prefix(raw: str) -> Optional[str]:
     """
     Normalize user date text to YYYY-MM-DD prefix for matching ISO orderdate fields.
@@ -1531,6 +1821,14 @@ def run_analytics(
     """Route analytics question → Mongo aggregation payload."""
     entities = entities or {}
     q = question or ""
+
+    # Profitability/margin questions FIRST — "most profitable customer last
+    # month" would otherwise be caught by the period-orders or best-customer
+    # branches below (neither computes profit), since they also match on
+    # "last month" / "customer" + a ranking word.
+    if is_profitability_question(q) or entities.get("analytics") == "customer_profitability":
+        return customer_profitability(q, entities=entities)
+
     side = entities.get("location_side") or detect_location_side(q)
 
     # Date-based activity (customers/orders on a day) — dynamic from full DB
@@ -1757,6 +2055,55 @@ def format_analytics_for_context(payload: Dict[str, Any]) -> str:
         lines.append("by_status:")
         for row in payload.get("by_status") or []:
             lines.append(f"- {row.get('status')}: {row.get('order_count')}")
+
+    elif atype == "customer_profitability":
+        metric = payload.get("metric")
+        direction = payload.get("direction") or "best"
+        period = payload.get("period")
+        lines.append(
+            f"metric: {metric} (profit = SUM(revenue) - SUM(freight) per customer; "
+            "primary ranking metric unless the question asked specifically for "
+            "margin or revenue)"
+        )
+        lines.append(f"direction: {direction} (best=highest, worst=lowest)")
+        if payload.get("losing_money_mode"):
+            lines.append(
+                "mode: losing_money — ONLY customers with negative total_profit "
+                "are listed below, sorted biggest loss first"
+            )
+        if period:
+            lines.append(
+                f"date_range: {period.get('label')} "
+                f"({period.get('start')} to {period.get('end')}, end exclusive)"
+            )
+        else:
+            lines.append("date_range: none specified in the question — ALL available order history was used")
+        if payload.get("customer_filter"):
+            lines.append(f"customer_filter_applied: {payload.get('customer_filter')}")
+        lines.append(
+            f"excluded_orders_missing_revenue: {payload.get('excluded_count')} "
+            "(orders with no grosstotalfreight value — excluded from these totals, "
+            "profit cannot be reliably computed for them)"
+        )
+        top = payload.get("top_customer")
+        if top:
+            lines.append(
+                f"top_result: {top.get('customername')} | orders={top.get('order_count')} | "
+                f"revenue={top.get('total_revenue')} | freight={top.get('total_freight')} | "
+                f"profit={top.get('total_profit')} | margin_pct={top.get('margin_pct')}"
+            )
+        lines.append("ranked_customers (already sorted — do not re-rank or recalculate):")
+        for i, row in enumerate(payload.get("customers") or [], start=1):
+            lines.append(
+                f"[{i}] {row.get('customername')} | orders={row.get('order_count')} | "
+                f"revenue={row.get('total_revenue')} | freight={row.get('total_freight')} | "
+                f"profit={row.get('total_profit')} | margin_pct={row.get('margin_pct')}"
+            )
+        if not payload.get("customers"):
+            lines.append(
+                "(no customers matched this scope/date range — say so plainly, "
+                "do not invent a customer or number)"
+            )
 
     elif atype == "best_customer":
         direction = payload.get("direction") or "best"
