@@ -5,15 +5,20 @@ keeps MongoDB in sync with the latest PAGE_SIZE invoice records.
   python -m app.sync.invoice_live_api
   (or)  python app/sync/invoice_live_api.py
 
-Same design as app/sync/order_live_api.py — see that file's docstring for the
-full rationale (crash-safety, 30s cadence, daily purge, parallel embedding).
-Fixed tenant: CORPORATE_ID = "AFMQA" -> chatbot_db.Avaal_invoice (via
-DB_NAME_OVERRIDES).
+Runs forever until Ctrl+C. Multi-tenant: syncs every corporate_id in
+CORPORATE_IDS from ONE process — every cycle, all tenants are hit
+CONCURRENTLY (ThreadPoolExecutor, one thread per tenant), so the cycle's
+total time is bounded by the SLOWEST tenant, not the sum of all of them.
+Same design as app/sync/order_live_api.py — see that file's docstring for
+the full rationale (crash-safety, 30s cadence, daily purge, parallel
+embedding). DB_NAME_OVERRIDES maps AFMQA -> chatbot_db; every other
+corporate_id falls back to using its own id as the Mongo database name
+(e.g. AFN01992 -> Mongo db "AFN01992") unless an override is added for it.
 
 API contract (confirmed against a live browser request AND a raw response
 dump, NOT guessed):
   POST https://beta.afmsuite.ai/api/Invoice/getinvoicelistdata
-  header: corporateid: AFMQA
+  header: corporateid: <tenant>
   body:   {"filter": {...}}   <- lowercase "filter", same as trip's API.
   response: a BARE JSON ARRAY of invoice records directly — e.g.
           [{...}, {...}, ...] — NOT wrapped in a "details"/"detailstrips"
@@ -33,6 +38,40 @@ endpoint (unlike order/trip) to say which date FromDate/Todate applies to,
 so we don't guess. PAGE_SIZE is tiny (15) and the client-side
 `is_recent_record` check still filters out anything older than
 RECENT_MONTHS, so correctness doesn't depend on the API-side filter.
+
+Each cycle, PER TENANT (in parallel):
+  1. POST getinvoicelistdata (header corporateid: <tenant>, body
+     {"filter": {...}}, PageNo/pageno=1, PageSize/pagesize=PAGE_SIZE) -> the
+     PAGE_SIZE most recent records.
+  2. Keep only records whose date field (DATE_FIELDS, first present wins) is
+     within the last calendar month (RECENT_MONTHS) — checked client-side.
+  3. For each record, compare by invoiceid (ID_FIELDS, first present wins)
+     against that tenant's collection:
+       - invoiceid already stored -> delete the old doc, insert the fresh
+         one (refresh, with a new embedding).
+       - invoiceid not stored yet -> insert it as a new doc.
+  4. Embeddings for the whole cycle's records are computed CONCURRENTLY
+     (a second, inner ThreadPoolExecutor) since Bedrock's Titan endpoint only
+     takes one text per call — see `_embed_texts`. So a full cycle has two
+     levels of parallelism: one thread per tenant, and within each tenant's
+     thread, one thread per record being embedded.
+
+Safety / operational notes (read before leaving this running unattended):
+  - This process must stay running for the sync to keep happening — closing
+    the terminal / sleeping the PC / a crash stops it. For a real always-on
+    deployment, wrap it as a Windows Service (e.g. via NSSM) or a scheduled
+    task that restarts it, rather than relying on a terminal staying open.
+  - One tenant's cycle failing (network blip, Mongo hiccup, API error) is
+    caught and logged per-tenant; it does NOT kill the daemon or block the
+    other tenants — the next cycle just retries that tenant after
+    SLEEP_SECONDS.
+  - The next cycle starts SLEEP_SECONDS after ALL tenants in the PREVIOUS
+    cycle finish, not on a fixed clock tick — so a slow cycle can never
+    overlap with the next.
+  - Logs go to both the console and ROTATING file `invoice_live_api.log`
+    next to this script (so a long-running process doesn't grow the log
+    forever). Every log line names its corporate_id, since one file now
+    covers every tenant.
 """
 from __future__ import annotations
 
@@ -61,8 +100,11 @@ logger = logging.getLogger("app.sync.invoice_live_api")
 API_BASE = "https://beta.afmsuite.ai"
 LISTINVOICE_PATH = "/api/Invoice/getinvoicelistdata"
 API_VERSION = "1.0"
-# Fixed per requirement — this daemon syncs exactly one tenant.
-CORPORATE_ID = "AFMQA"
+# Every tenant this ONE process syncs, hit concurrently each cycle.
+CORPORATE_IDS = [
+    "AFMQA", "AFN01992", "AFN01856", "AFN01813", "AFN01619",
+    "AFN01514", "AFN00292", "AFN00861", "AFN01801", "AFN00681",
+]
 EXTRA_HEADERS: Dict[str, str] = {}
 
 # Body wrapper key is lowercase "filter" (confirmed from a working browser
@@ -148,11 +190,14 @@ EMBED_MAX_WORKERS = 10
 SLEEP_SECONDS = 30
 
 # --- Daily purge: delete anything older than RECENT_MONTHS -----------------
-# Independent of the ingest cycle — see app/sync/order_live_api.py docstring
-# for the full rationale. Doc id below is UNIQUE to this daemon on purpose:
-# if invoice/trip/order ever shared one id they'd stomp on each other's
-# last-run timestamp and the purge schedule would go wrong for all of them.
+# Runs independently of the 30-second ingest cycle. "Independent" here means:
+# a separate function, checked once per cycle but only ACTUALLY executing
+# when >= CLEANUP_INTERVAL_HOURS have passed since it last ran. The cutoff is
+# computed fresh from datetime.now() every time it runs, so it rolls forward
+# on its own each day — no hardcoded date anywhere.
 CLEANUP_INTERVAL_HOURS = 24
+# Last-run timestamp is persisted in Mongo (not just kept in memory) so a
+# restart of this process doesn't forget it and purge more than once a day.
 SYNC_STATE_COLLECTION = "sync_state"
 SYNC_STATE_DOC_ID = "invoice_live_api_cleanup"
 
@@ -251,15 +296,17 @@ def _build_filter(pageno: int, from_date: str | None, to_date: str | None) -> Di
 
 
 def fetch_latest_invoices(
-    from_date: str | None = None, to_date: str | None = None
+    corporate_id: str, from_date: str | None = None, to_date: str | None = None
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Fetch up to MAX_PAGES pages (PAGE_SIZE records each) from
-    getinvoicelistdata."""
+    getinvoicelistdata for one tenant. Takes corporate_id as a parameter
+    (not a module global) so this is safe to call concurrently from
+    multiple tenant threads at once."""
     session = requests.Session()
     headers = {
         "Content-Type": "application/json; ver=1.0",
         "Accept": "application/json",
-        "corporateid": CORPORATE_ID,
+        "corporateid": corporate_id,
         **EXTRA_HEADERS,
     }
     params = {"api-version": API_VERSION}
@@ -418,6 +465,7 @@ def build_document(
     ingested_at: str,
     source_document: str,
     database: str,
+    corporate_id: str,
 ) -> Dict[str, Any]:
     doc: Dict[str, Any] = {}
     for key, value in invoice.items():
@@ -431,7 +479,7 @@ def build_document(
         "source_document": source_document,
         "collection": COLLECTION_NAME,
         "database": database,
-        "corporate_id": CORPORATE_ID,
+        "corporate_id": corporate_id,
         "invoiceid": _first_present(invoice, ID_FIELDS),
         "invoicenumber": _first_present(invoice, DUPLICATE_FIELDS),
         "ingested_at": ingested_at,
@@ -459,12 +507,14 @@ def load_existing_keys(collection, fields) -> Set[str]:
     return existing
 
 
-def run_one_cycle() -> Dict[str, Any]:
-    """Fetch the latest PAGE_SIZE invoices and sync them into Mongo. Raises
-    on unrecoverable errors (network, Mongo) — the caller (main loop)
-    decides how to handle a failed cycle."""
-    database = _db_name(CORPORATE_ID)
-    source_document = f"api:{_api_url()}?corporateid={CORPORATE_ID}"
+def run_one_cycle(corporate_id: str) -> Dict[str, Any]:
+    """Fetch the latest PAGE_SIZE invoices for ONE tenant and sync them into
+    that tenant's own Mongo database. Raises on unrecoverable errors
+    (network, Mongo) — the caller decides how to handle a failed cycle.
+    Takes corporate_id as a parameter (not a module global) so this is safe
+    to call concurrently from multiple tenant threads at once."""
+    database = _db_name(corporate_id)
+    source_document = f"api:{_api_url()}?corporateid={corporate_id}"
 
     now = datetime.datetime.now(datetime.timezone.utc)
     ingested_at = now.isoformat()
@@ -481,13 +531,13 @@ def run_one_cycle() -> Dict[str, Any]:
         to_date = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
 
     t0 = time.perf_counter()
-    records, fetch_stats = fetch_latest_invoices(from_date, to_date)
+    records, fetch_stats = fetch_latest_invoices(corporate_id, from_date, to_date)
     t_fetch = time.perf_counter() - t0
 
     if not records:
         return {
             "ok": True,
-            "corporate_id": CORPORATE_ID,
+            "corporate_id": corporate_id,
             "database": database,
             "note": "getinvoicelistdata returned no records this cycle",
             **fetch_stats,
@@ -549,7 +599,9 @@ def run_one_cycle() -> Dict[str, Any]:
             vectors = [[] for _ in chunk]
         for invoice, vector in zip(chunk, vectors):
             batch.append(
-                build_document(invoice, vector, ingested_at, source_document, database)
+                build_document(
+                    invoice, vector, ingested_at, source_document, database, corporate_id
+                )
             )
         if len(batch) >= INSERT_BATCH_SIZE:
             flush()
@@ -566,7 +618,7 @@ def run_one_cycle() -> Dict[str, Any]:
     total = time.perf_counter() - t0
     return {
         "ok": True,
-        "corporate_id": CORPORATE_ID,
+        "corporate_id": corporate_id,
         "database": database,
         "collection": COLLECTION_NAME,
         "with_embeddings": WITH_EMBEDDINGS,
@@ -586,11 +638,12 @@ def run_one_cycle() -> Dict[str, Any]:
     }
 
 
-def purge_old_records() -> Dict[str, Any]:
-    """Delete every document older than RECENT_MONTHS. `now` (and therefore
-    the cutoff) is computed fresh at the moment this actually runs, so the
-    cutoff rolls forward on its own each day this executes."""
-    database = _db_name(CORPORATE_ID)
+def purge_old_records(corporate_id: str) -> Dict[str, Any]:
+    """Delete every document older than RECENT_MONTHS for ONE tenant. `now`
+    (and therefore the cutoff) is computed fresh at the moment this actually
+    runs, so the cutoff rolls forward on its own each day this executes —
+    nothing here is a hardcoded date."""
+    database = _db_name(corporate_id)
     collection = get_mongo_collection(COLLECTION_NAME, database, ensure_indexes=False)
 
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -634,10 +687,14 @@ def _save_last_cleanup_at(state_collection, when: datetime.datetime) -> None:
     )
 
 
-def maybe_run_daily_cleanup() -> Dict[str, Any] | None:
-    """Run purge_old_records() only if CLEANUP_INTERVAL_HOURS have passed
-    since it last ran (tracked in Mongo, survives a process restart)."""
-    database = _db_name(CORPORATE_ID)
+def maybe_run_daily_cleanup(corporate_id: str) -> Dict[str, Any] | None:
+    """Run purge_old_records() for ONE tenant, only if CLEANUP_INTERVAL_HOURS
+    have passed since it last ran for that tenant. The "last ran" timestamp
+    is persisted in that tenant's own Mongo database (a dedicated sync_state
+    doc), not just kept in memory, so restarting this process never causes
+    it to purge more than once a day, and one tenant's schedule never
+    affects another's."""
+    database = _db_name(corporate_id)
     state_collection = get_mongo_collection(
         SYNC_STATE_COLLECTION, database, ensure_indexes=False
     )
@@ -649,17 +706,43 @@ def maybe_run_daily_cleanup() -> Dict[str, Any] | None:
     ):
         return None
 
-    result = purge_old_records()
+    result = purge_old_records(corporate_id)
     _save_last_cleanup_at(state_collection, now)
     return result
+
+
+def _process_one_tenant(corporate_id: str, cycle_no: int) -> None:
+    """Runs in its own thread — one tenant's sync + daily-cleanup check.
+    Every exception is caught and logged here (never re-raised) so one
+    tenant's failure can never affect the other tenants running concurrently
+    in this same cycle, nor kill the daemon."""
+    try:
+        status = run_one_cycle(corporate_id)
+        logger.info("[%s] cycle %s: %s", corporate_id, cycle_no, status)
+    except Exception:  # noqa: BLE001 — one bad tenant must not kill the daemon
+        logger.exception(
+            "[%s] cycle %s failed; will retry after %ss",
+            corporate_id, cycle_no, SLEEP_SECONDS,
+        )
+
+    try:
+        cleanup_result = maybe_run_daily_cleanup(corporate_id)
+        if cleanup_result is not None:
+            logger.info("[%s] daily cleanup ran: %s", corporate_id, cleanup_result)
+    except Exception:  # noqa: BLE001 — same rule: never kill the daemon
+        logger.exception(
+            "[%s] daily cleanup check failed on cycle %s (will retry next cycle)",
+            corporate_id, cycle_no,
+        )
 
 
 def main() -> int:
     _setup_logging()
     logger.info(
-        "Starting live invoice sync: corporateid=%s every %ss (%s records/cycle), "
-        "daily purge of records older than %s month(s) every %sh",
-        CORPORATE_ID,
+        "Starting live invoice sync: corporateids=%s every %ss (%s records/cycle "
+        "per tenant, all tenants concurrent), daily purge of records older than "
+        "%s month(s) every %sh",
+        CORPORATE_IDS,
         SLEEP_SECONDS,
         PAGE_SIZE,
         RECENT_MONTHS,
@@ -671,29 +754,25 @@ def main() -> int:
         while True:
             cycle_no += 1
             cycle_start = time.perf_counter()
-            try:
-                status = run_one_cycle()
-                logger.info("cycle %s: %s", cycle_no, status)
-            except Exception:  # noqa: BLE001 — one bad cycle must not kill the daemon
-                logger.exception(
-                    "cycle %s failed; will retry after %ss", cycle_no, SLEEP_SECONDS
-                )
 
-            try:
-                cleanup_result = maybe_run_daily_cleanup()
-                if cleanup_result is not None:
-                    logger.info("daily cleanup ran: %s", cleanup_result)
-            except Exception:  # noqa: BLE001 — same rule: never kill the daemon
-                logger.exception(
-                    "daily cleanup check failed on cycle %s (will retry next cycle)",
-                    cycle_no,
-                )
+            # All tenants hit concurrently — cycle time is bounded by the
+            # SLOWEST tenant, not the sum of every tenant's own time.
+            with ThreadPoolExecutor(max_workers=len(CORPORATE_IDS)) as pool:
+                futures = [
+                    pool.submit(_process_one_tenant, corp_id, cycle_no)
+                    for corp_id in CORPORATE_IDS
+                ]
+                for future in as_completed(futures):
+                    future.result()  # re-raises only truly unexpected bugs in
+                    # _process_one_tenant itself (it already catches its own
+                    # per-tenant errors), so those still surface below.
 
             elapsed = time.perf_counter() - cycle_start
             logger.info(
-                "cycle %s finished in %.2fs; sleeping %ss before next cycle",
+                "cycle %s finished in %.2fs (%d tenants); sleeping %ss before next cycle",
                 cycle_no,
                 elapsed,
+                len(CORPORATE_IDS),
                 SLEEP_SECONDS,
             )
             time.sleep(SLEEP_SECONDS)

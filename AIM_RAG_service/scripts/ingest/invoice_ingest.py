@@ -26,8 +26,8 @@ from app.mongo_client import _to_python_types, get_mongo_collection
 logger = logging.getLogger("scripts.ingest.invoice")
 
 # ===================== CONFIG — edit these =====================
-FILE_PATH = r"D:\Desktop\OCR-LLM\invoiceafmqa.txt"
-DB_NAME = "chatbot_db"
+FILE_PATH = r"D:\Desktop\OCR-LLM\AFN01992order.txt"
+DB_NAME = "AFN01514"
 COLLECTION_NAME = "Avaal_invoice"
 NAMESPACE = "avaal_invoices"
 METADATA_TYPE = "avaal_invoice"
