@@ -717,6 +717,26 @@ def classify_intent_local(
 ) -> Optional[Dict[str, Any]]:
     q = (question or "").strip()
 
+    # Profitability/margin questions FIRST, before every other regex fast-path
+    # below — several of them (e.g. the "most ... amount" ranked-list check)
+    # would otherwise steal a profitability question that has a typo'd
+    # "customer" (their own not-customer guard fails to save it) or any other
+    # wording overlap, since none of those branches compute profit at all.
+    from app.order_ask.analytics import is_profitability_question
+
+    if is_profitability_question(q):
+        return {
+            "intent": "analytics",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "needs_analytics": True,
+            "response_style": "detailed",
+            "max_tokens_hint": 500,
+            "retrieve_k": 0,
+            "reason": "customer_profitability",
+        }
+
     # Recent / only-N list BEFORE ask-for-id (avoids "give me 2 orders recently" false positive)
     if RECENT_RE.search(q) and not is_calculation_question(q):
         return {

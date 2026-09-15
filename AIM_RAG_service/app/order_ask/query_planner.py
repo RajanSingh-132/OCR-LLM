@@ -519,6 +519,20 @@ def run_query_planner(
     q = (question or "").strip()
     if not q:
         return None
+
+    # Customer profitability/margin questions defer to the regex fallback's
+    # dedicated engine (app/order_ask/analytics.py: customer_profitability())
+    # instead of this LLM planner — that engine already knows the exact
+    # Profit = SUM(revenue) - SUM(freight) / Margin % business rule, ranking
+    # tie-breaks, date-phrase parsing, and NULL-revenue exclusion; asking
+    # this planner's LLM to reinvent that from scratch on every question is
+    # slower (schema build + LLM call) and not guaranteed to match the rule.
+    from app.order_ask.analytics import is_profitability_question
+
+    if is_profitability_question(q):
+        checkpoint("PLANNER", "defer to profitability engine", reason="pattern_match")
+        return None
+
     schema = get_orders_schema()
     if not schema.get("fields"):
         return None
