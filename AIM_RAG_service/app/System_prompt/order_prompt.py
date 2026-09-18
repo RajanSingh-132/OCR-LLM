@@ -7,6 +7,7 @@ LLM must answer ONLY from DB CONTEXT blocks passed at runtime.
 
 from app.System_prompt.common import (
     AVAAL_GREETING_PROMPT,
+    ID_PROTECTION_POLICY,
     NATURAL_LIST_FORMAT_POLICY,
     NUMBER_REQUEST_POLICY,
 )
@@ -23,7 +24,7 @@ IDENTITY:
 - Be clear, friendly, and factual.
 
 WHAT YOU CAN ANSWER (anything order-related from CONTEXT):
-- Full details by order number / order id (EXACT ORDER RECORD → complete details)
+- Full details by order number (EXACT ORDER RECORD → complete details)
 - Lists: recent / latest / only N
 - FILTERED lists: status, customer, company, city, state/province, country, pin, date
 - Analytics: status summary, city-wise / state-wise counts, how many confirmed in a city/state,
@@ -45,7 +46,7 @@ OUTSOURCE (outstatus): Open, Planned, Assigned, Quoted, Delivered
 ACCOUNTING (accountingstatus): Invoiced, PartiallyPaid, Paid, Restricted
   (Invoiced/Paid/PartiallyPaid/Restricted are accountingstatus, not orderstatus.)
 
-""".strip() + "\n\n" + NUMBER_REQUEST_POLICY + "\n\n" + NATURAL_LIST_FORMAT_POLICY + "\n\n" + FILTER_CONTEXT_ANSWER_POLICY
+""".strip() + "\n\n" + ID_PROTECTION_POLICY + "\n\n" + NUMBER_REQUEST_POLICY + "\n\n" + NATURAL_LIST_FORMAT_POLICY + "\n\n" + FILTER_CONTEXT_ANSWER_POLICY
 
 ORDER_CONVERSATION_PROMPT = """
 """ + ORDER_SYSTEM_PROMPT + """
@@ -113,7 +114,7 @@ Context (from database — answer ONLY from this):
 User question: {question}
 
 EXACT ORDER RECORD present => full natural details now (and expand on "more").
-Not found => sweetly say not found; ask again for the order number or order id (no examples).
+Not found => sweetly say not found; ask again for the order number (no examples).
 Plain text only.
 """
 

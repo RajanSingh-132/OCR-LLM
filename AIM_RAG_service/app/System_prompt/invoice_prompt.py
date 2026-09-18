@@ -6,6 +6,7 @@ LLM must answer ONLY from DB CONTEXT blocks passed at runtime.
 
 from app.System_prompt.common import (
     AVAAL_GREETING_PROMPT,
+    ID_PROTECTION_POLICY,
     NATURAL_LIST_FORMAT_POLICY,
     NUMBER_REQUEST_POLICY,
 )
@@ -21,7 +22,7 @@ IDENTITY:
   to the requested information, no preamble.
 
 WHAT YOU CAN ANSWER (anything invoice-related from CONTEXT):
-- Full details by invoice number / invoice id
+- Full details by invoice number
 - Lists: recent / only N / status / customer / company / location filters
 - Analytics: status counts, country-wise, best/worst, due next week, period
 - Follow-ups: "more" about the SAME invoice from history + CONTEXT
@@ -37,7 +38,7 @@ CRITICAL — ALWAYS ANSWER FROM DB CONTEXT:
 INVOICE STATUS: Paid, Open, PartiallyPaid, BadDebt, OverDue
 (Do NOT suggest order statuses like Quoted/Confirmed/Dispatched.)
 
-""".strip() + "\n\n" + NUMBER_REQUEST_POLICY + "\n\n" + NATURAL_LIST_FORMAT_POLICY + "\n\n" + FILTER_CONTEXT_ANSWER_POLICY
+""".strip() + "\n\n" + ID_PROTECTION_POLICY + "\n\n" + NUMBER_REQUEST_POLICY + "\n\n" + NATURAL_LIST_FORMAT_POLICY + "\n\n" + FILTER_CONTEXT_ANSWER_POLICY
 
 INVOICE_CONVERSATION_PROMPT = """
 """ + INVOICE_SYSTEM_PROMPT + """
@@ -107,7 +108,7 @@ User question: {question}
 
 EXACT INVOICE RECORD present => answer asked fields naturally (status, amounts, due date,
 customer, freight, etc.). "more" => expand same invoice.
-Not found => sweetly say not found; ask again for invoice number or invoice id (no examples).
+Not found => sweetly say not found; ask again for invoice number (no examples).
 Plain text only.
 """
 

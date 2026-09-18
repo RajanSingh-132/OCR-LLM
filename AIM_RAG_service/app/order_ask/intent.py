@@ -16,6 +16,7 @@ from app.domains.rules.prompts import DOMAIN_INTENT_SUFFIX
 from app.embedding_client import get_anthropic_llm, get_xai_llm
 from app.order_ask.calculation_engine import is_calculation_question
 from app.order_ask.checkpoint import checkpoint
+from app.order_ask.fuzzy_match import fuzzy_whole_message_match
 from app.System_prompt.intent_prompt import INTENT_CLASSIFY_PROMPT
 from app.tenants.context import get_active_domain
 
@@ -31,6 +32,32 @@ THANKS_RE = re.compile(
     r"^\s*(thanks|thank\s*you|thx|ty|ok|okay|cool|great|nice)\b[\s!?.]*$",
     re.IGNORECASE,
 )
+# Fuzzy fallback trigger words, checked ONLY when the regexes above find no
+# exact match (see fuzzy_whole_message_match) — a typo'd single-word greeting
+# like "hiw" (for "hi") would otherwise miss BOTH regexes, fall through to
+# the LLM query planner (which wastes a call trying to parse it as a DB
+# query), AND then a second LLM call just to classify it as a greeting —
+# two sequential LLM round trips for what should be an instant reply.
+_GREETING_WORDS = (
+    "hi", "hii", "hiii", "hello", "helo", "hlo", "hey", "heyya", "yo",
+    "hola", "namaste", "sup", "hiya", "howdy", "greetings",
+)
+_THANKS_WORDS = ("thanks", "thank", "thx", "ty", "ok", "okay", "cool", "great", "nice")
+
+# Any short, single, digit-free "word" the user typed — dynamic catch-all,
+# not a fixed dictionary. A bare business token (order/trip/invoice number)
+# always carries a digit (MRP12345, TORD9981, AIN67, 315 — see
+# rag_engine._BARE_TOKEN_RE), so a pure-alpha short token can only be a real
+# short English/Hindi word OR meaningless filler ("ttt", "asdf", "qwe") —
+# either way, a quick "how can I help" reply is the right answer, not a
+# ~108s round trip through the query planner + LLM classifier just to reach
+# the same "chitchat" conclusion the log showed for "ttt".
+_MAX_UNCLEAR_WORD_LEN = 6
+
+
+def _looks_like_unclear_chitchat(q: str) -> bool:
+    # isalpha() already rejects spaces/digits/punctuation — single word only.
+    return bool(q) and q.isalpha() and len(q) <= _MAX_UNCLEAR_WORD_LEN
 
 _LOOKUP_INTENTS = frozenset({"order_lookup", "invoice_lookup", "trip_lookup", "record_lookup"})
 
@@ -77,6 +104,30 @@ def classify_intent_common(question: str) -> Optional[Dict[str, Any]]:
             "max_tokens_hint": 80,
             "retrieve_k": 0,
             "reason": "greeting_or_thanks",
+        }
+
+    if fuzzy_whole_message_match(q, _GREETING_WORDS) or fuzzy_whole_message_match(q, _THANKS_WORDS):
+        return {
+            "intent": "greeting",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "response_style": "short",
+            "max_tokens_hint": 80,
+            "retrieve_k": 0,
+            "reason": "greeting_or_thanks_fuzzy",
+        }
+
+    if _looks_like_unclear_chitchat(q):
+        return {
+            "intent": "chitchat",
+            "needs_rag": False,
+            "needs_calculation": False,
+            "needs_exact_order": False,
+            "response_style": "short",
+            "max_tokens_hint": 80,
+            "retrieve_k": 0,
+            "reason": "short_unclear_word",
         }
     return None
 
