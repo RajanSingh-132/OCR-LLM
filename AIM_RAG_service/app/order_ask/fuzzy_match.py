@@ -79,6 +79,36 @@ def _allowed_distance(word_len: int) -> int:
     return 2
 
 
+def fuzzy_whole_message_match(
+    question: str,
+    trigger_words: Iterable[str],
+    *,
+    max_len: int = 8,
+) -> bool:
+    """
+    For short, single-word-ish messages ONLY (the shape a typo'd greeting/
+    thanks takes — "hiw", "helllo", "thnaks") — checks whether the ENTIRE
+    trimmed message (not a token inside a longer sentence) is within a small
+    edit distance of one trigger word.
+
+    fuzzy_contains_any() intentionally skips words shorter than
+    min_word_len=4 (a short token embedded in an arbitrary sentence — "hi"
+    vs "hit" — is too likely to false-match something unrelated). That
+    restriction doesn't apply here: this only ever compares the WHOLE
+    message, so a 2-letter message can only "collide" with a 2-letter
+    trigger word, not with a random short word buried in a real sentence.
+    """
+    q = (question or "").strip().rstrip("!?.,;:").strip().lower()
+    if not q or not q.isalpha() or len(q) > max_len:
+        return False
+    for trigger in trigger_words:
+        trigger = trigger.lower()
+        allowed = min(_allowed_distance(len(q)), _allowed_distance(len(trigger)))
+        if _damerau_levenshtein_le(q, trigger, allowed):
+            return True
+    return False
+
+
 def fuzzy_contains_any(
     question: str,
     trigger_words: Iterable[str],
