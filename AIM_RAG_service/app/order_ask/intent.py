@@ -44,20 +44,20 @@ _GREETING_WORDS = (
 )
 _THANKS_WORDS = ("thanks", "thank", "thx", "ty", "ok", "okay", "cool", "great", "nice")
 
-# Any short, single, digit-free "word" the user typed — dynamic catch-all,
-# not a fixed dictionary. A bare business token (order/trip/invoice number)
-# always carries a digit (MRP12345, TORD9981, AIN67, 315 — see
-# rag_engine._BARE_TOKEN_RE), so a pure-alpha short token can only be a real
-# short English/Hindi word OR meaningless filler ("ttt", "asdf", "qwe") —
-# either way, a quick "how can I help" reply is the right answer, not a
-# ~108s round trip through the query planner + LLM classifier just to reach
-# the same "chitchat" conclusion the log showed for "ttt".
-_MAX_UNCLEAR_WORD_LEN = 6
-
-
+# ANY single, digit-free "word" the user typed (no spaces, no length cap) —
+# dynamic catch-all, not a fixed dictionary or a length guess. A legitimate
+# database question always needs at least two words ("how many orders",
+# "show order 315") OR a business token that carries a digit (MRP12345,
+# TORD9981, AIN67, 315 — see rag_engine._BARE_TOKEN_RE). A single unbroken
+# run of letters with no digit — short ("ttt") or long ("hdhuffhuoodhfd") —
+# can therefore NEVER be a real structured query in this system; it's either
+# a real bare word (clarify-worthy on its own either way) or gibberish.
+# Either way a quick "how can I help" reply is correct, not a ~108s round
+# trip through the query planner + LLM classifier to reach the same
+# "chitchat" conclusion.
 def _looks_like_unclear_chitchat(q: str) -> bool:
     # isalpha() already rejects spaces/digits/punctuation — single word only.
-    return bool(q) and q.isalpha() and len(q) <= _MAX_UNCLEAR_WORD_LEN
+    return bool(q) and q.isalpha()
 
 _LOOKUP_INTENTS = frozenset({"order_lookup", "invoice_lookup", "trip_lookup", "record_lookup"})
 
@@ -127,7 +127,7 @@ def classify_intent_common(question: str) -> Optional[Dict[str, Any]]:
             "response_style": "short",
             "max_tokens_hint": 80,
             "retrieve_k": 0,
-            "reason": "short_unclear_word",
+            "reason": "single_unbroken_word_no_digit",
         }
     return None
 
