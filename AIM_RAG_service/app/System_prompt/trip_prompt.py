@@ -6,6 +6,7 @@ LLM must answer ONLY from DB CONTEXT blocks passed at runtime.
 
 from app.System_prompt.common import (
     AVAAL_GREETING_PROMPT,
+    ID_PROTECTION_POLICY,
     NATURAL_LIST_FORMAT_POLICY,
     NUMBER_REQUEST_POLICY,
 )
@@ -21,11 +22,11 @@ IDENTITY:
   to the requested information, no preamble.
 
 WHAT YOU CAN ANSWER (anything trip-related from CONTEXT):
-- Full details by trip number / trip id (drivers, phones, trucks, trailers,
+- Full details by trip number (drivers, phones, trucks, trailers,
   pickup/delivery city/state/country, distance, weight, quantity, commodity,
-  customer, company, salesman, order ids, status, type, dates, settlement…)
+  customer, company, salesman, order numbers, status, type, dates, settlement…)
 - Single-trip attribute questions ("who are the drivers for ETP4455",
-  "order ids for ETP4455", "is ETP4455 dispatched / archived / rejected",
+  "order numbers for ETP4455", "is ETP4455 dispatched / archived / rejected",
   "what is the total distance / loaded distance / empty distance of this trip")
 - Lists: recent / only N / by status / driver / truck / customer / company /
   city / state / country / distance range / settlement status
@@ -50,7 +51,7 @@ TRIP STATUS (tripstatus): Planned, Dispatched, Started, In-Transit, Delivered, R
 - "planned and dispatched" = the two statuses combined. "active" / "on road" /
   "running" / "not delivered yet" = any status except Delivered / Rejected / Cancelled.
 
-""".strip() + "\n\n" + NUMBER_REQUEST_POLICY + "\n\n" + NATURAL_LIST_FORMAT_POLICY + "\n\n" + FILTER_CONTEXT_ANSWER_POLICY
+""".strip() + "\n\n" + ID_PROTECTION_POLICY + "\n\n" + NUMBER_REQUEST_POLICY + "\n\n" + NATURAL_LIST_FORMAT_POLICY + "\n\n" + FILTER_CONTEXT_ANSWER_POLICY
 
 TRIP_CONVERSATION_PROMPT = """
 """ + TRIP_SYSTEM_PROMPT + """
@@ -125,7 +126,7 @@ User question: {question}
 
 EXACT TRIP RECORD present => answer asked fields (status, drivers, phones, distance,
 pickup/delivery, customer, etc.). "more" => expand same trip.
-Not found => sweetly say not found; ask again for trip number or trip id (no examples).
+Not found => sweetly say not found; ask again for trip number (no examples).
 Plain text only.
 """
 

@@ -559,23 +559,25 @@ def _answer_order_question_gen(
         ):
             checkpoint("ROUTE", f"{intent} — skip tools/RAG")
             if intent == "ask_for_record_id":
-                # Fixed sweet ask — never leak MRP/TORD/ETP examples via LLM.
+                # Fixed sweet ask — never leak MRP/TORD/ETP examples via LLM,
+                # and never ask for the internal id (business number only —
+                # see ID PROTECTION policy in app/System_prompt/common.py).
                 answer = {
                     "orders": (
-                        "Please provide the order number or order id and "
+                        "Please provide the order number and "
                         "I’ll look it up for you."
                     ),
                     "invoices": (
-                        "Please provide the invoice number or invoice id and "
+                        "Please provide the invoice number and "
                         "I’ll look it up for you."
                     ),
                     "trips": (
-                        "Please provide the trip number or trip id and "
+                        "Please provide the trip number and "
                         "I’ll look it up for you."
                     ),
                 }.get(
                     domain,
-                    "Please provide the number or id and I’ll look it up for you.",
+                    "Please provide the number and I’ll look it up for you.",
                 )
                 yield {"type": "chunk", "text": answer}
             else:

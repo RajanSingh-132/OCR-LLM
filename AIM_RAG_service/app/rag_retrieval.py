@@ -1,9 +1,12 @@
 """
 RAG (Retrieval-Augmented Generation) vector store and retrieval operations
 """
+import time
+
 import numpy as np
 from langchain_core.documents import Document
 from app.mongo_client import get_mongo_collection, _to_python_types
+from app.order_ask.checkpoint import checkpoint
 
 
 class MongoRetriever:
@@ -97,45 +100,49 @@ class MongoVectorStore:
             k=15,
             fetch_k=60
     ):
-        """Search for documents similar to the query using cosine similarity"""
+        """Search for documents similar to the query using cosine similarity.
+
+        Two-pass on purpose: pass 1 pulls ONLY `_id` + `embedding` for every
+        document in the namespace (needed to rank them) — not the full
+        page_content/metadata, which for order/trip/invoice docs can be
+        several KB EACH. Pass 2 then fetches page_content/metadata for just
+        the k winners. Previously this pulled full page_content + metadata +
+        embedding for every single document in the namespace on every query
+        (regardless of k), and returned the full embedding vector in every
+        result's metadata even though nothing downstream ever reads it back
+        — both were pure overhead once the score is computed here.
+        """
+        t0 = time.perf_counter()
+
         query_embedding = np.array(
             self.embeddings.embed_query(query)
         )
-
-        if np.linalg.norm(query_embedding) == 0:
-            return []
-
-        docs = list(
-            self.collection.find(
-                {"namespace": self.namespace},
-                {
-                    "_id": 0,
-                    "page_content": 1,
-                    "metadata": 1,
-                    "embedding": 1
-                }
-            )
-        )
-
-        if not docs:
-            return []
-
-        # Vectorized similarity search optimization:
-        # Instead of iterating sequentially in a slow Python loop, we construct a 2D matrix
-        # and compute all cosine similarities in a single optimized NumPy linear algebra call.
-        # This speeds up retrieval matching tremendously as documents increase.
-        valid_docs = [doc for doc in docs if doc.get("embedding") is not None]
-        if not valid_docs:
-            return []
-
-        embeddings_matrix = np.array([doc["embedding"] for doc in valid_docs])
+        t_embed = time.perf_counter()
 
         query_norm = np.linalg.norm(query_embedding)
         if query_norm == 0:
             return []
 
-        doc_norms = np.linalg.norm(embeddings_matrix, axis=1)
+        # Pass 1: rank — embedding only, not the full document.
+        rank_docs = list(
+            self.collection.find(
+                {"namespace": self.namespace, "embedding": {"$exists": True, "$ne": None}},
+                {"_id": 1, "embedding": 1}
+            )
+        )
+        t_rank_fetch = time.perf_counter()
 
+        if not rank_docs:
+            checkpoint(
+                "RAG_TIMING", "similarity_search (no candidates)",
+                namespace=self.namespace,
+                embed_ms=int((t_embed - t0) * 1000),
+                rank_fetch_ms=int((t_rank_fetch - t_embed) * 1000),
+            )
+            return []
+
+        embeddings_matrix = np.array([doc["embedding"] for doc in rank_docs])
+        doc_norms = np.linalg.norm(embeddings_matrix, axis=1)
         dot_products = np.dot(embeddings_matrix, query_embedding)
 
         denoms = query_norm * doc_norms
@@ -143,23 +150,48 @@ class MongoVectorStore:
         valid_denoms = denoms > 0
         scores[valid_denoms] = dot_products[valid_denoms] / denoms[valid_denoms]
 
-        scored = list(zip(scores, valid_docs))
-        scored.sort(key=lambda x: x[0], reverse=True)
+        scored = sorted(zip(scores, rank_docs), key=lambda x: x[0], reverse=True)
+        top = scored[:k]
+        t_score = time.perf_counter()
 
-        candidate_limit = max(k, fetch_k)
-        top = scored[:candidate_limit]
-
-        return [
-            Document(
-                page_content=item["page_content"],
-                metadata={
-                    **item.get("metadata", {}),
-                    "embedding": item.get("embedding"),
-                    "similarity_score": float(score)
-                }
+        # Pass 2: fetch only the winners' page_content/metadata — no embedding.
+        top_ids = [item["_id"] for _, item in top]
+        detail_docs = {
+            d["_id"]: d
+            for d in self.collection.find(
+                {"_id": {"$in": top_ids}},
+                {"page_content": 1, "metadata": 1}
             )
-            for score, item in top[:k]
-        ]
+        }
+        t_detail_fetch = time.perf_counter()
+
+        checkpoint(
+            "RAG_TIMING", "similarity_search",
+            namespace=self.namespace,
+            candidates=len(rank_docs),
+            returned=len(top),
+            embed_ms=int((t_embed - t0) * 1000),
+            rank_fetch_ms=int((t_rank_fetch - t_embed) * 1000),
+            score_ms=int((t_score - t_rank_fetch) * 1000),
+            detail_fetch_ms=int((t_detail_fetch - t_score) * 1000),
+            total_ms=int((t_detail_fetch - t0) * 1000),
+        )
+
+        results = []
+        for score, item in top:
+            detail = detail_docs.get(item["_id"])
+            if not detail:
+                continue
+            results.append(
+                Document(
+                    page_content=detail.get("page_content", ""),
+                    metadata={
+                        **detail.get("metadata", {}),
+                        "similarity_score": float(score)
+                    }
+                )
+            )
+        return results
 
 
 def get_vectorstore(

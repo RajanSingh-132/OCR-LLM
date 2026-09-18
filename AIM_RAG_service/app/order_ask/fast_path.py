@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from app.order_ask.checkpoint import checkpoint
+from app.order_ask.fuzzy_match import fuzzy_contains_any
 from app.tenants.router import (
     get_domain_collection,
     get_domain_metadata_type,
@@ -39,6 +40,11 @@ _COUNT_WORDS_RE = re.compile(
     r"\b(how\s+many|count\s+of|total(?:\s+number\s+of)?|number\s+of|kitne|kitni)\b",
     re.IGNORECASE,
 )
+# Fuzzy fallback trigger words — checked ONLY when _COUNT_WORDS_RE above finds
+# no exact match (see fuzzy_match.fuzzy_contains_any), so a typo like "how
+# mnay orders today" still hits this fast path instead of falling through to
+# the ~5-100s LLM query planner for what is still just a plain count.
+_COUNT_TRIGGER_WORDS = ("many", "much", "total", "number", "count", "kitne", "kitni")
 
 # If the question mentions any of these, it wants more than a plain date
 # count (a filter, a metric, a comparison) — bail out to the LLM planner
@@ -119,7 +125,9 @@ def try_count_fast_path(question: str, domain: str) -> Optional[Dict[str, Any]]:
         return None
 
     q = (question or "").strip()
-    if not q or not _COUNT_WORDS_RE.search(q):
+    if not q:
+        return None
+    if not fuzzy_contains_any(q, _COUNT_TRIGGER_WORDS, exact_re=_COUNT_WORDS_RE):
         return None
     if _HAS_OTHER_FILTERS_RE.search(q):
         return None

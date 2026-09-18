@@ -16,6 +16,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from app.order_ask.checkpoint import checkpoint
+from app.order_ask.fuzzy_match import fuzzy_contains_any
 from app.tenants.router import (
     get_orders_collection,
     get_orders_metadata_type,
@@ -197,7 +198,10 @@ def is_profitability_question(question: str) -> bool:
     month" would otherwise be caught by the period-orders or best-customer
     branches, which don't compute profit at all."""
     q = (question or "").lower()
-    if re.search(rf"\b({_PROFIT_WORDS})\b", q):
+    if fuzzy_contains_any(
+        q, ("profit", "profitable", "profitability", "margin"),
+        exact_re=re.compile(rf"\b({_PROFIT_WORDS})\b"),
+    ):
         return True
     if re.search(r"\blos(?:e|es|ing|s)\b[^.?!]{0,20}\bmoney\b", q):
         return True
