@@ -5,15 +5,18 @@ keeps MongoDB in sync with the latest PAGE_SIZE records.
   python -m app.sync.order_live_api
   (or)  python app/sync/order_live_api.py
 
-Runs forever until Ctrl+C. Multi-tenant: syncs every corporate_id in
-CORPORATE_IDS from ONE process — every cycle, all tenants are hit
-CONCURRENTLY (ThreadPoolExecutor, one thread per tenant), so the cycle's
-total time is bounded by the SLOWEST tenant, not the sum of all of them.
-DB_NAME_OVERRIDES still maps AFMQA -> chatbot_db; every other corporate_id
-falls back to using its own id as the Mongo database name (e.g. AFN01992 ->
-Mongo db "AFN01992") unless an override is added for it.
+Runs forever until Ctrl+C. Multi-tenant, with a dynamic tenant list:
+  - At startup (ONCE), TENANT_QUERY in app/tenants/tenant_provisioning.py
+    runs on Postgres (AFM_Manager.mstcompany) and returns the company codes.
+  - Each code becomes a Mongo database of the same name (e.g. AFN00242 ->
+    Mongo db "AFN00242") holding Avaal_order / Avaal_trip / Avaal_invoice.
+    Missing databases/collections are created before any API call; existing
+    ones are left as they are. AFMQA follows the same rule (Mongo db
+    "AFMQA") whenever the query returns it.
+  - A tenant added in Postgres later is picked up on the next restart.
+Every cycle the tenants are synced ONE BY ONE (sequentially).
 
-Each cycle, PER TENANT (in parallel):
+Each cycle, PER TENANT:
   1. POST listorder (header corporateid: <tenant>, body {"Filter": {...}},
      pageno=1, pagesize=PAGE_SIZE) -> the PAGE_SIZE most recent records.
   2. Keep only records whose `createdon` is within the last calendar month
@@ -25,9 +28,7 @@ Each cycle, PER TENANT (in parallel):
        - orderid not stored yet -> insert it as a new doc.
   4. Embeddings for the whole cycle's records are computed CONCURRENTLY
      (a second, inner ThreadPoolExecutor) since Bedrock's Titan endpoint only
-     takes one text per call — see `_embed_texts`. So a full cycle has two
-     levels of parallelism: one thread per tenant, and within each tenant's
-     thread, one thread per record being embedded.
+     takes one text per call — see `_embed_texts`.
 
 Safety / operational notes (read before leaving this running unattended):
   - This process must stay running for the sync to keep happening — closing
@@ -66,6 +67,7 @@ if ROOT not in sys.path:
 
 from app.embedding_client import get_embeddings
 from app.mongo_client import _to_python_types, get_mongo_collection
+from app.tenants.tenant_provisioning import ensure_mongo_database, load_company_codes
 
 logger = logging.getLogger("app.sync.order_live_api")
 
@@ -73,11 +75,8 @@ logger = logging.getLogger("app.sync.order_live_api")
 API_BASE = "https://beta.afmsuite.ai"
 LISTORDER_PATH = "/api/Order/listorder"
 API_VERSION = "1.0"
-# Every tenant this ONE process syncs, hit concurrently each cycle.
-CORPORATE_IDS = [
-    "AFMQA", "AFN01992", "AFN01856", "AFN01813",
-    "AFN01514", "AFN00292", "AFN00861", "AFN01801", "AFN00681",
-]
+# Tenants are no longer hardcoded: main() loads them ONCE at startup from
+# Postgres (AFM_Manager.mstcompany, see app/tenants/tenant_provisioning.py).
 EXTRA_HEADERS: Dict[str, str] = {}
 
 # `Filter` payload — capital "Filter" required by the API. Every field must
@@ -136,7 +135,9 @@ REQUEST_TIMEOUT = 60      # seconds — must stay well under SLEEP_SECONDS
 USE_API_DATE_FILTER = True
 API_DATE_TYPE = "CD"
 
-DB_NAME_OVERRIDES = {"AFMQA": "chatbot_db"}
+# Every tenant uses its own company code as the Mongo database name
+# (AFMQA -> "AFMQA" too). Add an entry here only to redirect a tenant.
+DB_NAME_OVERRIDES: Dict[str, str] = {}
 COLLECTION_NAME = "Avaal_order"
 NAMESPACE = "avaal_orders"
 METADATA_TYPE = "avaal_order"
@@ -652,11 +653,36 @@ def maybe_run_daily_cleanup(corporate_id: str) -> Dict[str, Any] | None:
     return result
 
 
+def prepare_tenants() -> List[str]:
+    """Load the tenant list from Postgres (once) and make sure each tenant's
+    Mongo database + collections exist. Returns only the tenants whose
+    database is ready, so the API is never called for a tenant without one."""
+    codes = load_company_codes()
+    logger.info("Postgres tenant query returned %d company codes: %s", len(codes), codes)
+
+    ready: List[str] = []
+    for code in codes:
+        database = _db_name(code)
+        try:
+            info = ensure_mongo_database(database)
+        except Exception:  # noqa: BLE001 — skip this tenant, keep the rest
+            logger.exception("[%s] could not create Mongo db %s; skipping", code, database)
+            continue
+        if info["db_existed"] and not info["collections_created"]:
+            logger.info("[%s] Mongo db %s already exists", code, database)
+        else:
+            logger.info(
+                "[%s] Mongo db %s ready (db created: %s, collections created: %s)",
+                code, database, not info["db_existed"], info["collections_created"],
+            )
+        ready.append(code)
+    return ready
+
+
 def _process_one_tenant(corporate_id: str, cycle_no: int) -> None:
-    """Runs in its own thread — one tenant's sync + daily-cleanup check.
-    Every exception is caught and logged here (never re-raised) so one
-    tenant's failure can never affect the other tenants running concurrently
-    in this same cycle, nor kill the daemon."""
+    """One tenant's sync + daily-cleanup check. Every exception is caught and
+    logged here (never re-raised) so one tenant's failure can never affect
+    the other tenants in this same cycle, nor kill the daemon."""
     try:
         status = run_one_cycle(corporate_id)
         logger.info("[%s] cycle %s: %s", corporate_id, cycle_no, status)
@@ -679,11 +705,20 @@ def _process_one_tenant(corporate_id: str, cycle_no: int) -> None:
 
 def main() -> int:
     _setup_logging()
+    try:
+        corporate_ids = prepare_tenants()
+    except Exception:  # noqa: BLE001 — without a tenant list there is nothing to sync
+        logger.exception("Could not load the tenant list from Postgres; exiting")
+        return 1
+    if not corporate_ids:
+        logger.error("No tenants to sync (Postgres query returned none ready); exiting")
+        return 1
+
     logger.info(
         "Starting live order sync: corporateids=%s every %ss (%s records/cycle "
-        "per tenant, all tenants concurrent), daily purge of records older than "
+        "per tenant, tenants one by one), daily purge of records older than "
         "%s month(s) every %sh",
-        CORPORATE_IDS,
+        corporate_ids,
         SLEEP_SECONDS,
         PAGE_SIZE,
         RECENT_MONTHS,
@@ -696,24 +731,15 @@ def main() -> int:
             cycle_no += 1
             cycle_start = time.perf_counter()
 
-            # All tenants hit concurrently — cycle time is bounded by the
-            # SLOWEST tenant, not the sum of every tenant's own time.
-            with ThreadPoolExecutor(max_workers=len(CORPORATE_IDS)) as pool:
-                futures = [
-                    pool.submit(_process_one_tenant, corp_id, cycle_no)
-                    for corp_id in CORPORATE_IDS
-                ]
-                for future in as_completed(futures):
-                    future.result()  # re-raises only truly unexpected bugs in
-                    # _process_one_tenant itself (it already catches its own
-                    # per-tenant errors), so those still surface below.
+            for corp_id in corporate_ids:
+                _process_one_tenant(corp_id, cycle_no)
 
             elapsed = time.perf_counter() - cycle_start
             logger.info(
                 "cycle %s finished in %.2fs (%d tenants); sleeping %ss before next cycle",
                 cycle_no,
                 elapsed,
-                len(CORPORATE_IDS),
+                len(corporate_ids),
                 SLEEP_SECONDS,
             )
             time.sleep(SLEEP_SECONDS)

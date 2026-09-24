@@ -85,10 +85,10 @@ def validate_corporate_id(raw: str) -> str:
     return corporate_id
 
 
-# Hardcoded override: this corporate_id uses shared chatbot_db (not AFMQA as DB name)
-_CORPORATE_DB_OVERRIDES = {
-    "AFMQA": "chatbot_db",
-}
+# Every corporate_id reads from the Mongo database of the same name
+# (AFMQA -> "AFMQA" too), matching the sync scripts. Add an entry here only
+# to redirect a tenant to a different database.
+_CORPORATE_DB_OVERRIDES: Dict[str, str] = {}
 
 
 def _database_name(corporate_id: str) -> str:
