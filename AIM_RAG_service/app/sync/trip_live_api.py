@@ -95,7 +95,7 @@ LISTTRIP_PATH = "/api/Trip/gettriplist"
 API_VERSION = "1.0"
 # Every tenant this ONE process syncs, hit concurrently each cycle.
 CORPORATE_IDS = [
-    "AFMQA", "AFN01992", "AFN01856", "AFN01813", "AFN01619",
+    "AFMQA", "AFN01992", "AFN01856", "AFN01813",
     "AFN01514", "AFN00292", "AFN00861", "AFN01801", "AFN00681",
 ]
 EXTRA_HEADERS: Dict[str, str] = {}
