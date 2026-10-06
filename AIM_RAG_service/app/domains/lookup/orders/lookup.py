@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Optional
 
-from app.order_ask.rag_retrieval import extract_order_token
+from app.Ai_Assistant.rag_retrieval import extract_order_token
 
 INTENT_NAME = "order_lookup"
 DOMAIN = "orders"

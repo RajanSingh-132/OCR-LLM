@@ -15,8 +15,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from app.order_ask.config import checkpoint
-from app.order_ask.fuzzy_match import fuzzy_contains_any
+from app.Ai_Assistant.config import checkpoint
+from app.Ai_Assistant.fuzzy_match import fuzzy_contains_any
 from app.tenants.router import (
     get_orders_collection,
     get_orders_metadata_type,
@@ -915,7 +915,7 @@ def parse_address_geo(addr: Optional[str]) -> Optional[Dict[str, str]]:
     but suite lines and missing fields shift positions, so we anchor from the RIGHT
     and validate each token instead of trusting fixed indexes.
     """
-    from app.order_ask.field_catalog import resolve_state_token
+    from app.Ai_Assistant.field_catalog import resolve_state_token
 
     if not addr or not str(addr).strip():
         return None
@@ -1002,7 +1002,7 @@ def _geo_status_filters(entities: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 def _geo_match(filters: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not filters:
         return _base_match()
-    from app.order_ask.rag_retrieval import _base_order_match
+    from app.Ai_Assistant.rag_retrieval import _base_order_match
 
     return _base_order_match(filters)
 
@@ -1455,7 +1455,7 @@ def status_summary(
 
     collection = get_orders_collection()
     if filters:
-        from app.order_ask.rag_retrieval import _base_order_match
+        from app.Ai_Assistant.rag_retrieval import _base_order_match
 
         match = _base_order_match(filters)
     else:

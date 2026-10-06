@@ -9,8 +9,8 @@ from langchain_core.documents import Document
 
 from app.domains.registry import get_domain_profile
 from app.embedding_client import get_models
-from app.order_ask.config import checkpoint
-from app.order_ask.config import AVAAL_RAG_MIN_SCORE
+from app.Ai_Assistant.config import checkpoint
+from app.Ai_Assistant.config import AVAAL_RAG_MIN_SCORE
 from app.rag_retrieval import MongoVectorStore
 from app.tenants.context import get_active_domain
 from app.tenants.router import (
@@ -31,7 +31,7 @@ def _base_match(filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     # Orders: geo filters (state/city/pin) live inside address strings —
     # use the order-specific matcher (not naive top-level field equality).
     if domain == "orders" and filters:
-        from app.order_ask.rag_retrieval import _base_order_match
+        from app.Ai_Assistant.rag_retrieval import _base_order_match
 
         return _base_order_match(filters)
 

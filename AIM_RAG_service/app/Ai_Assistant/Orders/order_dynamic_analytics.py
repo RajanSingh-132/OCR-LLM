@@ -10,7 +10,7 @@ Filters (status / customer / date / place) are NOT chosen by the planner — the
 still come from the tested entity-extraction layer via ``_base_order_match``.
 
 ``run_dynamic_analytics`` returns ``None`` (caller falls back to the hardcoded
-``app.order_ask.analytics`` engine) whenever the planner is disabled, errors,
+``app.Ai_Assistant.Orders.order_analytics`` engine) whenever the planner is disabled, errors,
 produces an invalid/degenerate spec, or the question is one the specialised
 catalog engine handles better (geo string parsing, date-activity, period,
 trip-distance, customer ranking).
@@ -27,9 +27,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from langchain_core.prompts import PromptTemplate
 
 from app.embedding_client import get_anthropic_llm, get_xai_llm
-from app.order_ask.config import checkpoint
-from app.order_ask.entities import entities_to_mongo_filters
-from app.order_ask.rag_retrieval import _base_order_match
+from app.Ai_Assistant.config import checkpoint
+from app.Ai_Assistant.entities import entities_to_mongo_filters
+from app.Ai_Assistant.rag_retrieval import _base_order_match
 from app.tenants.context import require_tenant
 from app.tenants.router import get_orders_collection
 

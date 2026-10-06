@@ -18,8 +18,8 @@ from app.domains.lookup.trips.lookup import (
     try_lookup_intent,
 )
 from app.domains.lookup.base import is_ask_for_record_id_question
-from app.order_ask.calculation_engine import is_calculation_question
-from app.order_ask.trip_analytics import (
+from app.Ai_Assistant.calculation_engine import is_calculation_question
+from app.Ai_Assistant.Trips.trip_analytics import (
     detect_location_side,
     is_best_trip_question,
     is_status_summary_question,
@@ -703,7 +703,7 @@ def plan_tools(
     entities: Dict[str, Any],
     intent_info: Dict[str, Any],
 ) -> List[str]:
-    from app.order_ask.tools import (
+    from app.Ai_Assistant.tools import (
         TOOL_COUNT,
         TOOL_GET_RECORD,
         TOOL_LIST_RECENT,

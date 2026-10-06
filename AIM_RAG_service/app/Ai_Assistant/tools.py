@@ -23,19 +23,19 @@ from app.domains.rules.base import build_calc_result, format_domain_calc_context
 from app.domains.lookup import get_lookup_module
 from app.domains.rules.invoices import needs_sum as invoice_needs_sum
 from app.embedding_client import get_models
-from app.order_ask.analytics import (
+from app.Ai_Assistant.Orders.order_analytics import (
     format_analytics_for_context,
     run_analytics,
 )
-from app.order_ask.calculation_engine import (
+from app.Ai_Assistant.calculation_engine import (
     execute_formulas,
     format_calculation_result_for_context,
     is_calculation_question,
     match_formulas,
     run_calculation_engine,
 )
-from app.order_ask.config import checkpoint
-from app.order_ask.entities import entities_to_mongo_filters
+from app.Ai_Assistant.config import checkpoint
+from app.Ai_Assistant.entities import entities_to_mongo_filters
 from app.tenants.context import get_active_domain
 
 TOOL_GET_RECORD = "get_record"
@@ -231,7 +231,7 @@ def execute_tools(
         elif name == TOOL_RUN_ANALYTICS and domain == "orders":
             # Planner first: understand operation + fields from the question.
             # Falls back to the hardcoded catalog engine on None.
-            from app.order_ask.dynamic_analytics import (
+            from app.Ai_Assistant.Orders.order_dynamic_analytics import (
                 format_dynamic_analytics_for_context,
                 run_dynamic_analytics,
             )
@@ -250,7 +250,7 @@ def execute_tools(
             tools_run.append(name)
 
         elif name == TOOL_RUN_ANALYTICS and domain == "trips":
-            from app.order_ask.trip_analytics import (
+            from app.Ai_Assistant.Trips.trip_analytics import (
                 format_trip_analytics_for_context,
                 run_trip_analytics,
             )
@@ -262,7 +262,7 @@ def execute_tools(
             tools_run.append(name)
 
         elif name == TOOL_RUN_ANALYTICS and domain == "invoices":
-            from app.order_ask.invoice_analytics import (
+            from app.Ai_Assistant.Invoices.invoice_analytics import (
                 format_invoice_analytics_for_context,
                 run_invoice_analytics,
             )

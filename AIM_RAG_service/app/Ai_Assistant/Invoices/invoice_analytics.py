@@ -10,7 +10,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.order_ask.config import checkpoint
+from app.Ai_Assistant.config import checkpoint
 from app.tenants.router import (
     get_domain_collection,
     get_domain_metadata_type,

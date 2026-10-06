@@ -18,8 +18,8 @@ from app.domains.lookup.invoices.lookup import (
     try_lookup_intent,
 )
 from app.domains.lookup.base import is_ask_for_record_id_question
-from app.order_ask.calculation_engine import is_calculation_question
-from app.order_ask.invoice_analytics import (
+from app.Ai_Assistant.calculation_engine import is_calculation_question
+from app.Ai_Assistant.Invoices.invoice_analytics import (
     detect_period_days,
     detect_status_filter,
     is_best_invoice_customer_question,
@@ -429,7 +429,7 @@ def plan_tools(
     entities: Dict[str, Any],
     intent_info: Dict[str, Any],
 ) -> List[str]:
-    from app.order_ask.tools import (
+    from app.Ai_Assistant.tools import (
         TOOL_COUNT,
         TOOL_GET_RECORD,
         TOOL_LIST_RECENT,

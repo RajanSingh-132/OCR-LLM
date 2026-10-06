@@ -7,7 +7,7 @@ Does NOT ingest order records — put JSON in avaal_orders/data/ later.
 import datetime
 import logging
 
-from app.order_ask.config import (
+from app.Ai_Assistant.config import (
     AVAAL_COLLECTION_NAME,
     AVAAL_NAMESPACE,
     AVAAL_SOURCE_DOCUMENT,

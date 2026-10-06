@@ -17,7 +17,7 @@ except Exception:
     _PYPDFIUM2_AVAILABLE = False
 from typing import List
 import numpy as np
-from langchain_ollama import OllamaLLM
+# from langchain_ollama import OllamaLLM
 from langchain_aws import BedrockEmbeddings
 
 from langchain_community.document_loaders import PyPDFLoader

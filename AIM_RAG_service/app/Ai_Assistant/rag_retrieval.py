@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.documents import Document
 
-from app.order_ask.config import checkpoint
+from app.Ai_Assistant.config import checkpoint
 from app.tenants.router import (
     get_orders_collection,
     get_orders_metadata_type,
@@ -50,7 +50,7 @@ def _side_address_ors(
 
 def _state_address_pattern(state: str) -> str:
     """Match state/province inside address: ', CA,' or ', California,'."""
-    from app.order_ask.field_catalog import STATE_ALIASES, resolve_state_token
+    from app.Ai_Assistant.field_catalog import STATE_ALIASES, resolve_state_token
 
     code = resolve_state_token(state) or (state.strip().upper() if len(state.strip()) <= 3 else None)
     tokens: List[str] = []

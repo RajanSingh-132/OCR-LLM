@@ -15,7 +15,7 @@ from app.System_prompt.order_prompt import (  # noqa: F401
 ORDER_CORE_POLICY = ORDER_SYSTEM_PROMPT
 
 try:
-    from app.order_ask.field_catalog import format_field_catalog_for_prompt
+    from app.Ai_Assistant.field_catalog import format_field_catalog_for_prompt
 
     FILTERABLE_FIELDS_JSON = (
         format_field_catalog_for_prompt().replace("{", "{{").replace("}", "}}")

@@ -23,8 +23,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
-from app.order_ask.config import checkpoint
-from app.order_ask.fuzzy_match import fuzzy_contains_any
+from app.Ai_Assistant.config import checkpoint
+from app.Ai_Assistant.fuzzy_match import fuzzy_contains_any
 from app.tenants.router import (
     get_domain_collection,
     get_domain_metadata_type,
@@ -103,15 +103,15 @@ def _period_range(period: str, now: datetime) -> Tuple[str, str]:
 
 def _format_context(domain: str, payload: Dict[str, Any]) -> str:
     if domain == "orders":
-        from app.order_ask.dynamic_analytics import (
+        from app.Ai_Assistant.Orders.order_dynamic_analytics import (
             format_dynamic_analytics_for_context as fmt,
         )
     elif domain == "trips":
-        from app.order_ask.trip_dynamic_analytics import (
+        from app.Ai_Assistant.Trips.trip_dynamic_analytics import (
             format_trip_dynamic_analytics_for_context as fmt,
         )
     else:
-        from app.order_ask.invoice_dynamic_analytics import (
+        from app.Ai_Assistant.Invoices.invoice_dynamic_analytics import (
             format_invoice_dynamic_analytics_for_context as fmt,
         )
     return fmt(payload)

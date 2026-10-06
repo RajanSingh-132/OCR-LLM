@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from app.domains.rules import get_domain_rules
-from app.order_ask.config import checkpoint
+from app.Ai_Assistant.config import checkpoint
 from app.tenants.context import get_active_domain
 
 # Backward-compatible re-exports for order-specific callers

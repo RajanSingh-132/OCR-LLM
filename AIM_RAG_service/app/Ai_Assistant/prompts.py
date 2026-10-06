@@ -7,7 +7,7 @@ module only keeps ORDER_FORMULA_PROMPT (+ its shared ORDERBOT_CORE_POLICY),
 used as the calculation-answer fallback in rag_engine.py.
 """
 
-from app.order_ask.field_catalog import format_field_catalog_for_prompt
+from app.Ai_Assistant.field_catalog import format_field_catalog_for_prompt
 from app.domains.lookup.base import NUMBER_REQUEST_POLICY
 from app.System_prompt.common import ID_PROTECTION_POLICY
 

@@ -21,8 +21,8 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.order_ask.config import checkpoint
-from app.order_ask.dynamic_analytics import (
+from app.Ai_Assistant.config import checkpoint
+from app.Ai_Assistant.Orders.order_dynamic_analytics import (
     AGG_TIMEOUT_MS,
     GROUPABLE_MAX_DISTINCT,
     SCHEMA_SAMPLE_SIZE,
@@ -34,7 +34,7 @@ from app.order_ask.dynamic_analytics import (
     _walk,
     resolve_field,
 )
-from app.order_ask.invoice_analytics import _base_match as _invoice_base_match
+from app.Ai_Assistant.Invoices.invoice_analytics import _base_match as _invoice_base_match
 from app.tenants.context import require_tenant
 from app.tenants.router import get_domain_collection
 

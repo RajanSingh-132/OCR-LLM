@@ -11,7 +11,7 @@ import re
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
-from app.order_ask.config import checkpoint
+from app.Ai_Assistant.config import checkpoint
 from app.tenants.router import (
     get_domain_collection,
     get_domain_metadata_type,

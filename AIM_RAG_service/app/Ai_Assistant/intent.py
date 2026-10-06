@@ -14,9 +14,9 @@ from app.domains.lookup import get_lookup_module
 from app.domains.rules import get_domain_rules
 from app.domains.rules.prompts import DOMAIN_INTENT_SUFFIX
 from app.embedding_client import get_anthropic_llm, get_xai_llm
-from app.order_ask.calculation_engine import is_calculation_question
-from app.order_ask.config import checkpoint
-from app.order_ask.fuzzy_match import fuzzy_whole_message_match
+from app.Ai_Assistant.calculation_engine import is_calculation_question
+from app.Ai_Assistant.config import checkpoint
+from app.Ai_Assistant.fuzzy_match import fuzzy_whole_message_match
 from app.System_prompt.intent_prompt import INTENT_CLASSIFY_PROMPT
 from app.tenants.context import get_active_domain
 

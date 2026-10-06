@@ -19,23 +19,23 @@ from typing import Any, Dict, Optional
 from langchain_core.prompts import PromptTemplate
 
 from app.embedding_client import get_anthropic_llm, get_xai_llm
-from app.order_ask.calculation_engine import (
+from app.Ai_Assistant.calculation_engine import (
     format_calculation_result_for_context,
     list_formula_catalog_for_prompt,
 )
-from app.order_ask.config import CheckpointTimer, checkpoint
-from app.order_ask.entities import extract_entities
-from app.order_ask.intent import classify_intent_common, understand_question
-from app.order_ask.memory import (
+from app.Ai_Assistant.config import CheckpointTimer, checkpoint
+from app.Ai_Assistant.entities import extract_entities
+from app.Ai_Assistant.intent import classify_intent_common, understand_question
+from app.Ai_Assistant.memory import (
     format_history_for_prompt,
     load_session,
     new_session_id,
     save_turn,
 )
-from app.order_ask.prompts import ORDER_FORMULA_PROMPT
+from app.Ai_Assistant.prompts import ORDER_FORMULA_PROMPT
 from app.domains.detect import detect_domain
 from app.domains.lookup import get_domain_prompts, get_lookup_module
-from app.order_ask.tools import execute_tools, plan_tools
+from app.Ai_Assistant.tools import execute_tools, plan_tools
 from app.tenants.context import AskContext
 from app.tenants.mapping import InvalidCorporateIdError, get_tenant_config
 from app.tenants.models import TenantConfig
@@ -358,7 +358,7 @@ def _answer_order_question_gen(
         fast_path_hit = False
         if domain in ("orders", "invoices", "trips") and not replay_of:
             try:
-                from app.order_ask.fast_path import try_count_fast_path
+                from app.Ai_Assistant.fast_path import try_count_fast_path
 
                 precomputed_tool_result = try_count_fast_path(
                     effective_question, domain
@@ -399,19 +399,19 @@ def _answer_order_question_gen(
         ):
             try:
                 if domain == "orders":
-                    from app.order_ask.query_planner import (
+                    from app.Ai_Assistant.Orders.order_query_planner import (
                         PLANNER_ENABLED,
                         execute_query_plan,
                         run_query_planner,
                     )
                 elif domain == "trips":
-                    from app.order_ask.trip_query_planner import (
+                    from app.Ai_Assistant.Trips.trip_query_planner import (
                         TRIP_PLANNER_ENABLED as PLANNER_ENABLED,
                         execute_trip_query_plan as execute_query_plan,
                         run_trip_query_planner as run_query_planner,
                     )
                 else:
-                    from app.order_ask.invoice_query_planner import (
+                    from app.Ai_Assistant.Invoices.invoice_query_planner import (
                         INVOICE_PLANNER_ENABLED as PLANNER_ENABLED,
                         execute_invoice_query_plan as execute_query_plan,
                         run_invoice_query_planner as run_query_planner,

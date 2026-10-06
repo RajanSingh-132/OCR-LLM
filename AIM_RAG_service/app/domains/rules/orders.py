@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from app.domains.rules.base import DomainRules, extract_limit
 from app.domains.lookup.orders.lookup import extract_token as extract_order_token
 from app.domains.lookup.base import is_ask_for_record_id_question
-from app.order_ask.calculation_engine import is_calculation_question
+from app.Ai_Assistant.calculation_engine import is_calculation_question
 
 DOMAIN = "orders"
 
@@ -314,7 +314,7 @@ def extract_entities(
         if m and not re.fullmatch(r"20\d{2}", m.group(1)[:4]):
             entities["pin"] = m.group(1)
 
-    from app.order_ask.field_catalog import find_state_in_text, resolve_state_token
+    from app.Ai_Assistant.field_catalog import find_state_in_text, resolve_state_token
 
     is_state_wise = bool(
         re.search(
@@ -415,7 +415,7 @@ def extract_entities(
     if m:
         city = m.group(1).strip(" .,")
         # Prefer state resolution first — don't treat Ontario as a city
-        from app.order_ask.field_catalog import resolve_state_token
+        from app.Ai_Assistant.field_catalog import resolve_state_token
 
         if resolve_state_token(city):
             pass
@@ -455,7 +455,7 @@ def extract_entities(
     if m:
         entities["commodityname"] = m.group(1).strip(" .,")
 
-    from app.order_ask.analytics import detect_location_side
+    from app.Ai_Assistant.Orders.order_analytics import detect_location_side
 
     if any(entities.get(k) for k in ("pin", "state", "city", "address", "location")):
         entities["location_side"] = detect_location_side(q)
@@ -466,7 +466,7 @@ def extract_entities(
         if pin_norm == tok_norm or tok_norm in pin_norm:
             entities.pop("order_token", None)
 
-    from app.order_ask.analytics import (
+    from app.Ai_Assistant.Orders.order_analytics import (
         detect_date_field,
         detect_period_days,
         extract_any_date_from_question,
@@ -530,7 +530,7 @@ def extract_entities(
     if is_trip_distance_question(q):
         entities["analytics"] = "trip_distance"
 
-    from app.order_ask.analytics import (
+    from app.Ai_Assistant.Orders.order_analytics import (
         is_best_order_question,
         is_orders_by_country_question,
         is_today_orders_question,
@@ -722,7 +722,7 @@ def classify_intent_local(
     # would otherwise steal a profitability question that has a typo'd
     # "customer" (their own not-customer guard fails to save it) or any other
     # wording overlap, since none of those branches compute profit at all.
-    from app.order_ask.analytics import is_profitability_question
+    from app.Ai_Assistant.Orders.order_analytics import is_profitability_question
 
     if is_profitability_question(q):
         return {
@@ -765,7 +765,7 @@ def classify_intent_local(
             "reason": "order_details_without_token",
         }
 
-    from app.order_ask.analytics import (
+    from app.Ai_Assistant.Orders.order_analytics import (
         is_analytics_question,
         is_best_customer_question,
         is_best_city_question,
@@ -933,7 +933,7 @@ def classify_intent_local(
         }
 
     if is_best_customer_question(q):
-        from app.order_ask.analytics import detect_customer_direction
+        from app.Ai_Assistant.Orders.order_analytics import detect_customer_direction
 
         direction = detect_customer_direction(q)
         return {
@@ -1182,7 +1182,7 @@ def plan_tools(
     entities: Dict[str, Any],
     intent_info: Dict[str, Any],
 ) -> List[str]:
-    from app.order_ask.tools import (
+    from app.Ai_Assistant.tools import (
         TOOL_COMPARE,
         TOOL_GET_RECORD,
         TOOL_LIST_RECENT,

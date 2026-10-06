@@ -11,7 +11,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from app.order_ask.setup import setup_avaal_collection
+from app.Ai_Assistant.setup import setup_avaal_collection
 
 
 def main():

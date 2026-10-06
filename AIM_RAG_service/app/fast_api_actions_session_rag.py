@@ -178,7 +178,7 @@ async def ask_order_question(query: OrderQuery):
             query.corporate_id,
             query.session_id,
         )
-        from app.order_ask.rag_engine import answer_order_question
+        from app.Ai_Assistant.rag_engine import answer_order_question
 
         result = await asyncio.to_thread(
             answer_order_question,
@@ -261,7 +261,7 @@ async def ask_order_question_stream(query: OrderQuery):
         query.corporate_id,
         query.session_id,
     )
-    from app.order_ask.rag_engine import stream_order_question
+    from app.Ai_Assistant.rag_engine import stream_order_question
 
     async def event_source():
         try:

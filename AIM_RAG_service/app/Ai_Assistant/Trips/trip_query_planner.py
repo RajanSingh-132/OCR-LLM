@@ -1,11 +1,11 @@
 """
-LLM query planner for Avaal invoices — the primary routing path for the
-``invoices`` domain of ``/api/v1/orders/ask``. The regex engine
-(``app/domains/rules/invoices.py`` + ``app/order_ask/invoice_analytics.py``)
-stays wired as an automatic fallback.
+LLM query planner for Avaal trips — the primary routing path for the ``trips``
+domain of ``/api/v1/orders/ask``. The regex engine
+(``app/domains/rules/trips.py`` + ``app/order_ask/trip_analytics.py``) stays
+wired as an automatic fallback.
 
 One Claude call reads the question + conversation history + a live sampled
-schema of ``Avaal_invoice`` and returns a strict JSON ``InvoiceQueryPlan``:
+schema of ``Avaal_trip`` and returns a strict JSON ``TripQueryPlan``:
 
     task      lookup | list | aggregate | compare | percentage | conversation
               | greeting | unsupported
@@ -15,11 +15,10 @@ schema of ``Avaal_invoice`` and returns a strict JSON ``InvoiceQueryPlan``:
     sort / limit / response_style
 
 ``_validate_plan`` checks every field against the sampled schema and every op
-against the allow-list. ``_build_invoice_match`` turns the validated filters
-into a safe Mongo ``$match`` (numeric ranges via ``$expr`` + ``$convert``;
-US-format ``InvoiceDate`` / ``DueDate`` via ``$dateFromString`` on the date
-part; ISO ``createdon`` via lexical compare; geo via address-string regex).
-``execute_invoice_query_plan`` runs it and returns the same payload shape as
+against the allow-list. ``_build_trip_match`` turns the validated filters into a
+safe Mongo ``$match`` (numeric ranges via ``$expr`` + ``$convert``; ISO date
+strings via lexical prefix compare; geo via real pickup/delivery field regex).
+``execute_trip_query_plan`` runs it and returns the same payload shape as
 ``app/order_ask/tools.py`` ``execute_tools``.
 
 Returns ``None`` (→ regex fallback) when disabled, on any error, on an invalid
@@ -31,39 +30,45 @@ import json
 import os
 import re
 from dataclasses import dataclass, field as dc_field
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from langchain_core.prompts import PromptTemplate
 
 from app.embedding_client import get_planner_llm, get_xai_llm
-from app.order_ask.config import checkpoint
-from app.order_ask.dynamic_analytics import (
+from app.Ai_Assistant.config import checkpoint
+from app.Ai_Assistant.Orders.order_dynamic_analytics import (
     AGG_TIMEOUT_MS,
     _build_pipeline,
     _numeric_expr,
     resolve_field,
 )
-from app.order_ask.invoice_dynamic_analytics import (
-    _INVOICE_FIELD_ALIASES,
-    _INVOICE_ISO_DATE_FIELDS,
-    _shape_invoice_result,
-    format_invoice_dynamic_analytics_for_context,
-    get_invoices_schema,
-    invoice_schema_for_prompt,
-    validate_invoice_spec,
+from app.Ai_Assistant.Invoices.invoice_query_planner import (
+    _iso_string_condition,
+    _op_to_mongo,
+    _period_bounds,
 )
-from app.order_ask.invoice_analytics import _base_match as _invoice_base_match
-from app.domains.lookup.invoices.lookup import extract_token as extract_invoice_token
+from app.Ai_Assistant.Trips.trip_dynamic_analytics import (
+    _TRIP_FIELD_ALIASES,
+    _TRIP_ISO_DATE_FIELDS,
+    _shape_trip_result,
+    format_trip_dynamic_analytics_for_context,
+    get_trips_schema,
+    trip_schema_for_prompt,
+    validate_trip_spec,
+)
+from app.Ai_Assistant.Trips.trip_analytics import _base_match as _trip_base_match
+from app.domains.lookup.trips.lookup import extract_token as extract_trip_token
+from app.domains.registry import get_domain_profile
 from app.domains.retrieval import (
+    find_record_by_token,
     format_record_doc_for_context,
     format_record_list_for_context,
-    find_record_by_token,
 )
 from app.tenants.router import get_domain_collection
 
-INVOICE_PLANNER_ENABLED = os.environ.get(
-    "AVAAL_INVOICE_QUERY_PLANNER", "1"
+TRIP_PLANNER_ENABLED = os.environ.get(
+    "AVAAL_TRIP_QUERY_PLANNER", "1"
 ).strip().lower() not in ("0", "false", "no", "off")
 
 MAX_FILTERS = 14
@@ -92,24 +97,37 @@ _PERIODS = frozenset(
     }
 )
 
-# Virtual fields resolved through address-string regex (not real Mongo fields).
+# Virtual geo fields — resolved to real Avaal_trip pickup/delivery fields
+# (not passed to Mongo verbatim).
 _VIRTUAL_GEO = frozenset(
     {
-        "country", "state", "city", "destination", "location",
-        "pickup_location", "delivery_location", "location_side",
+        "city", "state", "province", "country", "location",
+        "pickup_city", "delivery_city", "pickup_state", "delivery_state",
+        "pickup_country", "delivery_country", "pickup_location",
+        "delivery_location", "location_side",
     }
 )
 
-# US-format date strings ("2/16/2026 2:30:00 AM") — parsed via $dateFromString.
-_US_DATE_FIELDS = frozenset(
-    {"InvoiceDate", "DueDate", "PickupDate", "DeliveryDate"}
+_DATE_FIELD_RE = re.compile(r"(date|datetime)$", re.I)
+
+# Canonical UI trip statuses.
+KNOWN_TRIP_STATUSES = (
+    "Planned", "Dispatched", "Started", "In-Transit", "Delivered", "Rejected",
 )
-_DATE_FIELD_RE = re.compile(r"date$", re.I)
+
+_COUNTRY_RX = {
+    "united states": r"^(?:United\s*States|USA|U\.?S\.?A?\.?)$",
+    "usa": r"^(?:United\s*States|USA|U\.?S\.?A?\.?)$",
+    "us": r"^(?:United\s*States|USA|U\.?S\.?A?\.?)$",
+    "america": r"^(?:United\s*States|USA|U\.?S\.?A?\.?)$",
+    "canada": r"^Canada$",
+    "india": r"^India$",
+}
 
 
 # ------------------------------------------------------------------- plan
 @dataclass
-class InvoiceQueryPlan:
+class TripQueryPlan:
     task: str
     record_tokens: List[str] = dc_field(default_factory=list)
     filters: List[Dict[str, Any]] = dc_field(default_factory=list)
@@ -120,12 +138,12 @@ class InvoiceQueryPlan:
     reason: str = ""
     segments: List[Dict[str, Any]] = dc_field(default_factory=list)
     numerator: List[Dict[str, Any]] = dc_field(default_factory=list)
-    pct_of: str = "invoices"
+    pct_of: str = "trips"
     metric: Optional[Dict[str, Any]] = None
 
     def to_intent_info(self) -> Dict[str, Any]:
         intent = {
-            "lookup": "invoice_lookup",
+            "lookup": "trip_lookup",
             "list": "list_filter",
             "aggregate": "analytics",
             "compare": "compare" if self.record_tokens else "analytics",
@@ -145,7 +163,7 @@ class InvoiceQueryPlan:
             or (self.task == "compare" and bool(self.record_tokens)),
             "needs_analytics": self.task in ("aggregate", "percentage")
             or (self.task == "compare" and not self.record_tokens),
-            "reason": f"invoice_planner:{self.reason or self.task}",
+            "reason": f"trip_planner:{self.reason or self.task}",
         }
 
     def to_entities(self, **_ignored: Any) -> Dict[str, Any]:
@@ -167,7 +185,7 @@ class InvoiceQueryPlan:
 
 
 # ------------------------------------------------------------------- LLM
-_PLANNER_PROMPT = """You are a query planner for the Avaal_invoice MongoDB collection (freight invoices).
+_PLANNER_PROMPT = """You are a query planner for the Avaal_trip MongoDB collection (fleet dispatch trips).
 Convert the user's question into ONE strict JSON plan. Output JSON only — no prose, no code fence.
 
 Today (UTC): {today}
@@ -180,7 +198,7 @@ Conversation so far:
 PLAN SHAPE (include only the keys the task needs):
 {{
   "task": "lookup" | "list" | "aggregate" | "compare" | "percentage" | "conversation" | "greeting" | "unsupported",
-  "record_tokens": ["MR3932", ...],
+  "record_tokens": ["ETP4455", ...],
   "filters": [ {{"field": "<field>", "op": "<op>", "value": <scalar|list>}} ],
   "aggregate": {{
     "operation": "count" | "metric" | "group" | "distinct_count",
@@ -188,84 +206,113 @@ PLAN SHAPE (include only the keys the task needs):
     "metrics": [{{"fn": "sum|avg|min|max|count", "field": "<numeric field>"}}],
     "distinct_field": "<field>",
     "date_bucket": {{"field": "createdon", "unit": "day|week|month"}},
-    "having": [{{"key": "invoices|count|sum_<field>|avg_<field>", "op": "gt|gte|lt|lte", "value": <num>}}]
+    "having": [{{"key": "trips|count|sum_<field>|avg_<field>", "op": "gt|gte|lt|lte", "value": <num>}}]
   }},
-  "segments": [ {{"label": "August", "filters": [ ... ]}}, {{"label": "July", "filters": [ ... ]}} ],
+  "segments": [ {{"label": "Dispatched", "filters": [ ... ]}}, {{"label": "Delivered", "filters": [ ... ]}} ],
   "metric": {{"fn": "count|sum|avg", "field": "<numeric field>"}},
   "numerator": [ {{"field": "...", "op": "...", "value": ...}} ],
-  "pct_of": "invoices" | "<numeric field>",
-  "sort": {{"key": "<field / metric key like sum_totalamount / count / invoices / period>", "dir": "asc|desc"}},
+  "pct_of": "trips" | "<numeric field>",
+  "sort": {{"key": "<field / metric key like sum_triptotaldistance / count / trips / period>", "dir": "asc|desc"}},
   "limit": <int 1-100>,
   "response_style": "short|medium|detailed",
   "reason": "<short>"
 }}
 
 TASKS
-- lookup     : user names ONE invoice (number/id) -> record_tokens.
-- compare(records) : compares 2 named invoices -> record_tokens has 2.
-- compare(segments): compares a metric across time windows / places / customers
-                     ("August vs July", "Canada vs US", "CAD vs USD") ->
+- lookup     : user names ONE trip (trip number like ETP4455 / trip id like 29797) -> record_tokens.
+               Also lookup for "who are the drivers for ETP4455", "order ids for ETP4455",
+               "is ETP4455 dispatched", "what is the total distance of this trip",
+               "give me details of trip ETP4455". Any single-trip attribute question = lookup.
+- compare(records) : compares 2 named trips -> record_tokens has 2.
+- compare(segments): compares a metric across statuses / places / drivers / companies / time windows
+                     ("planned vs dispatched", "Canada vs US", "August vs July") ->
                      segments[] each with its own filters, plus one metric.
-- list       : wants the actual invoices -> filters (+ sort/limit).
-               "show / list / find / top N invoices", "invoices between $500 and $2000".
-- aggregate  : how many / total / sum / average / min / max / per / by / wise / distinct
-               / daily / weekly / monthly. "highest / lowest invoice" -> operation metric
-               (min/max) OR list sorted; "top N customers by X" -> group + sort + limit.
-- percentage : "what % of ..." -> numerator (the subset) + pct_of ("invoices" or a numeric field).
+- list       : wants the actual trip rows -> filters (+ sort/limit).
+               "show / list / find / which trips ...", "trips from Montreal",
+               "trips delivered in Ontario", "trips with distance greater than 500 miles",
+               "trips where settlement status is Paid", "trips assigned to driver DRV00895".
+- aggregate  : how many / count / total / sum / average / min / max / per / by / wise / distinct
+               / "count city wise" / "count by driver" / "count by trip status" / daily / weekly
+               / monthly. "which pickup city has the most trips" / "which driver traveled the
+               highest total distance" -> group + sort desc + limit 1.
+               "which trip has the highest offered amount" -> task list sort by totalofferedamount desc limit 1.
+- percentage : "what % of trips ..." -> numerator (the subset) + pct_of ("trips" or a numeric field).
 - conversation / greeting / unsupported.
 
 FILTER OPS
   eq, ne, in, nin           any field         contains, starts_with   text only
   gt, gte, lt, lte          numeric only      exists                  value true/false
   date_gte/date_lte/date_gt/date_lt/date_eq   date field, value "YYYY-MM-DD"
-  date_range                date field, value ["YYYY-MM-DD","YYYY-MM-DD"] (inclusive) — "between Feb 1 and Feb 15"
+  date_range                date field, value ["YYYY-MM-DD","YYYY-MM-DD"] (inclusive) — "between Aug 1 and Aug 15"
   period                    date field, value: today, yesterday, this_week, last_week, this_month, last_month, this_year, last_year
   last_days                 date field, value integer N — "last 7 days", "past 30 days"
-Date fields: "created ..." -> "createdon"; "invoice date / billed ..." -> "InvoiceDate";
-"due ..." -> "DueDate". A month name like "August" with no year -> date_range for that
-whole month in the CURRENT year. date_bucket (daily/weekly/monthly series) uses "createdon".
+Date fields: "created ..." -> "createdon"; "modified / updated ..." -> "modifiedon";
+"picked up / pickup date" -> "firstpickupdate"; "delivered / delivery date" -> "lastdeliverydate".
+A month name like "August" with no year -> date_range for that whole month in the CURRENT year.
+date_bucket (daily/weekly/monthly series) uses "createdon".
 
 VOCAB (map the user's word to the real field/value)
-- status: InvoiceStatus is one of Paid, Open, PartiallyPaid, BadDebt, OverDue.
-  "paid" = InvoiceStatus eq "Paid".  "unpaid" / "not paid" / "outstanding invoices" =
-  InvoiceStatus op "nin" value ["Paid"].  "partially paid" = eq "PartiallyPaid".
-  "bad debt" = eq "BadDebt".
-  "overdue" = TWO filters: {{"field":"DueDate","op":"date_lt","value":"<today>"}} AND
-  {{"field":"InvoiceStatus","op":"nin","value":["Paid"]}}.
-  "overdue by more than 30 days" = DueDate date_lt <today-30d> AND InvoiceStatus nin ["Paid"].
-- money: amount / total / value / "after tax" -> TotalAmount; "before tax" / pretax / subtotal
-  -> PreTaxAmount; freight -> freightcharges; fuel / fuel surcharge -> fuelsurcharges;
-  other charges -> othercharges; discount -> DiscountAmount; outstanding / balance / "still owed"
-  -> outstandinamount; exchange rate -> ExchangeRate. "$1,000" / "C$1,000" -> 1000.
-  "converted amount" / "amount using exchange rate" -> not a stored field; use metric sum on
-  TotalAmount and note ExchangeRate separately, or mark unsupported if a per-row product is required.
-- other: customer / client / buyer -> CustomerName; company / branch -> CompanyName;
-  currency -> CurrencyCode; salesman / agent -> salesmanname; commodity / product -> commodityname;
-  linked order -> InvoiceOrderNumbers; PO / customer order -> CustomerOrderNumbers;
-  trip -> TripNumbers; carrier -> CarrierName; driver -> DriverName.
-- geo virtual fields: country, state, city, destination, location, pickup_location,
-  delivery_location, location_side ("from X" -> pickup, "to / delivered to / for deliveries in X"
-  -> delivery). "US" / "United States" / "American" -> country eq "United States";
-  "Canadian" -> country eq "Canada". You MUST emit these as filters, e.g.
-  "invoices for deliveries in the United States" ->
-  filters [{{"field":"country","op":"eq","value":"United States"}},
-           {{"field":"location_side","op":"eq","value":"delivery"}}].
+- status: tripstatus is one of Planned, Dispatched, Started, In-Transit, Delivered, Rejected
+  (DB may also store "In Transit" / "Enroute" / "Cancelled").
+  "dispatched" = tripstatus eq "Dispatched"; same for planned / started / delivered / rejected.
+  "in transit" / "en route" -> tripstatus eq "In-Transit".
+  "active" / "on road" / "running" / "not delivered yet" / "open" / "pending" =
+  tripstatus op "nin" value ["Delivered","Rejected","Cancelled"].
+  "completed" / "closed" -> tripstatus eq "Delivered".
+  "planned and dispatched" / "planned or dispatched" -> ONE filter
+  {{"field":"tripstatus","op":"in","value":["Planned","Dispatched"]}}.
+  If the user asks a per-status breakdown ("status wise", "count by trip status",
+  "status wise summary") -> task aggregate, operation group, group_by ["tripstatus"], metrics [count].
+- distance: "distance" / "trip distance" / "total distance" / "miles" -> triptotaldistance;
+  "loaded distance" -> totalloaddistance; "empty distance" / "deadhead" -> totalemptydistance.
+  "distance unit" -> distanceunit (text: Miles / Km). "500 miles" -> value 500.
+- cargo: weight -> totalweight; quantity -> totalquantity; "items" / "item count" -> itemscount;
+  "trip items" -> tripitemscount; commodity / goods / product -> commodity (comma-joined text — use contains).
+- money: amount / offered amount / revenue / pay / linehaul -> totalofferedamount;
+  rate -> rate; tax -> totaltaxamount. "$1,000" / "C$1,000" -> 1000.
+- people/equipment: driver -> firstdrivername (a trip has firstdrivername + seconddrivername;
+  a plain "driver X" question means EITHER — use op "contains" on firstdrivername, the planner
+  also checks seconddrivername automatically); driver code like DRV00895 -> firstdrivercode
+  (checked against seconddrivercode too); truck -> trucknumber; trailer -> firsttrailernumber;
+  salesman / agent (EMP codes) -> salesmancodes, salesman name -> salesmannames.
+- customer / client -> customername (comma-joined — use contains). company / branch -> companyname
+  ("belongs to Avaal Group" -> companyname eq "Avaal Group"). carrier -> carriername.
+- linked docs: order number (MRP...) -> ordernumber (contains); order id (digits) -> orderids (contains).
+- type: triptype ("REGULAR - Loaded" ...) ; triptypemain ("REGULAR" / "OUTSOURCING"); variant -> tripvariant.
+- settlement: "settlement status is Paid" -> settlementstatus eq "Paid".
+- geo VIRTUAL fields (map the user's place to these; the planner expands each to the real
+  pickup*/delivery* Avaal_trip fields): city, state, country, pickup_city, delivery_city,
+  pickup_state, delivery_state, pickup_country, delivery_country, pickup_location,
+  delivery_location, location_side.
+  "from X" / "picked up in X" / "out of X" -> pickup side; "to X" / "delivered in/to X" /
+  "for deliveries in X" -> delivery side; a bare place -> use city/state/country (both sides).
+  "Montreal" is a city, "Quebec" / "Ontario" a state/province, "Canada" / "US" a country.
+  Examples: "trips from Montreal" -> [{{"field":"pickup_city","op":"eq","value":"Montreal"}}];
+  "trips delivered in Ontario" -> [{{"field":"delivery_state","op":"eq","value":"Ontario"}}];
+  "how many trips in Quebec" -> [{{"field":"state","op":"eq","value":"Quebec"}}].
+  "US" / "United States" / "American" -> country/…_country eq "United States"; "Canadian" -> "Canada".
 
 RULES
 - Use ONLY fields shown in the schema above (dotted nested allowed) or the geo virtual fields. Never invent one.
 - Numeric fn/ops only on numeric fields. group_by only on groupable fields (max 2).
-- "total invoice amount" with no other qualifier -> task aggregate, operation metric, metrics [sum TotalAmount].
-- "total invoice amount for each customer" -> operation group, group_by ["CustomerName"], metrics [sum TotalAmount].
-- "how many invoices ..." -> operation count (+ filters).  "average invoice amount" -> metric avg TotalAmount.
-- "which customers ..." / "list the customers ..." / "customers with ..." -> operation group,
-  group_by ["CustomerName"] (so the names are returned), NOT distinct_count.
+- "trip count city wise" / "give me trip count by driver" / "count by company" ->
+  operation group, group_by [that field], metrics [count], sort desc.
+  city wise -> group_by ["pickupcity"]; state wise -> ["pickupstate"]; driver -> ["firstdrivername"];
+  company -> ["companyname"]; trip status -> ["tripstatus"].
+- "trip count by pickup city and trip status" -> group_by ["pickupcity","tripstatus"].
+- "top 10 drivers by number of trips" -> group_by ["firstdrivername"], metrics [count], sort desc, limit 10.
+- "total distance by driver" -> group_by ["firstdrivername"], metrics [sum triptotaldistance].
+- "average trip distance" -> operation metric, metrics [avg triptotaldistance] (NO group_by).
+- "which pickup city has the highest number of trips" / "which driver traveled the highest total
+  distance" -> operation group, group_by [that field], sort desc, limit 1.
+- "how many trips are dispatched" -> operation count + filter tripstatus eq "Dispatched".
+- "give me status wise summary of the trips" -> operation group, group_by ["tripstatus"], metrics [count].
+- having: threshold AFTER grouping ("drivers with more than 5 trips" ->
+  group_by ["firstdrivername"], metrics [count], having [{{"key":"trips","op":"gt","value":5}}]).
 - put every aggregate key inside the "aggregate" object, never at the top level of the plan.
-- "top N customers by invoice amount" -> group_by ["CustomerName"], metric sum TotalAmount, sort desc, limit N.
-- "which invoice has the highest amount" -> task aggregate operation metric metrics [max TotalAmount]
-  (or task list sort sum? prefer metric max). "show invoices below $500" -> task list, filter TotalAmount lt 500.
-- having: threshold AFTER grouping ("customers with total invoices above $10,000" ->
-  group_by ["CustomerName"], metrics [sum TotalAmount], having [{{sum_totalamount>10000}}]).
 - Do NOT invent filters the user didn't ask for.
+- Follow-ups: if the user already fixed a trip / filter earlier in the conversation and now asks a
+  bare attribute or "and the drivers?" / "what about delivered ones", carry that context forward.
 - If truly not expressible, task "unsupported".
 
 Question: {question}
@@ -280,7 +327,7 @@ def _plan_llm(question: str, history: str, schema: Dict[str, Any]) -> Optional[D
         {
             "question": question,
             "history": history or "(no prior turns)",
-            "schema": invoice_schema_for_prompt(schema),
+            "schema": trip_schema_for_prompt(schema),
             "today": datetime.now(timezone.utc).strftime("%Y-%m-%d (%A)"),
         }
     )
@@ -306,8 +353,8 @@ def _field_kind(name: str, schema: Dict[str, Any]) -> Optional[str]:
     if info.get("numeric"):
         return "numeric"
     if (
-        name in _INVOICE_ISO_DATE_FIELDS
-        or name in _US_DATE_FIELDS
+        name in _TRIP_ISO_DATE_FIELDS
+        or name.split(".")[-1] in _TRIP_ISO_DATE_FIELDS
         or _DATE_FIELD_RE.search(name)
     ):
         return "date"
@@ -324,7 +371,7 @@ def _valid_filter(f: Any, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
     if name not in _VIRTUAL_GEO and name not in schema.get("fields", {}):
-        resolved = resolve_field(name, schema, aliases=_INVOICE_FIELD_ALIASES)
+        resolved = resolve_field(name, schema, aliases=_TRIP_FIELD_ALIASES)
         if resolved:
             name = resolved
 
@@ -333,12 +380,13 @@ def _valid_filter(f: Any, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
     if kind == "geo":
-        if op not in ("eq", "contains", "in"):
-            op = "eq"
         if name == "location_side":
             value = str(value).lower()
             if value not in ("pickup", "delivery", "both"):
                 return None
+            return {"field": name, "op": "eq", "value": value}
+        if op not in ("eq", "contains", "in"):
+            op = "eq"
         if value in (None, "", [], {}):
             return None
         return {"field": name, "op": op, "value": value}
@@ -392,7 +440,7 @@ def _valid_metric(raw_m: Any, schema: Dict[str, Any]) -> Dict[str, Any]:
         fn = "count"
     if fn == "count":
         return {"fn": "count", "field": None}
-    fld = resolve_field(raw_m.get("field"), schema, aliases=_INVOICE_FIELD_ALIASES)
+    fld = resolve_field(raw_m.get("field"), schema, aliases=_TRIP_FIELD_ALIASES)
     if not fld or not schema["fields"].get(fld, {}).get("numeric"):
         return {"fn": "count", "field": None}
     return {"fn": fn, "field": fld}
@@ -400,7 +448,7 @@ def _valid_metric(raw_m: Any, schema: Dict[str, Any]) -> Dict[str, Any]:
 
 def _validate_plan(
     raw: Any, schema: Dict[str, Any], question: str
-) -> Optional[InvoiceQueryPlan]:
+) -> Optional[TripQueryPlan]:
     if not isinstance(raw, dict):
         return None
     task = str(raw.get("task") or "").lower()
@@ -417,7 +465,7 @@ def _validate_plan(
         if isinstance(t, (str, int)) and str(t).strip()
     ]
     if task in ("lookup", "compare") and not tokens:
-        tok = extract_invoice_token(question)
+        tok = extract_trip_token(question)
         if tok:
             tokens = [tok]
 
@@ -442,14 +490,13 @@ def _validate_plan(
     aggregate = None
     if task == "aggregate":
         agg_raw = dict(raw.get("aggregate") or {})
-        # The LLM sometimes hoists the aggregate keys to the top level.
         for k in ("operation", "metrics", "group_by", "distinct_field",
                   "date_bucket", "having"):
             if k not in agg_raw and raw.get(k) is not None:
                 agg_raw[k] = raw[k]
         agg_raw.setdefault("limit", limit)
         agg_raw.setdefault("sort", sort)
-        aggregate = validate_invoice_spec(agg_raw, schema)
+        aggregate = validate_trip_spec(agg_raw, schema)
         if aggregate is None:
             return None
 
@@ -458,7 +505,7 @@ def _validate_plan(
 
     segments: List[Dict[str, Any]] = []
     numerator: List[Dict[str, Any]] = []
-    pct_of = "invoices"
+    pct_of = "trips"
     metric: Optional[Dict[str, Any]] = None
 
     if task == "compare" and isinstance(raw.get("segments"), list) and raw["segments"]:
@@ -492,14 +539,14 @@ def _validate_plan(
         ]
         if not numerator:
             return None
-        of = raw.get("pct_of") or raw.get("of") or "invoices"
-        if str(of).lower() in ("invoices", "invoice", "count", "records"):
-            pct_of = "invoices"
+        of = raw.get("pct_of") or raw.get("of") or "trips"
+        if str(of).lower() in ("trips", "trip", "count", "records"):
+            pct_of = "trips"
         else:
-            r = resolve_field(of, schema, aliases=_INVOICE_FIELD_ALIASES)
-            pct_of = r if (r and schema["fields"].get(r, {}).get("numeric")) else "invoices"
+            r = resolve_field(of, schema, aliases=_TRIP_FIELD_ALIASES)
+            pct_of = r if (r and schema["fields"].get(r, {}).get("numeric")) else "trips"
 
-    return InvoiceQueryPlan(
+    return TripQueryPlan(
         task=task,
         record_tokens=tokens[:2],
         filters=filters,
@@ -515,22 +562,22 @@ def _validate_plan(
     )
 
 
-def run_invoice_query_planner(
+def run_trip_query_planner(
     question: str, *, history: str = "(no prior turns)"
-) -> Optional[InvoiceQueryPlan]:
-    if not INVOICE_PLANNER_ENABLED:
+) -> Optional[TripQueryPlan]:
+    if not TRIP_PLANNER_ENABLED:
         return None
     q = (question or "").strip()
     if not q:
         return None
-    schema = get_invoices_schema()
+    schema = get_trips_schema()
     if not schema.get("fields"):
         return None
 
     raw = _plan_llm(q, history, schema)
     plan = _validate_plan(raw, schema, q)
     checkpoint(
-        "INV_PLANNER",
+        "TRIP_PLANNER",
         "plan",
         raw=raw,
         task=(plan.task if plan else None),
@@ -541,202 +588,71 @@ def run_invoice_query_planner(
     return plan
 
 
-# ------------------------------------------------------------------- dates
-def _month_add(d: date, n: int) -> date:
-    total = (d.year * 12 + (d.month - 1)) + n
-    return date(total // 12, total % 12 + 1, 1)
-
-
-def _period_bounds(name: str) -> Optional[tuple]:
-    today = datetime.now(timezone.utc).date()
-    if name == "today":
-        s, e = today, today + timedelta(days=1)
-    elif name == "yesterday":
-        s, e = today - timedelta(days=1), today
-    elif name == "this_week":
-        s = today - timedelta(days=today.weekday())
-        e = s + timedelta(days=7)
-    elif name == "last_week":
-        e = today - timedelta(days=today.weekday())
-        s = e - timedelta(days=7)
-    elif name == "this_month":
-        s = today.replace(day=1)
-        e = _month_add(s, 1)
-    elif name == "last_month":
-        e = today.replace(day=1)
-        s = _month_add(e, -1)
-    elif name == "this_year":
-        s, e = date(today.year, 1, 1), date(today.year + 1, 1, 1)
-    elif name == "last_year":
-        s, e = date(today.year - 1, 1, 1), date(today.year, 1, 1)
-    else:
-        return None
-    return s.isoformat(), e.isoformat()
-
-
-def _plus_one_day(iso: str) -> str:
-    try:
-        return (date.fromisoformat(iso[:10]) + timedelta(days=1)).isoformat()
-    except ValueError:
-        return iso + "~"
-
-
 # ------------------------------------------------------------------- match builder
-_COUNTRY_RX = {
-    "united states": r"\b(?:United\s+States|USA|U\.S\.A\.?|U\.S\.?)\b",
-    "usa": r"\b(?:United\s+States|USA|U\.S\.A\.?|U\.S\.?)\b",
-    "us": r"\b(?:United\s+States|USA|U\.S\.A\.?|U\.S\.?)\b",
-    "canada": r"\bCanada\b",
-    "india": r"\bIndia\b",
-}
-
-
-def _side_geo_fields(side: str) -> List[str]:
-    side = (side or "both").lower()
+def _side_geo_fields(kind: str, side: str) -> List[str]:
+    """kind: city | state | country | location. side: pickup | delivery | both."""
+    field_by_kind = {
+        "city": ("pickupcity", "deliverycity"),
+        "state": ("pickupstate", "deliverystate"),
+        "country": ("pickupcountry", "deliverycountry"),
+        "location": ("pickuplocationname", "deliverylocationname"),
+    }
+    pu, de = field_by_kind.get(kind, ("pickupcity", "deliverycity"))
     if side == "pickup":
-        return ["pickuplocation"]
+        return [pu]
     if side == "delivery":
-        return ["deliverylocation", "destinationname"]
-    return ["pickuplocation", "deliverylocation", "destinationname"]
-
-
-def _iso_date_expr(field: str) -> Dict[str, Any]:
-    """Parse a US-format ('2/16/2026 2:30:00 AM') date string to a real date
-    using only the date part (Mongo has no %p specifier)."""
-    return {
-        "$dateFromString": {
-            "dateString": {
-                "$arrayElemAt": [
-                    {"$split": [{"$toString": f"${field}"}, " "]},
-                    0,
-                ]
-            },
-            "format": "%m/%d/%Y",
-            "onError": None,
-            "onNull": None,
-        }
-    }
-
-
-def _target_date_expr(iso: str) -> Dict[str, Any]:
-    return {
-        "$dateFromString": {
-            "dateString": str(iso)[:10],
-            "format": "%Y-%m-%d",
-            "onError": None,
-        }
-    }
-
-
-def _us_date_condition(field: str, op: str, value: Any) -> Optional[Dict[str, Any]]:
-    """Return a {"$expr": ...} clause for a US-format date field."""
-    src = _iso_date_expr(field)
-    if op in ("date_gte", "date_gt", "date_lte", "date_lt"):
-        mop = {"date_gte": "$gte", "date_gt": "$gt", "date_lte": "$lte", "date_lt": "$lt"}[op]
-        return {"$expr": {mop: [src, _target_date_expr(value)]}}
-    if op == "date_eq":
-        return {
-            "$expr": {
-                "$and": [
-                    {"$gte": [src, _target_date_expr(value)]},
-                    {"$lt": [src, _target_date_expr(_plus_one_day(value))]},
-                ]
-            }
-        }
-    if op == "date_range":
-        start, end = value[0], value[1]
-        return {
-            "$expr": {
-                "$and": [
-                    {"$gte": [src, _target_date_expr(start)]},
-                    {"$lt": [src, _target_date_expr(_plus_one_day(end))]},
-                ]
-            }
-        }
-    if op == "last_days":
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=int(value))).strftime("%Y-%m-%d")
-        return {"$expr": {"$gte": [src, _target_date_expr(cutoff)]}}
-    if op == "period":
-        bounds = _period_bounds(value)
-        if not bounds:
-            return None
-        return {
-            "$expr": {
-                "$and": [
-                    {"$gte": [src, _target_date_expr(bounds[0])]},
-                    {"$lt": [src, _target_date_expr(bounds[1])]},
-                ]
-            }
-        }
-    return None
-
-
-def _iso_string_condition(op: str, value: Any) -> Optional[Dict[str, Any]]:
-    """Per-field condition for an ISO-string date field (createdon/modifiedon)."""
-    if op == "date_eq":
-        return {"$regex": f"^{re.escape(str(value)[:10])}", "$options": "i"}
-    if op in ("date_gte", "date_lte", "date_gt", "date_lt"):
-        mop = {"date_gte": "$gte", "date_lte": "$lte", "date_gt": "$gt", "date_lt": "$lt"}[op]
-        return {mop: str(value)[:10]}
-    if op == "last_days":
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=int(value))).strftime("%Y-%m-%d")
-        return {"$gte": cutoff}
-    if op == "date_range":
-        return {"$gte": str(value[0])[:10], "$lt": _plus_one_day(value[1])}
-    if op == "period":
-        bounds = _period_bounds(value)
-        if not bounds:
-            return None
-        return {"$gte": bounds[0], "$lt": bounds[1]}
-    return None
-
-
-def _op_to_mongo(op: str, value: Any, field: str, kind: str):
-    if op == "exists":
-        return {"$nin": [None, ""]} if value else {"$in": [None, ""]}
-    if op == "eq":
-        if isinstance(value, str):
-            return {"$regex": f"^{re.escape(value)}$", "$options": "i"}
-        return value
-    if op == "ne":
-        if isinstance(value, str):
-            return {"$not": {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
-        return {"$ne": value}
-    if op == "in":
-        return {"$in": value if isinstance(value, list) else [value]}
-    if op == "nin":
-        return {"$nin": value if isinstance(value, list) else [value]}
-    if op == "contains":
-        return {"$regex": re.escape(str(value)), "$options": "i"}
-    if op == "starts_with":
-        return {"$regex": f"^{re.escape(str(value))}", "$options": "i"}
-    if op in ("gt", "gte", "lt", "lte"):
-        mop = {"gt": "$gt", "gte": "$gte", "lt": "$lt", "lte": "$lte"}[op]
-        if kind == "numeric":
-            return {"__expr__": {mop: [_numeric_expr(field), float(value)]}}
-        return {mop: value}
-    return None
+        return [de]
+    return [pu, de]
 
 
 def _geo_clause(field: str, value: Any, side: str) -> Optional[Dict[str, Any]]:
-    fields = _side_geo_fields(
-        "pickup" if field == "pickup_location"
-        else "delivery" if field in ("delivery_location", "destination")
-        else side
-    )
+    kind = "city"
+    resolved_side = side
+    if field in ("city", "pickup_city", "delivery_city"):
+        kind = "city"
+    elif field in ("state", "province", "pickup_state", "delivery_state"):
+        kind = "state"
+    elif field in ("country", "pickup_country", "delivery_country"):
+        kind = "country"
+    elif field in ("location", "pickup_location", "delivery_location"):
+        kind = "location"
+    if field.startswith("pickup_"):
+        resolved_side = "pickup"
+    elif field.startswith("delivery_"):
+        resolved_side = "delivery"
+
+    fields = _side_geo_fields(kind, resolved_side)
     val = str(value).strip()
-    if field == "country":
-        pattern = _COUNTRY_RX.get(val.lower(), rf"\b{re.escape(val)}\b")
+    if not val:
+        return None
+    if kind == "country":
+        pattern = _COUNTRY_RX.get(val.lower(), rf"^{re.escape(val)}$")
     else:
         pattern = re.escape(val)
     ors = [{f: {"$regex": pattern, "$options": "i"}} for f in fields]
     return {"$or": ors} if ors else None
 
 
-def _build_invoice_match(
+def _driver_clause(op: str, value: Any) -> Dict[str, Any]:
+    """A plain driver filter matches first OR second driver (name or code)."""
+    v = str(value).strip()
+    rx = {"$regex": re.escape(v), "$options": "i"} if op == "contains" else {
+        "$regex": f"^{re.escape(v)}$", "$options": "i"
+    }
+    return {
+        "$or": [
+            {"firstdrivername": rx},
+            {"seconddrivername": rx},
+            {"firstdrivercode": rx},
+            {"seconddrivercode": rx},
+        ]
+    }
+
+
+def _build_trip_match(
     filters: List[Dict[str, Any]], schema: Dict[str, Any]
 ) -> Dict[str, Any]:
-    match: Dict[str, Any] = dict(_invoice_base_match())
+    match: Dict[str, Any] = dict(_trip_base_match())
     and_parts: List[Dict[str, Any]] = []
     field_conds: Dict[str, List[Any]] = {}
 
@@ -759,19 +675,12 @@ def _build_invoice_match(
         if kind is None:
             continue
 
+        # A bare driver-name / driver-code filter fans out to both drivers.
+        if name in ("firstdrivername", "firstdrivercode") and op in ("eq", "contains"):
+            and_parts.append(_driver_clause(op, value))
+            continue
+
         if kind == "date":
-            if name in _US_DATE_FIELDS:
-                if op in ("eq", "ne"):
-                    # exact-string equality still works as a fallback
-                    field_conds.setdefault(name, []).append(
-                        _op_to_mongo(op, value, name, "text")
-                    )
-                    continue
-                clause = _us_date_condition(name, op, value)
-                if clause:
-                    and_parts.append(clause)
-                continue
-            # ISO string date field
             if op in ("eq", "ne"):
                 field_conds.setdefault(name, []).append(
                     _op_to_mongo(op, value, name, "text")
@@ -805,7 +714,6 @@ def _build_invoice_match(
 
 
 def _filters_summary(filters: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """field -> readable condition; multiple conditions on one field are kept as a list."""
     out: Dict[str, Any] = {}
     for f in filters:
         val = f["value"] if f["op"] == "eq" else f"{f['op']} {f['value']}"
@@ -818,49 +726,59 @@ def _filters_summary(filters: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # ------------------------------------------------------------------- list / metric
-_LIST_FIELDS = (
-    "InvoiceID", "InvoiceNumber", "CustomerName", "InvoiceStatus", "TotalAmount",
-    "PreTaxAmount", "freightcharges", "othercharges", "outstandinamount",
-    "CurrencyCode", "ExchangeRate", "InvoiceDate", "DueDate", "CompanyName",
-    "InvoiceOrderNumbers", "commodityname", "pickuplocation", "deliverylocation",
+_NUMERIC_SORT_HINTS = frozenset(
+    {
+        "triptotaldistance", "totalloaddistance", "totalemptydistance",
+        "totalofferedamount", "offeredamount", "totalweight", "totalquantity",
+        "totaltaxamount", "rate", "ratetypevalue", "itemscount", "tripitemscount",
+        "totaldistance", "ebdistance", "eedistance",
+    }
 )
-_NUMERIC_SORT_KEYS = {
-    "TotalAmount", "PreTaxAmount", "freightcharges", "othercharges",
-    "outstandinamount", "ExchangeRate", "fuelsurcharges", "DiscountAmount",
-}
 
 
-def _list_invoices(plan: InvoiceQueryPlan, schema: Dict[str, Any]) -> Dict[str, Any]:
-    match = _build_invoice_match(plan.filters, schema)
-    collection = get_domain_collection("invoices")
+def _list_trips(plan: TripQueryPlan, schema: Dict[str, Any]) -> Dict[str, Any]:
+    match = _build_trip_match(plan.filters, schema)
+    collection = get_domain_collection("trips")
+    list_fields = list(get_domain_profile("trips").list_fields)
 
-    sort_key = (plan.sort or {}).get("key") or "InvoiceID"
+    sort_key = (plan.sort or {}).get("key") or "tripid"
     ascending = (plan.sort or {}).get("dir") == "asc"
-    resolved = resolve_field(sort_key, schema, aliases=_INVOICE_FIELD_ALIASES) or "InvoiceID"
+    resolved = (
+        resolve_field(sort_key, schema, aliases=_TRIP_FIELD_ALIASES) or "tripid"
+    )
     direction = 1 if ascending else -1
     limit = max(1, min(int(plan.limit or 15), 50))
 
+    numeric_sort = (
+        resolved in _NUMERIC_SORT_HINTS
+        or schema["fields"].get(resolved, {}).get("numeric")
+    )
     pipeline: List[Dict[str, Any]] = [{"$match": match}]
-    if resolved in _NUMERIC_SORT_KEYS or schema["fields"].get(resolved, {}).get("numeric"):
+    if numeric_sort:
         pipeline.append({"$addFields": {"__sort": _numeric_expr(resolved)}})
-        pipeline.append({"$sort": {"__sort": direction, "InvoiceID": -1}})
+        pipeline.append({"$sort": {"__sort": direction, "tripid": -1}})
     else:
         pipeline.append({"$sort": {resolved: direction}})
     pipeline.append({"$limit": limit})
     projection: Dict[str, Any] = {"_id": 0}
-    for _f in _LIST_FIELDS:
+    for _f in list_fields:
         projection[_f] = 1
     pipeline.append({"$project": projection})
 
     total = collection.count_documents(match)
-    rows = list(collection.aggregate(pipeline, maxTimeMS=AGG_TIMEOUT_MS))
-    records = [{k: r.get(k) for k in _LIST_FIELDS if r.get(k) not in (None, "")} for r in rows]
+    rows = list(
+        collection.aggregate(pipeline, maxTimeMS=AGG_TIMEOUT_MS, allowDiskUse=False)
+    )
+    records = [
+        {k: r.get(k) for k in list_fields if r.get(k) not in (None, "")}
+        for r in rows
+    ]
 
     checkpoint(
-        "INV_PLANNER", "list executed", total=total, returned=len(records)
+        "TRIP_PLANNER", "list executed", total=total, returned=len(records)
     )
     return {
-        "domain": "invoices",
+        "domain": "trips",
         "filters": _filters_summary(plan.filters),
         "sort_by": resolved,
         "ascending": ascending,
@@ -871,7 +789,7 @@ def _list_invoices(plan: InvoiceQueryPlan, schema: Dict[str, Any]) -> Dict[str, 
 
 
 def _metric_value(match: Dict[str, Any], metric: Dict[str, Any]) -> float:
-    collection = get_domain_collection("invoices")
+    collection = get_domain_collection("trips")
     fn = metric.get("fn") or "count"
     if fn == "count":
         return float(collection.count_documents(match))
@@ -892,30 +810,12 @@ def _metric_value(match: Dict[str, Any], metric: Dict[str, Any]) -> float:
 
 def _metric_label(metric: Dict[str, Any]) -> str:
     fn = metric.get("fn") or "count"
-    return "invoice_count" if fn == "count" else f"{fn}_{metric.get('field')}"
-
-
-def _derive_paid_amount(doc: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        total = float(str(doc.get("TotalAmount") or "").replace(",", "") or 0)
-        outstanding_raw = doc.get("outstandinamount")
-        status = str(doc.get("InvoiceStatus") or "").strip().lower()
-        outstanding = (
-            float(outstanding_raw) if outstanding_raw not in (None, "") else None
-        )
-        doc = dict(doc)
-        if status == "paid":
-            doc["PaidAmount"] = total
-        elif outstanding is not None:
-            doc["PaidAmount"] = max(0.0, total - outstanding)
-    except (TypeError, ValueError):
-        pass
-    return doc
+    return "trip_count" if fn == "count" else f"{fn}_{metric.get('field')}"
 
 
 # ------------------------------------------------------------------- execute
-def execute_invoice_query_plan(
-    plan: InvoiceQueryPlan, *, question: str
+def execute_trip_query_plan(
+    plan: TripQueryPlan, *, question: str
 ) -> Dict[str, Any]:
     """Run a validated plan. Returns the same shape as tools.execute_tools."""
     context_blocks: List[str] = []
@@ -925,26 +825,25 @@ def execute_invoice_query_plan(
     tools_run: List[str] = []
     active_token = plan.record_tokens[0] if plan.record_tokens else ""
 
-    schema = get_invoices_schema()
+    schema = get_trips_schema()
 
     if plan.task == "lookup":
         token = plan.record_tokens[0] if plan.record_tokens else ""
         doc = find_record_by_token(token) if token else None
         if doc:
-            doc = _derive_paid_amount(doc)
             context_blocks.append(
-                "EXACT INVOICE RECORD:\n" + format_record_doc_for_context(doc)
+                "EXACT TRIP RECORD:\n" + format_record_doc_for_context(doc)
             )
             matches.append(
                 {
-                    "InvoiceID": doc.get("InvoiceID"),
-                    "InvoiceNumber": doc.get("InvoiceNumber"),
+                    "tripid": doc.get("tripid"),
+                    "tripnumber": doc.get("tripnumber"),
                     "match_type": "exact",
                 }
             )
         else:
             context_blocks.append(
-                f"EXACT INVOICE RECORD: not found for token={token}"
+                f"EXACT TRIP RECORD: not found for token={token}"
             )
         tools_run.append("get_record")
 
@@ -953,20 +852,20 @@ def execute_invoice_query_plan(
         label = _metric_label(metric)
         seg_rows = []
         for seg in plan.segments:
-            m = _build_invoice_match(plan.filters + seg["filters"], schema)
+            m = _build_trip_match(plan.filters + seg["filters"], schema)
             seg_rows.append(
                 {"segment": seg["label"], label: round(_metric_value(m, metric), 4)}
             )
         analytics_payload = {
             "analytics_type": "dynamic",
-            "engine": "invoice_dynamic_planner",
+            "engine": "trip_dynamic_planner",
             "operation": "compare",
             "metric": label,
             "filters": _filters_summary(plan.filters),
             "rows": seg_rows,
         }
         context_blocks.append(
-            format_invoice_dynamic_analytics_for_context(analytics_payload)
+            format_trip_dynamic_analytics_for_context(analytics_payload)
         )
         tools_run.append("run_analytics")
 
@@ -975,35 +874,34 @@ def execute_invoice_query_plan(
         for token in plan.record_tokens[:2]:
             doc = find_record_by_token(token)
             if doc:
-                doc = _derive_paid_amount(doc)
                 parts.append(
-                    f"INVOICE {token}:\n"
-                    + format_record_doc_for_context(doc, max_fields=40)
+                    f"TRIP {token}:\n"
+                    + format_record_doc_for_context(doc, max_fields=50)
                 )
                 matches.append(
-                    {"InvoiceNumber": doc.get("InvoiceNumber"), "match_type": "compare"}
+                    {"tripnumber": doc.get("tripnumber"), "match_type": "compare"}
                 )
             else:
-                parts.append(f"INVOICE {token}: not found")
-        context_blocks.append("COMPARE INVOICES:\n" + "\n\n".join(parts))
+                parts.append(f"TRIP {token}: not found")
+        context_blocks.append("COMPARE TRIPS:\n" + "\n\n".join(parts))
         tools_run.append("compare_records")
 
     elif plan.task == "percentage":
         metric = (
             {"fn": "count", "field": None}
-            if plan.pct_of == "invoices"
+            if plan.pct_of == "trips"
             else {"fn": "sum", "field": plan.pct_of}
         )
-        den_match = _build_invoice_match(plan.filters, schema)
-        num_match = _build_invoice_match(plan.filters + plan.numerator, schema)
+        den_match = _build_trip_match(plan.filters, schema)
+        num_match = _build_trip_match(plan.filters + plan.numerator, schema)
         den = _metric_value(den_match, metric)
         num = _metric_value(num_match, metric)
         pct = round((num / den * 100.0), 2) if den else 0.0
         analytics_payload = {
             "analytics_type": "dynamic",
-            "engine": "invoice_dynamic_planner",
+            "engine": "trip_dynamic_planner",
             "operation": "percentage",
-            "of": ("invoices" if plan.pct_of == "invoices" else f"sum {plan.pct_of}"),
+            "of": ("trips" if plan.pct_of == "trips" else f"sum {plan.pct_of}"),
             "numerator": round(num, 4),
             "denominator": round(den, 4),
             "percentage": pct,
@@ -1011,26 +909,26 @@ def execute_invoice_query_plan(
             "filters": _filters_summary(plan.filters),
         }
         context_blocks.append(
-            format_invoice_dynamic_analytics_for_context(analytics_payload)
+            format_trip_dynamic_analytics_for_context(analytics_payload)
         )
         tools_run.append("run_analytics")
 
     elif plan.task == "aggregate" and plan.aggregate is not None:
-        match = _build_invoice_match(plan.filters, schema)
+        match = _build_trip_match(plan.filters, schema)
         pipeline = _build_pipeline(plan.aggregate, match)
         rows = list(
-            get_domain_collection("invoices").aggregate(
+            get_domain_collection("trips").aggregate(
                 pipeline, maxTimeMS=AGG_TIMEOUT_MS, allowDiskUse=False
             )
         )
-        analytics_payload = _shape_invoice_result(
+        analytics_payload = _shape_trip_result(
             plan.aggregate, rows, _filters_summary(plan.filters), question
         )
         context_blocks.append(
-            format_invoice_dynamic_analytics_for_context(analytics_payload)
+            format_trip_dynamic_analytics_for_context(analytics_payload)
         )
         checkpoint(
-            "INV_PLANNER",
+            "TRIP_PLANNER",
             "aggregate executed",
             operation=plan.aggregate.get("operation"),
             rows=len(rows),
@@ -1038,13 +936,13 @@ def execute_invoice_query_plan(
         tools_run.append("run_analytics")
 
     else:  # list (default)
-        list_payload = _list_invoices(plan, schema)
+        list_payload = _list_trips(plan, schema)
         context_blocks.append(format_record_list_for_context(list_payload))
         for row in list_payload.get("records") or []:
             matches.append(
                 {
-                    "InvoiceID": row.get("InvoiceID"),
-                    "InvoiceNumber": row.get("InvoiceNumber"),
+                    "tripid": row.get("tripid"),
+                    "tripnumber": row.get("tripnumber"),
                     "match_type": "filter",
                 }
             )
@@ -1058,5 +956,5 @@ def execute_invoice_query_plan(
         "list_result": list_payload,
         "tools_run": tools_run,
         "active_order_token": active_token,
-        "domain": "invoices",
+        "domain": "trips",
     }

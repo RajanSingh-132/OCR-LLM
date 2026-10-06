@@ -32,8 +32,8 @@ from typing import Any, Dict, List, Optional
 from langchain_core.prompts import PromptTemplate
 
 from app.embedding_client import get_planner_llm, get_xai_llm
-from app.order_ask.config import checkpoint
-from app.order_ask.dynamic_analytics import (
+from app.Ai_Assistant.config import checkpoint
+from app.Ai_Assistant.Orders.order_dynamic_analytics import (
     AGG_TIMEOUT_MS,
     _build_pipeline,
     _numeric_expr,
@@ -46,13 +46,13 @@ from app.order_ask.dynamic_analytics import (
     is_date_field,
     resolve_field,
 )
-from app.order_ask.invoice_query_planner import (
+from app.Ai_Assistant.Invoices.invoice_query_planner import (
     _iso_date_expr,
     _iso_string_condition,
     _target_date_expr,
     _us_date_condition,
 )
-from app.order_ask.rag_retrieval import (
+from app.Ai_Assistant.rag_retrieval import (
     _base_order_match,
     extract_order_token,
     find_order_by_id_or_number,
@@ -527,7 +527,7 @@ def run_query_planner(
     # tie-breaks, date-phrase parsing, and NULL-revenue exclusion; asking
     # this planner's LLM to reinvent that from scratch on every question is
     # slower (schema build + LLM call) and not guaranteed to match the rule.
-    from app.order_ask.analytics import is_profitability_question
+    from app.Ai_Assistant.Orders.order_analytics import is_profitability_question
 
     if is_profitability_question(q):
         checkpoint("PLANNER", "defer to profitability engine", reason="pattern_match")

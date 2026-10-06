@@ -262,7 +262,7 @@ def is_calculation_question(question: str) -> bool:
     q = (question or "").lower()
     # Analytics questions are handled by analytics engine, not formula calc
     try:
-        from app.order_ask.analytics import is_analytics_question
+        from app.Ai_Assistant.Orders.order_analytics import is_analytics_question
 
         if is_analytics_question(question):
             return False

@@ -12,7 +12,7 @@ from langchain_core.prompts import PromptTemplate
 from app.domains.prompts import DOMAIN_CLASSIFY_PROMPT
 from app.domains.registry import DEFAULT_DOMAIN, DOMAINS
 from app.embedding_client import get_anthropic_llm, get_xai_llm
-from app.order_ask.config import checkpoint
+from app.Ai_Assistant.config import checkpoint
 
 logger = logging.getLogger("domains.detect")
 
@@ -191,7 +191,7 @@ def detect_domain_detailed(
 
     # Pure greeting/thanks — never burn an LLM call on domain classify.
     # Default to last sticky domain or orders; greeting answer does not need DB.
-    from app.order_ask.intent import GREETING_RE, THANKS_RE
+    from app.Ai_Assistant.intent import GREETING_RE, THANKS_RE
 
     q_stripped = (question or "").strip()
     if GREETING_RE.match(q_stripped) or THANKS_RE.match(q_stripped):
