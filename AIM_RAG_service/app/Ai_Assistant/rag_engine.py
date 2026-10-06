@@ -302,7 +302,7 @@ def _answer_order_question_gen(
         return
 
     # 1) Conversation memory
-    session = load_session(session_id)
+    session = load_session(session_id, database=tenant.database)
     session_id = session["session_id"]
     stored_corporate_id = (session.get("corporate_id") or "").strip()
     if stored_corporate_id and stored_corporate_id != corporate_id:
@@ -596,6 +596,7 @@ def _answer_order_question_gen(
                 session_id,
                 question,
                 answer,
+                database=tenant.database,
                 corporate_id=corporate_id,
                 domain=domain,
                 entities=entities,
@@ -678,6 +679,7 @@ def _answer_order_question_gen(
                 session_id,
                 question,
                 answer,
+                database=tenant.database,
                 corporate_id=corporate_id,
                 domain=domain,
                 order_token=active_order,
@@ -776,6 +778,7 @@ def _answer_order_question_gen(
             session_id,
             question,
             answer,
+            database=tenant.database,
             corporate_id=corporate_id,
             domain=domain,
             order_token=active_order,

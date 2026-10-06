@@ -78,15 +78,21 @@ def get_mongo_collection(
 
     ensure_indexes=True only for ingest/setup — otherwise indexes would
     create empty collections/DBs on first access.
+
+    db_name is normally the tenant database (the corporate_id). DB_NAME from
+    .env is only a fallback for callers that don't pass one.
     """
-    if not MONGO_URI or not MONGO_DB_NAME:
+    if not MONGO_URI:
+        raise ValueError("Mongo config missing. Please set MONGO_URI in .env")
+    database = db_name or MONGO_DB_NAME
+    if not database:
         raise ValueError(
-            "Mongo config missing. Please set "
-            "mongo_db.MONGO_URI and mongo_db.DB_NAME"
+            "No Mongo database name: pass db_name (e.g. the corporate_id) "
+            "or set DB_NAME in .env"
         )
 
     client = get_mongo_client()
-    db = client[db_name or MONGO_DB_NAME]
+    db = client[database]
     collection = db[collection_name or MONGO_COLLECTION_NAME]
 
     if ensure_indexes:

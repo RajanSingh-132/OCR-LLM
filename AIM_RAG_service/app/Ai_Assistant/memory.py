@@ -1,7 +1,9 @@
 """
 Conversation memory for Avaal OrderBot (session turns + last entities).
 
-Stored in Mongo collection avaal_chat_sessions (same DB ).
+Stored in Mongo collection avaal_chat_sessions inside the tenant's own
+database (the corporate_id from the request), next to its order/trip/invoice
+data — no fixed database.
 """
 from __future__ import annotations
 
@@ -18,11 +20,11 @@ def new_session_id() -> str:
     return str(uuid.uuid4())
 
 
-def _sessions():
-    return get_mongo_collection(AVAAL_SESSION_COLLECTION)
+def _sessions(database: str):
+    return get_mongo_collection(AVAAL_SESSION_COLLECTION, database)
 
 
-def load_session(session_id: Optional[str]) -> Dict[str, Any]:
+def load_session(session_id: Optional[str], *, database: str) -> Dict[str, Any]:
     """Load or create a chat session."""
     if not session_id:
         session_id = new_session_id()
@@ -37,7 +39,7 @@ def load_session(session_id: Optional[str]) -> Dict[str, Any]:
             "created": True,
         }
 
-    doc = _sessions().find_one({"session_id": session_id})
+    doc = _sessions(database).find_one({"session_id": session_id})
     if not doc:
         checkpoint("MEMORY", "session not found — starting fresh", session_id=session_id)
         return {
@@ -88,6 +90,7 @@ def save_turn(
     question: str,
     answer: str,
     *,
+    database: str,
     corporate_id: Optional[str] = None,
     domain: Optional[str] = None,
     order_token: Optional[str] = None,
@@ -132,7 +135,7 @@ def save_turn(
     if set_fields:
         update["$set"].update(set_fields)
 
-    _sessions().update_one({"session_id": session_id}, update, upsert=True)
+    _sessions(database).update_one({"session_id": session_id}, update, upsert=True)
     checkpoint(
         "MEMORY",
         "turn saved",
