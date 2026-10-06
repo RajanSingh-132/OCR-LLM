@@ -2,6 +2,7 @@
 Run once to create/verify Avaal_order collection + indexes.
 
   python -m scripts.setup_Avaal_order
+  and this is one tiem the DB setup (Manually)
 """
 import logging
 import os

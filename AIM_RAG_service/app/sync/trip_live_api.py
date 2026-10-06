@@ -5,15 +5,15 @@ keeps MongoDB in sync with the latest PAGE_SIZE trip records.
   python -m app.sync.trip_live_api
   (or)  python app/sync/trip_live_api.py
 
-Runs forever until Ctrl+C. Multi-tenant: syncs every corporate_id in
-CORPORATE_IDS from ONE process — every cycle, all tenants are hit
-CONCURRENTLY (ThreadPoolExecutor, one thread per tenant), so the cycle's
-total time is bounded by the SLOWEST tenant, not the sum of all of them.
+Runs forever until Ctrl+C. Multi-tenant with a dynamic tenant list: at
+startup (ONCE) the tenant query in app/tenants/tenant_provisioning.py runs
+on Postgres (AFM_Manager.mstcompany); each company code becomes a Mongo
+database of the same name (missing databases/collections are created before
+any API call). Every cycle the tenants are synced ONE BY ONE. A tenant
+added in Postgres later is picked up on the next restart.
 Same design as app/sync/order_live_api.py — see that file's docstring for
 the full rationale (crash-safety, 30s cadence, daily purge, parallel
-embedding). DB_NAME_OVERRIDES maps AFMQA -> chatbot_db; every other
-corporate_id falls back to using its own id as the Mongo database name
-(e.g. AFN01992 -> Mongo db "AFN01992") unless an override is added for it.
+embedding).
 
 API contract (confirmed against a live browser request, NOT guessed):
   POST https://beta.afmsuite.ai/api/Trip/gettriplist
@@ -39,10 +39,14 @@ Each cycle, PER TENANT (in parallel):
   2. Keep only records whose `createdon` is within the last calendar month
      (RECENT_MONTHS) — re-checked client-side (API date filter is off, see
      above).
-  3. For each record, compare by `tripid` against that tenant's collection:
-       - tripid already stored -> delete the old doc, insert the fresh one
-         (refresh, with a new embedding).
-       - tripid not stored yet -> insert it as a new doc.
+  3. For each record, look it up by `tripnumber` in that tenant's collection
+     and compare `createdon` + `modifiedon`:
+       - tripnumber not stored yet        -> new: embed + insert.
+       - stored, both dates equal         -> unchanged: skip (no embedding).
+       - stored, createdon or modifiedon
+         differs                          -> changed: delete the old doc,
+                                             embed + insert the fresh one.
+     Records without a tripnumber are skipped (they can't be matched).
   4. Embeddings for the whole cycle's records are computed CONCURRENTLY
      (a second, inner ThreadPoolExecutor) since Bedrock's Titan endpoint only
      takes one text per call — see `_embed_texts`. So a full cycle has two
@@ -86,6 +90,7 @@ if ROOT not in sys.path:
 
 from app.embedding_client import get_embeddings
 from app.mongo_client import _to_python_types, get_mongo_collection
+from app.tenants.tenant_provisioning import prepare_tenants as _prepare_tenants
 
 logger = logging.getLogger("app.sync.trip_live_api")
 
@@ -93,11 +98,8 @@ logger = logging.getLogger("app.sync.trip_live_api")
 API_BASE = "https://beta.afmsuite.ai"
 LISTTRIP_PATH = "/api/Trip/gettriplist"
 API_VERSION = "1.0"
-# Every tenant this ONE process syncs, hit concurrently each cycle.
-CORPORATE_IDS = [
-    "AFMQA", "AFN01992", "AFN01856", "AFN01813",
-    "AFN01514", "AFN00292", "AFN00861", "AFN01801", "AFN00681",
-]
+# Tenants are no longer hardcoded: main() loads them ONCE at startup from
+# Postgres (AFM_Manager.mstcompany, see app/tenants/tenant_provisioning.py).
 EXTRA_HEADERS: Dict[str, str] = {}
 
 # Body wrapper key is lowercase "filter" for this endpoint (confirmed from a
@@ -161,7 +163,9 @@ REQUEST_TIMEOUT = 60      # seconds — must stay well under SLEEP_SECONDS
 USE_API_DATE_FILTER = False
 API_DATE_TYPE = "CD"
 
-DB_NAME_OVERRIDES = {"AFMQA": "chatbot_db"}
+# Every tenant uses its own company code as the Mongo database name
+# (AFMQA -> "AFMQA" too). Add an entry here only to redirect a tenant.
+DB_NAME_OVERRIDES: Dict[str, str] = {}
 COLLECTION_NAME = "Avaal_trip"
 NAMESPACE = "avaal_trips"
 METADATA_TYPE = "avaal_trip"
@@ -464,15 +468,35 @@ def build_document(
     return doc
 
 
-def load_existing_keys(collection, field: str) -> Set[str]:
-    existing: Set[str] = set()
-    projection = {field: 1, f"metadata.{field}": 1}
-    for doc in collection.find({}, projection):
-        value = doc.get(field)
-        if value in (None, ""):
-            value = (doc.get("metadata") or {}).get(field)
-        if value not in (None, ""):
-            existing.add(str(value).strip())
+# A stored trip counts as unchanged only when tripnumber, createdon AND
+# modifiedon all match the API record.
+MATCH_DATE_FIELDS = ("createdon", "modifiedon")
+
+
+def _same_timestamp(a: Any, b: Any) -> bool:
+    """Compare two timestamps as moments in time (so "...Z" and "...+00:00"
+    match); fall back to plain string comparison when either can't be parsed."""
+    if a in (None, "") and b in (None, ""):
+        return True
+    da, db = _parse_datetime(a), _parse_datetime(b)
+    if da is not None and db is not None:
+        return da == db
+    return str(a).strip() == str(b).strip()
+
+
+def load_existing_by_number(collection, numbers: List[str]) -> Dict[str, Dict[str, Any]]:
+    """{tripnumber: {createdon, modifiedon}} for the stored trips among
+    `numbers` only (the current API page), not the whole collection."""
+    existing: Dict[str, Dict[str, Any]] = {}
+    if not numbers:
+        return existing
+    projection = {DUPLICATE_FIELD: 1, **{f: 1 for f in MATCH_DATE_FIELDS}}
+    for doc in collection.find(
+        {"namespace": NAMESPACE, DUPLICATE_FIELD: {"$in": numbers}}, projection
+    ):
+        number = str(doc.get(DUPLICATE_FIELD) or "").strip()
+        if number:
+            existing[number] = {f: doc.get(f) for f in MATCH_DATE_FIELDS}
     return existing
 
 
@@ -513,38 +537,60 @@ def run_one_cycle(corporate_id: str) -> Dict[str, Any]:
             "timing_seconds": {"fetch": round(t_fetch, 2), "total": round(t_fetch, 2)},
         }
 
-    # --- transform / filter: decide refresh (tripid match) vs new ---------
+    # --- transform / filter: match on tripnumber + createdon + modifiedon ---
+    #   not in Mongo                       -> new: embed + insert
+    #   in Mongo, createdon & modifiedon
+    #   both equal                         -> unchanged: skip (no embedding)
+    #   in Mongo, either date differs      -> changed: delete old doc, embed + insert
     t1 = time.perf_counter()
     collection = get_mongo_collection(COLLECTION_NAME, database, ensure_indexes=True)
-    existing_tripids: Set[str] = load_existing_keys(collection, ID_FIELD)
 
-    embeddings = get_embeddings() if WITH_EMBEDDINGS else None
-
-    pending: List[Dict[str, Any]] = []
-    ids_to_refresh: List[Any] = []
+    recent: List[Dict[str, Any]] = []
     skipped_old = 0
-    refreshed_count = 0
-    new_count = 0
+    skipped_no_number = 0
+    seen_numbers: Set[str] = set()
     for trip in records:
         if recent_cutoff is not None and not is_recent_record(trip, recent_cutoff):
             skipped_old += 1
             continue
-        key_value = trip.get(ID_FIELD)
-        key_str = str(key_value).strip() if key_value not in (None, "") else ""
-        if key_str and key_str in existing_tripids:
-            ids_to_refresh.append(key_value)
-            refreshed_count += 1
-        else:
+        number = str(trip.get(DUPLICATE_FIELD) or "").strip()
+        if not number:
+            skipped_no_number += 1  # can't be matched, would duplicate every cycle
+            continue
+        if number in seen_numbers:
+            continue  # same trip twice in one API page — keep the first
+        seen_numbers.add(number)
+        recent.append(trip)
+
+    existing = load_existing_by_number(collection, sorted(seen_numbers))
+
+    pending: List[Dict[str, Any]] = []
+    numbers_to_update: List[str] = []
+    new_count = 0
+    updated_count = 0
+    unchanged_count = 0
+    for trip in recent:
+        number = str(trip.get(DUPLICATE_FIELD)).strip()
+        stored_doc = existing.get(number)
+        if stored_doc is None:
             new_count += 1
+        elif all(_same_timestamp(trip.get(f), stored_doc.get(f)) for f in MATCH_DATE_FIELDS):
+            unchanged_count += 1
+            continue
+        else:
+            numbers_to_update.append(number)
+            updated_count += 1
         pending.append(trip)
     t_transform = time.perf_counter() - t1
 
-    # --- delete stale matches, then embed (optional) + insert everything --
+    embeddings = get_embeddings() if (WITH_EMBEDDINGS and pending) else None
+
+    # --- delete changed docs, then embed (optional) + insert new/changed --
     t2 = time.perf_counter()
     deleted = 0
-    if ids_to_refresh:
+    if numbers_to_update:
         del_result = collection.delete_many(
-            {"namespace": NAMESPACE, ID_FIELD: {"$in": ids_to_refresh}}
+            {"namespace": NAMESPACE, DUPLICATE_FIELD: {"$in": numbers_to_update}}
         )
         deleted = del_result.deleted_count
 
@@ -593,9 +639,11 @@ def run_one_cycle(corporate_id: str) -> Dict[str, Any]:
         "with_embeddings": WITH_EMBEDDINGS,
         **fetch_stats,
         "documents_skipped_old": skipped_old,
+        "documents_skipped_no_tripnumber": skipped_no_number,
+        "documents_unchanged_skipped": unchanged_count,
         "documents_new": new_count,
-        "documents_matched_refreshed": refreshed_count,
-        "documents_deleted_before_refresh": deleted,
+        "documents_updated": updated_count,
+        "documents_deleted_before_update": deleted,
         "documents_inserted": inserted,
         "documents_in_namespace": stored,
         "timing_seconds": {
@@ -699,11 +747,20 @@ def _process_one_tenant(corporate_id: str, cycle_no: int) -> None:
 
 def main() -> int:
     _setup_logging()
+    try:
+        corporate_ids = _prepare_tenants(_db_name, logger)
+    except Exception:  # noqa: BLE001 — without a tenant list there is nothing to sync
+        logger.exception("Could not load the tenant list from Postgres; exiting")
+        return 1
+    if not corporate_ids:
+        logger.error("No tenants to sync (Postgres query returned none ready); exiting")
+        return 1
+
     logger.info(
         "Starting live trip sync: corporateids=%s every %ss (%s records/cycle "
-        "per tenant, all tenants concurrent), daily purge of records older than "
+        "per tenant, tenants one by one), daily purge of records older than "
         "%s month(s) every %sh",
-        CORPORATE_IDS,
+        corporate_ids,
         SLEEP_SECONDS,
         PAGE_SIZE,
         RECENT_MONTHS,
@@ -716,24 +773,15 @@ def main() -> int:
             cycle_no += 1
             cycle_start = time.perf_counter()
 
-            # All tenants hit concurrently — cycle time is bounded by the
-            # SLOWEST tenant, not the sum of every tenant's own time.
-            with ThreadPoolExecutor(max_workers=len(CORPORATE_IDS)) as pool:
-                futures = [
-                    pool.submit(_process_one_tenant, corp_id, cycle_no)
-                    for corp_id in CORPORATE_IDS
-                ]
-                for future in as_completed(futures):
-                    future.result()  # re-raises only truly unexpected bugs in
-                    # _process_one_tenant itself (it already catches its own
-                    # per-tenant errors), so those still surface below.
+            for corp_id in corporate_ids:
+                _process_one_tenant(corp_id, cycle_no)
 
             elapsed = time.perf_counter() - cycle_start
             logger.info(
                 "cycle %s finished in %.2fs (%d tenants); sleeping %ss before next cycle",
                 cycle_no,
                 elapsed,
-                len(CORPORATE_IDS),
+                len(corporate_ids),
                 SLEEP_SECONDS,
             )
             time.sleep(SLEEP_SECONDS)

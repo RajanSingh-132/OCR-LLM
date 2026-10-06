@@ -32,24 +32,13 @@ NAMESPACE = "avaal_orders"
 DUPLICATE_FIELD = "ordernumber"
 WITH_EMBEDDINGS = True
 SKIP_DUPLICATES = True
-# Only ingest records whose `createdon` falls within the last calendar month
-# (relative to "now"). Anything older that is present in the source file is
-# skipped — no embedding, no insert. Set to False to ingest every record.
+
 FILTER_RECENT_ONLY = True
 DATE_FIELD = "createdon"
 RECENT_MONTHS = 1
 EMBED_BATCH_SIZE = 25
 INSERT_BATCH_SIZE = 100
-# Titan Text Embeddings V2 accepts at most 8192 input tokens per request.
-# Order text is number/ID/punctuation heavy, so the tokenizer splits it far
-# more aggressively than prose — empirically ~1.5 chars per token (vs ~4 for
-# English text). A plain character cap therefore cannot guarantee we stay
-# under the token ceiling, so we do two things:
-#   1. Trim to MAX_EMBED_CHARS up front (cheap, handles the common case).
-#   2. If Bedrock still rejects a text for "Too many input tokens", shrink it
-#      further and retry (see `_embed_texts` / `_embed_one_with_retry`).
-# The full record is always stored verbatim in `page_content`; only the
-# embedding input is trimmed for unusually large orders.
+
 MAX_EMBED_TOKENS = 8192
 EST_CHARS_PER_TOKEN = 1.4
 MAX_EMBED_CHARS = int(MAX_EMBED_TOKENS * EST_CHARS_PER_TOKEN * 0.85)  # ~9700

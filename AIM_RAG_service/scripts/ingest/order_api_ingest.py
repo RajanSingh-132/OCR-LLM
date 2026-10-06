@@ -51,21 +51,11 @@ logger = logging.getLogger("scripts.ingest.order_api")
 API_BASE = "http://173.209.153.108:5000"
 LISTORDER_PATH = "/api/Order/listorder"
 API_VERSION = "1.0"
-# corporateid header == the tenant's Postgres DB name on the API server, and
-# also the MongoDB database we write into (AFMQA -> chatbot_db via override).
-# `username` / `usercode` in BASE_FILTER below MUST belong to this same tenant
-# or listorder returns 0 rows.
+
 CORPORATE_ID = "AFMQA"
-# Extra HTTP headers if the server needs them (auth token etc.). Confirmed by
-# a working browser call that only `corporateid` + content-type are required
-# — no bearer token, no Origin/Referer.
+
 EXTRA_HEADERS: Dict[str, str] = {}
-# `Filter` payload sent to listorder — capital "Filter" is required by the API
-# (lowercase "filter" silently no-ops and returns total_count: 0). Every field
-# below must be present (the DTO has additionalProperties: false and several
-# non-nullable fields like orderoutid), so keep the empty-string / -1 filler
-# values even for filters you don't use. Pagination keys (pageno/pagesize) are
-# overwritten automatically per page.
+
 BASE_FILTER: Dict[str, Any] = {
     "dataviewtype": "D",
     "companycode": "",

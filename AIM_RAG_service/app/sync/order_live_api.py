@@ -22,10 +22,14 @@ Each cycle, PER TENANT:
   2. Keep only records whose `createdon` is within the last calendar month
      (RECENT_MONTHS) — both requested from the API (fromdate/todate) and
      re-checked client-side.
-  3. For each record, compare by `orderid` against that tenant's collection:
-       - orderid already stored -> delete the old doc, insert the fresh one
-         (refresh, with a new embedding).
-       - orderid not stored yet -> insert it as a new doc.
+  3. For each record, look it up by `ordernumber` in that tenant's collection
+     and compare `createdon` + `modifiedon`:
+       - ordernumber not stored yet       -> new: embed + insert.
+       - stored, both dates equal         -> unchanged: skip (no embedding).
+       - stored, createdon or modifiedon
+         differs                          -> changed: delete the old doc,
+                                             embed + insert the fresh one.
+     Records without an ordernumber are skipped (they can't be matched).
   4. Embeddings for the whole cycle's records are computed CONCURRENTLY
      (a second, inner ThreadPoolExecutor) since Bedrock's Titan endpoint only
      takes one text per call — see `_embed_texts`.
@@ -67,7 +71,7 @@ if ROOT not in sys.path:
 
 from app.embedding_client import get_embeddings
 from app.mongo_client import _to_python_types, get_mongo_collection
-from app.tenants.tenant_provisioning import ensure_mongo_database, load_company_codes
+from app.tenants.tenant_provisioning import prepare_tenants as _prepare_tenants
 
 logger = logging.getLogger("app.sync.order_live_api")
 
@@ -440,15 +444,35 @@ def build_document(
     return doc
 
 
-def load_existing_keys(collection, field: str) -> Set[str]:
-    existing: Set[str] = set()
-    projection = {field: 1, f"metadata.{field}": 1}
-    for doc in collection.find({}, projection):
-        value = doc.get(field)
-        if value in (None, ""):
-            value = (doc.get("metadata") or {}).get(field)
-        if value not in (None, ""):
-            existing.add(str(value).strip())
+# A stored order counts as unchanged only when ordernumber, createdon AND
+# modifiedon all match the API record.
+MATCH_DATE_FIELDS = ("createdon", "modifiedon")
+
+
+def _same_timestamp(a: Any, b: Any) -> bool:
+    """Compare two timestamps as moments in time (so "...Z" and "...+00:00"
+    match); fall back to plain string comparison when either can't be parsed."""
+    if a in (None, "") and b in (None, ""):
+        return True
+    da, db = _parse_datetime(a), _parse_datetime(b)
+    if da is not None and db is not None:
+        return da == db
+    return str(a).strip() == str(b).strip()
+
+
+def load_existing_by_number(collection, numbers: List[str]) -> Dict[str, Dict[str, Any]]:
+    """{ordernumber: {createdon, modifiedon}} for the stored orders among
+    `numbers` only (the current API page), not the whole collection."""
+    existing: Dict[str, Dict[str, Any]] = {}
+    if not numbers:
+        return existing
+    projection = {DUPLICATE_FIELD: 1, **{f: 1 for f in MATCH_DATE_FIELDS}}
+    for doc in collection.find(
+        {"namespace": NAMESPACE, DUPLICATE_FIELD: {"$in": numbers}}, projection
+    ):
+        number = str(doc.get(DUPLICATE_FIELD) or "").strip()
+        if number:
+            existing[number] = {f: doc.get(f) for f in MATCH_DATE_FIELDS}
     return existing
 
 
@@ -489,38 +513,60 @@ def run_one_cycle(corporate_id: str) -> Dict[str, Any]:
             "timing_seconds": {"fetch": round(t_fetch, 2), "total": round(t_fetch, 2)},
         }
 
-    # --- transform / filter: decide refresh (orderid match) vs new --------
+    # --- transform / filter: match on ordernumber + createdon + modifiedon --
+    #   not in Mongo                       -> new: embed + insert
+    #   in Mongo, createdon & modifiedon
+    #   both equal                         -> unchanged: skip (no embedding)
+    #   in Mongo, either date differs      -> changed: delete old doc, embed + insert
     t1 = time.perf_counter()
     collection = get_mongo_collection(COLLECTION_NAME, database, ensure_indexes=True)
-    existing_orderids: Set[str] = load_existing_keys(collection, ID_FIELD)
 
-    embeddings = get_embeddings() if WITH_EMBEDDINGS else None
-
-    pending: List[Dict[str, Any]] = []
-    ids_to_refresh: List[Any] = []
+    recent: List[Dict[str, Any]] = []
     skipped_old = 0
-    refreshed_count = 0
-    new_count = 0
+    skipped_no_number = 0
+    seen_numbers: Set[str] = set()
     for order in records:
         if recent_cutoff is not None and not is_recent_record(order, recent_cutoff):
             skipped_old += 1
             continue
-        key_value = order.get(ID_FIELD)
-        key_str = str(key_value).strip() if key_value not in (None, "") else ""
-        if key_str and key_str in existing_orderids:
-            ids_to_refresh.append(key_value)
-            refreshed_count += 1
-        else:
+        number = str(order.get(DUPLICATE_FIELD) or "").strip()
+        if not number:
+            skipped_no_number += 1  # can't be matched, would duplicate every cycle
+            continue
+        if number in seen_numbers:
+            continue  # same order twice in one API page — keep the first
+        seen_numbers.add(number)
+        recent.append(order)
+
+    existing = load_existing_by_number(collection, sorted(seen_numbers))
+
+    pending: List[Dict[str, Any]] = []
+    numbers_to_update: List[str] = []
+    new_count = 0
+    updated_count = 0
+    unchanged_count = 0
+    for order in recent:
+        number = str(order.get(DUPLICATE_FIELD)).strip()
+        stored_doc = existing.get(number)
+        if stored_doc is None:
             new_count += 1
+        elif all(_same_timestamp(order.get(f), stored_doc.get(f)) for f in MATCH_DATE_FIELDS):
+            unchanged_count += 1
+            continue
+        else:
+            numbers_to_update.append(number)
+            updated_count += 1
         pending.append(order)
     t_transform = time.perf_counter() - t1
 
-    # --- delete stale matches, then embed (optional) + insert everything --
+    embeddings = get_embeddings() if (WITH_EMBEDDINGS and pending) else None
+
+    # --- delete changed docs, then embed (optional) + insert new/changed --
     t2 = time.perf_counter()
     deleted = 0
-    if ids_to_refresh:
+    if numbers_to_update:
         del_result = collection.delete_many(
-            {"namespace": NAMESPACE, ID_FIELD: {"$in": ids_to_refresh}}
+            {"namespace": NAMESPACE, DUPLICATE_FIELD: {"$in": numbers_to_update}}
         )
         deleted = del_result.deleted_count
 
@@ -569,9 +615,11 @@ def run_one_cycle(corporate_id: str) -> Dict[str, Any]:
         "with_embeddings": WITH_EMBEDDINGS,
         **fetch_stats,
         "documents_skipped_old": skipped_old,
+        "documents_skipped_no_ordernumber": skipped_no_number,
+        "documents_unchanged_skipped": unchanged_count,
         "documents_new": new_count,
-        "documents_matched_refreshed": refreshed_count,
-        "documents_deleted_before_refresh": deleted,
+        "documents_updated": updated_count,
+        "documents_deleted_before_update": deleted,
         "documents_inserted": inserted,
         "documents_in_namespace": stored,
         "timing_seconds": {
@@ -655,28 +703,8 @@ def maybe_run_daily_cleanup(corporate_id: str) -> Dict[str, Any] | None:
 
 def prepare_tenants() -> List[str]:
     """Load the tenant list from Postgres (once) and make sure each tenant's
-    Mongo database + collections exist. Returns only the tenants whose
-    database is ready, so the API is never called for a tenant without one."""
-    codes = load_company_codes()
-    logger.info("Postgres tenant query returned %d company codes: %s", len(codes), codes)
-
-    ready: List[str] = []
-    for code in codes:
-        database = _db_name(code)
-        try:
-            info = ensure_mongo_database(database)
-        except Exception:  # noqa: BLE001 — skip this tenant, keep the rest
-            logger.exception("[%s] could not create Mongo db %s; skipping", code, database)
-            continue
-        if info["db_existed"] and not info["collections_created"]:
-            logger.info("[%s] Mongo db %s already exists", code, database)
-        else:
-            logger.info(
-                "[%s] Mongo db %s ready (db created: %s, collections created: %s)",
-                code, database, not info["db_existed"], info["collections_created"],
-            )
-        ready.append(code)
-    return ready
+    Mongo database + collections exist — see tenant_provisioning.prepare_tenants."""
+    return _prepare_tenants(_db_name, logger)
 
 
 def _process_one_tenant(corporate_id: str, cycle_no: int) -> None:

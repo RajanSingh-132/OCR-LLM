@@ -7,12 +7,14 @@ Dynamic tenant list: Postgres (AFM_Manager.mstcompany) -> MongoDB.
    exists with the Avaal_order / Avaal_trip / Avaal_invoice collections.
    A database or collection that already exists is left untouched — only
    missing ones get created.
+3. `prepare_tenants()` does 1 + 2 for every code and returns the tenants
+   that are ready; the order / trip / invoice sync daemons all use it.
 """
 from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, List
+from typing import Callable, Dict, List
 
 import psycopg
 from dotenv import load_dotenv
@@ -43,7 +45,7 @@ WHERE activeyn = 'Y'
       'AFMQAM1'
   )
 ORDER BY companycode
-LIMIT 50;
+LIMIT 100;
 """
 
 TENANT_COLLECTIONS = [
@@ -92,3 +94,35 @@ def ensure_mongo_database(database: str) -> Dict[str, object]:
         "db_existed": db_existed,
         "collections_created": created,
     }
+
+
+def prepare_tenants(
+    db_name_fn: Callable[[str], str] = lambda code: code,
+    log: logging.Logger = logger,
+) -> List[str]:
+    """Load the tenant list from Postgres (once) and make sure each tenant's
+    Mongo database + collections exist. Returns only the tenants whose
+    database is ready, so the API is never called for a tenant without one.
+
+    Shared by the order / trip / invoice sync daemons; each passes its own
+    `db_name_fn` (company code -> Mongo database name) and logger."""
+    codes = load_company_codes()
+    log.info("Postgres tenant query returned %d company codes: %s", len(codes), codes)
+
+    ready: List[str] = []
+    for code in codes:
+        database = db_name_fn(code)
+        try:
+            info = ensure_mongo_database(database)
+        except Exception:  # noqa: BLE001 — skip this tenant, keep the rest
+            log.exception("[%s] could not create Mongo db %s; skipping", code, database)
+            continue
+        if info["db_existed"] and not info["collections_created"]:
+            log.info("[%s] Mongo db %s already exists", code, database)
+        else:
+            log.info(
+                "[%s] Mongo db %s ready (db created: %s, collections created: %s)",
+                code, database, not info["db_existed"], info["collections_created"],
+            )
+        ready.append(code)
+    return ready

@@ -1,1 +1,0 @@
-# Manual ingest scripts package
