@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.documents import Document
 
-from app.order_ask.checkpoint import checkpoint
+from app.order_ask.config import checkpoint
 from app.tenants.router import (
     get_orders_collection,
     get_orders_metadata_type,

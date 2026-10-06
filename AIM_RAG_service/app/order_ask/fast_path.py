@@ -23,7 +23,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
-from app.order_ask.checkpoint import checkpoint
+from app.order_ask.config import checkpoint
 from app.order_ask.fuzzy_match import fuzzy_contains_any
 from app.tenants.router import (
     get_domain_collection,

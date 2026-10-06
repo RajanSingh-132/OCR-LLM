@@ -10,7 +10,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from app.mongo_client import get_mongo_collection
-from app.order_ask.checkpoint import checkpoint
+from app.order_ask.config import checkpoint
 from app.order_ask.config import AVAAL_SESSION_COLLECTION, AVAAL_SESSION_MAX_TURNS
 
 

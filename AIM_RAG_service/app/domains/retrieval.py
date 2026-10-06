@@ -9,7 +9,7 @@ from langchain_core.documents import Document
 
 from app.domains.registry import get_domain_profile
 from app.embedding_client import get_models
-from app.order_ask.checkpoint import checkpoint
+from app.order_ask.config import checkpoint
 from app.order_ask.config import AVAAL_RAG_MIN_SCORE
 from app.rag_retrieval import MongoVectorStore
 from app.tenants.context import get_active_domain

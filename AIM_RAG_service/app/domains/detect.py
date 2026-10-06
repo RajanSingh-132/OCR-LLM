@@ -12,7 +12,7 @@ from langchain_core.prompts import PromptTemplate
 from app.domains.prompts import DOMAIN_CLASSIFY_PROMPT
 from app.domains.registry import DEFAULT_DOMAIN, DOMAINS
 from app.embedding_client import get_anthropic_llm, get_xai_llm
-from app.order_ask.checkpoint import checkpoint
+from app.order_ask.config import checkpoint
 
 logger = logging.getLogger("domains.detect")
 

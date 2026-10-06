@@ -6,7 +6,7 @@ import time
 import numpy as np
 from langchain_core.documents import Document
 from app.mongo_client import get_mongo_collection, _to_python_types
-from app.order_ask.checkpoint import checkpoint
+from app.order_ask.config import checkpoint
 
 
 class MongoRetriever:

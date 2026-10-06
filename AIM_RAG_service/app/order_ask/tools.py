@@ -34,7 +34,7 @@ from app.order_ask.calculation_engine import (
     match_formulas,
     run_calculation_engine,
 )
-from app.order_ask.checkpoint import checkpoint
+from app.order_ask.config import checkpoint
 from app.order_ask.entities import entities_to_mongo_filters
 from app.tenants.context import get_active_domain
 

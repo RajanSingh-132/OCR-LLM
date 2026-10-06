@@ -21,7 +21,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.order_ask.checkpoint import checkpoint
+from app.order_ask.config import checkpoint
 from app.order_ask.dynamic_analytics import (
     AGG_TIMEOUT_MS,
     GROUPABLE_MAX_DISTINCT,

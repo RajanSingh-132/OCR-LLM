@@ -23,7 +23,7 @@ from app.order_ask.calculation_engine import (
     format_calculation_result_for_context,
     list_formula_catalog_for_prompt,
 )
-from app.order_ask.checkpoint import CheckpointTimer, checkpoint
+from app.order_ask.config import CheckpointTimer, checkpoint
 from app.order_ask.entities import extract_entities
 from app.order_ask.intent import classify_intent_common, understand_question
 from app.order_ask.memory import (

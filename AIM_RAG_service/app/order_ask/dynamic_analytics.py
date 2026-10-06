@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from langchain_core.prompts import PromptTemplate
 
 from app.embedding_client import get_anthropic_llm, get_xai_llm
-from app.order_ask.checkpoint import checkpoint
+from app.order_ask.config import checkpoint
 from app.order_ask.entities import entities_to_mongo_filters
 from app.order_ask.rag_retrieval import _base_order_match
 from app.tenants.context import require_tenant
