@@ -26,8 +26,8 @@ from app.mongo_client import _to_python_types, get_mongo_collection
 logger = logging.getLogger("scripts.ingest.invoice")
 
 # ===================== CONFIG — edit these =====================
-FILE_PATH = r"D:\Desktop\OCR-LLM\AFN01992order.txt"
-DB_NAME = "AFN01514"
+FILE_PATH = r"D:\Desktop\OCR-LLM\today32 invoice.txt"
+DB_NAME = "chatbot_db"
 COLLECTION_NAME = "Avaal_invoice"
 NAMESPACE = "avaal_invoices"
 METADATA_TYPE = "avaal_invoice"
@@ -68,12 +68,34 @@ def _read_json_payload(path: str) -> Any:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        wrapped = raw.rstrip(",").strip()
-        if not wrapped.startswith(("{", "[")):
-            wrapped = "{" + wrapped
-        if wrapped.startswith("{") and not wrapped.endswith("}"):
-            wrapped = wrapped + "}"
-        return json.loads(wrapped)
+        pass
+
+    # Records pasted without the enclosing [ ] — "{...}, {...}, ..." — or
+    # several JSON values one after another: read them one by one.
+    decoder = json.JSONDecoder()
+    values: List[Any] = []
+    pos = 0
+    while pos < len(raw):
+        while pos < len(raw) and raw[pos] in " \t\r\n,":
+            pos += 1
+        if pos >= len(raw):
+            break
+        try:
+            value, pos = decoder.raw_decode(raw, pos)
+        except json.JSONDecodeError:
+            values = []
+            break
+        values.append(value)
+    if values:
+        return values[0] if len(values) == 1 else values
+
+    # Last resort: object body pasted without its outer { }.
+    wrapped = raw.rstrip(",").strip()
+    if not wrapped.startswith(("{", "[")):
+        wrapped = "{" + wrapped
+    if wrapped.startswith("{") and not wrapped.endswith("}"):
+        wrapped = wrapped + "}"
+    return json.loads(wrapped)
 
 
 def _extract_details(payload: Any) -> Any:
