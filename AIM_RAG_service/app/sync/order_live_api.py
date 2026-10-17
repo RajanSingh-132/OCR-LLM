@@ -5,16 +5,10 @@ keeps MongoDB in sync with the latest PAGE_SIZE records.
   python -m app.sync.order_live_api
   (or)  python app/sync/order_live_api.py
 
-Runs forever until Ctrl+C. Multi-tenant, with a dynamic tenant list:
-  - At startup (ONCE), TENANT_QUERY in app/tenants/tenant_provisioning.py
-    runs on Postgres (AFM_Manager.mstcompany) and returns the company codes.
-  - Each code becomes a Mongo database of the same name (e.g. AFN00242 ->
-    Mongo db "AFN00242") holding Avaal_order / Avaal_trip / Avaal_invoice.
-    Missing databases/collections are created before any API call; existing
-    ones are left as they are. AFMQA follows the same rule (Mongo db
-    "AFMQA") whenever the query returns it.
-  - A tenant added in Postgres later is picked up on the next restart.
-Every cycle the tenants are synced ONE BY ONE (sequentially).
+Runs forever until Ctrl+C. Single tenant: only CORPORATE_IDS (AFMQA) is
+sent as the `corporateid` header, and its records are stored in the Mongo
+database "chatbot_db" (DB_NAME_OVERRIDES). The Postgres tenant list
+(app/tenants/tenant_provisioning.py) is no longer used.
 
 Each cycle, PER TENANT:
   1. POST listorder (header corporateid: <tenant>, body {"Filter": {...}},
@@ -71,7 +65,6 @@ if ROOT not in sys.path:
 
 from app.embedding_client import get_embeddings
 from app.mongo_client import _to_python_types, get_mongo_collection
-from app.tenants.tenant_provisioning import prepare_tenants as _prepare_tenants
 
 logger = logging.getLogger("app.sync.order_live_api")
 
@@ -79,8 +72,8 @@ logger = logging.getLogger("app.sync.order_live_api")
 API_BASE = "https://beta.afmsuite.ai"
 LISTORDER_PATH = "/api/Order/listorder"
 API_VERSION = "1.0"
-# Tenants are no longer hardcoded: main() loads them ONCE at startup from
-# Postgres (AFM_Manager.mstcompany, see app/tenants/tenant_provisioning.py).
+# Only these tenants are synced — sent as the `corporateid` header.
+CORPORATE_IDS: List[str] = ["AFMQA"]
 EXTRA_HEADERS: Dict[str, str] = {}
 
 # `Filter` payload — capital "Filter" required by the API. Every field must
@@ -139,9 +132,8 @@ REQUEST_TIMEOUT = 60      # seconds — must stay well under SLEEP_SECONDS
 USE_API_DATE_FILTER = True
 API_DATE_TYPE = "CD"
 
-# Every tenant uses its own company code as the Mongo database name
-# (AFMQA -> "AFMQA" too). Add an entry here only to redirect a tenant.
-DB_NAME_OVERRIDES: Dict[str, str] = {}
+# Mongo database each tenant's records are stored in (AFMQA -> chatbot_db).
+DB_NAME_OVERRIDES: Dict[str, str] = {"AFMQA": "chatbot_db"}
 COLLECTION_NAME = "Avaal_order"
 NAMESPACE = "avaal_orders"
 METADATA_TYPE = "avaal_order"
@@ -701,12 +693,6 @@ def maybe_run_daily_cleanup(corporate_id: str) -> Dict[str, Any] | None:
     return result
 
 
-def prepare_tenants() -> List[str]:
-    """Load the tenant list from Postgres (once) and make sure each tenant's
-    Mongo database + collections exist — see tenant_provisioning.prepare_tenants."""
-    return _prepare_tenants(_db_name, logger)
-
-
 def _process_one_tenant(corporate_id: str, cycle_no: int) -> None:
     """One tenant's sync + daily-cleanup check. Every exception is caught and
     logged here (never re-raised) so one tenant's failure can never affect
@@ -733,14 +719,7 @@ def _process_one_tenant(corporate_id: str, cycle_no: int) -> None:
 
 def main() -> int:
     _setup_logging()
-    try:
-        corporate_ids = prepare_tenants()
-    except Exception:  # noqa: BLE001 — without a tenant list there is nothing to sync
-        logger.exception("Could not load the tenant list from Postgres; exiting")
-        return 1
-    if not corporate_ids:
-        logger.error("No tenants to sync (Postgres query returned none ready); exiting")
-        return 1
+    corporate_ids = list(CORPORATE_IDS)
 
     logger.info(
         "Starting live order sync: corporateids=%s every %ss (%s records/cycle "

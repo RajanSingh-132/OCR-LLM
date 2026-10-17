@@ -5,12 +5,10 @@ keeps MongoDB in sync with the latest PAGE_SIZE trip records.
   python -m app.sync.trip_live_api
   (or)  python app/sync/trip_live_api.py
 
-Runs forever until Ctrl+C. Multi-tenant with a dynamic tenant list: at
-startup (ONCE) the tenant query in app/tenants/tenant_provisioning.py runs
-on Postgres (AFM_Manager.mstcompany); each company code becomes a Mongo
-database of the same name (missing databases/collections are created before
-any API call). Every cycle the tenants are synced ONE BY ONE. A tenant
-added in Postgres later is picked up on the next restart.
+Runs forever until Ctrl+C. Single tenant: only CORPORATE_IDS (AFMQA) is
+sent as the `corporateid` header, and its records are stored in the Mongo
+database "chatbot_db" (DB_NAME_OVERRIDES). The Postgres tenant list
+(app/tenants/tenant_provisioning.py) is no longer used.
 Same design as app/sync/order_live_api.py — see that file's docstring for
 the full rationale (crash-safety, 30s cadence, daily purge, parallel
 embedding).
@@ -90,7 +88,6 @@ if ROOT not in sys.path:
 
 from app.embedding_client import get_embeddings
 from app.mongo_client import _to_python_types, get_mongo_collection
-from app.tenants.tenant_provisioning import prepare_tenants as _prepare_tenants
 
 logger = logging.getLogger("app.sync.trip_live_api")
 
@@ -98,8 +95,8 @@ logger = logging.getLogger("app.sync.trip_live_api")
 API_BASE = "https://beta.afmsuite.ai"
 LISTTRIP_PATH = "/api/Trip/gettriplist"
 API_VERSION = "1.0"
-# Tenants are no longer hardcoded: main() loads them ONCE at startup from
-# Postgres (AFM_Manager.mstcompany, see app/tenants/tenant_provisioning.py).
+# Only these tenants are synced — sent as the `corporateid` header.
+CORPORATE_IDS: List[str] = ["AFMQA"]
 EXTRA_HEADERS: Dict[str, str] = {}
 
 # Body wrapper key is lowercase "filter" for this endpoint (confirmed from a
@@ -163,9 +160,8 @@ REQUEST_TIMEOUT = 60      # seconds — must stay well under SLEEP_SECONDS
 USE_API_DATE_FILTER = False
 API_DATE_TYPE = "CD"
 
-# Every tenant uses its own company code as the Mongo database name
-# (AFMQA -> "AFMQA" too). Add an entry here only to redirect a tenant.
-DB_NAME_OVERRIDES: Dict[str, str] = {}
+# Mongo database each tenant's records are stored in (AFMQA -> chatbot_db).
+DB_NAME_OVERRIDES: Dict[str, str] = {"AFMQA": "chatbot_db"}
 COLLECTION_NAME = "Avaal_trip"
 NAMESPACE = "avaal_trips"
 METADATA_TYPE = "avaal_trip"
@@ -747,14 +743,7 @@ def _process_one_tenant(corporate_id: str, cycle_no: int) -> None:
 
 def main() -> int:
     _setup_logging()
-    try:
-        corporate_ids = _prepare_tenants(_db_name, logger)
-    except Exception:  # noqa: BLE001 — without a tenant list there is nothing to sync
-        logger.exception("Could not load the tenant list from Postgres; exiting")
-        return 1
-    if not corporate_ids:
-        logger.error("No tenants to sync (Postgres query returned none ready); exiting")
-        return 1
+    corporate_ids = list(CORPORATE_IDS)
 
     logger.info(
         "Starting live trip sync: corporateids=%s every %ss (%s records/cycle "

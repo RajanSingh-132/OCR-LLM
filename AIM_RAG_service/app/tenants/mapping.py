@@ -85,10 +85,10 @@ def validate_corporate_id(raw: str) -> str:
     return corporate_id
 
 
-# Every corporate_id reads from the Mongo database of the same name
-# (AFMQA -> "AFMQA" too), matching the sync scripts. Add an entry here only
-# to redirect a tenant to a different database.
-_CORPORATE_DB_OVERRIDES: Dict[str, str] = {}
+# Every corporate_id reads from the Mongo database of the same name, except
+# the overrides below — must match DB_NAME_OVERRIDES in app/sync/*_live_api.py
+# (AFMQA is stored in chatbot_db by the sync daemons).
+_CORPORATE_DB_OVERRIDES: Dict[str, str] = {"AFMQA": "chatbot_db"}
 
 
 def _database_name(corporate_id: str) -> str:

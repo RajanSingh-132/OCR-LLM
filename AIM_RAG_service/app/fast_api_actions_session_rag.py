@@ -244,11 +244,10 @@ async def ask_order_question_stream(query: OrderQuery):
       {"type": "chunk", "text": "..."}     — a piece of the answer text; append
                                               these in order to build the reply
                                               live as it streams in
-      {"type": "final", "data": {...}}     — the complete response object,
-                                              identical in shape to what
-                                              POST /api/v1/orders/ask returns
-                                              (session_id, matches, calculation,
-                                              analytics, etc.) — sent once, last
+      {"type": "final", "data": {"answer": "...", "session_id": "..."}}
+                                           — the full answer text + session_id
+                                              (send it back on the next turn to
+                                              keep memory) — sent once, last
       {"type": "error", "error": "..."}    — sent instead of "final" on failure
 
     Everything before the last Claude call (tenant/session resolve, query
@@ -274,7 +273,17 @@ async def ask_order_question_stream(query: OrderQuery):
                 if etype == "chunk":
                     payload = {"type": "chunk", "text": event.get("text", "")}
                 elif etype == "final":
-                    payload = {"type": "final", "data": event.get("response")}
+                    # Only the answer goes to the client — no DB/collection
+                    # names, matches or raw records. session_id is kept so
+                    # the client can continue the conversation.
+                    response = event.get("response") or {}
+                    payload = {
+                        "type": "final",
+                        "data": {
+                            "answer": response.get("answer", ""),
+                            "session_id": response.get("session_id"),
+                        },
+                    }
                 else:
                     payload = {"type": "error", "error": event.get("error") or "unknown error"}
                 yield f"data: {json.dumps(payload)}\n\n"
