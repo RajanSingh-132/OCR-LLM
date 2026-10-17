@@ -151,8 +151,9 @@ class OrderQuery(BaseModel):
     question: str
     # Identifies which company/tenant DB to use (routing wired in a later step).
     corporate_id: str
-    # Kept for API compatibility; ask uses tenant orders collection (default Avaal_order).
-    # collection_name: str = "avaal_orders"
+    # Which data to ask about: "order" -> Avaal_order, "trip" -> Avaal_trip,
+    # "invoice" -> Avaal_invoice (mapping in app/domains/registry.py).
+    collection: str
     # Pass back session_id from previous response to continue conversation.
     session_id: str | None = None
 
@@ -173,9 +174,10 @@ async def ask_order_question(query: OrderQuery):
     """
     try:
         logger.info(
-            "Received Avaal order query: %s | corporate_id=%s | session_id=%s",
+            "Received Avaal order query: %s | corporate_id=%s | collection=%s | session_id=%s",
             query.question,
             query.corporate_id,
+            query.collection,
             query.session_id,
         )
         from app.Ai_Assistant.rag_engine import answer_order_question
@@ -187,6 +189,7 @@ async def ask_order_question(query: OrderQuery):
             10,
             query.session_id,
             query.corporate_id,
+            query.collection,
         )
         return result
     except HTTPException:
@@ -255,9 +258,10 @@ async def ask_order_question_stream(query: OrderQuery):
     final answer-generation call actually streams token-by-token.
     """
     logger.info(
-        "Received Avaal order query (stream): %s | corporate_id=%s | session_id=%s",
+        "Received Avaal order query (stream): %s | corporate_id=%s | collection=%s | session_id=%s",
         query.question,
         query.corporate_id,
+        query.collection,
         query.session_id,
     )
     from app.Ai_Assistant.rag_engine import stream_order_question
@@ -266,7 +270,12 @@ async def ask_order_question_stream(query: OrderQuery):
         try:
             async for event in _sse_from_sync_generator(
                 lambda: stream_order_question(
-                    query.question, True, 10, query.session_id, query.corporate_id
+                    query.question,
+                    True,
+                    10,
+                    query.session_id,
+                    query.corporate_id,
+                    query.collection,
                 )
             ):
                 etype = event.get("type")

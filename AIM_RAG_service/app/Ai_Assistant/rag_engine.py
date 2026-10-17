@@ -33,7 +33,7 @@ from app.Ai_Assistant.memory import (
     save_turn,
 )
 from app.Ai_Assistant.prompts import ORDER_FORMULA_PROMPT
-from app.domains.detect import detect_domain
+from app.domains.registry import resolve_collection
 from app.domains.lookup import get_domain_prompts, get_lookup_module
 from app.Ai_Assistant.tools import execute_tools, plan_tools
 from app.tenants.context import AskContext
@@ -214,9 +214,13 @@ def _answer_order_question_gen(
     k: int = 10,
     session_id: Optional[str] = None,
     corporate_id: Optional[str] = None,
+    collection: Optional[str] = None,
 ):
     """
     Generator core for /api/v1/orders/ask (conversation + accurate lists + tools).
+
+    `collection` (order / trip / invoice) picks the domain — and so the Mongo
+    collection — directly; see app/domains/registry.py COLLECTION_TO_DOMAIN.
 
     Yields events while it runs:
       {"type": "chunk", "text": "..."}   — a piece of the answer as Claude streams it
@@ -250,6 +254,24 @@ def _answer_order_question_gen(
             session_id=session_id,
             question=question,
             answer="corporate_id is required.",
+            mode="error",
+            intent="validation",
+            matches=[],
+            calculation=None,
+            list_result=None,
+            tools_used=[],
+        )}
+        return
+
+    try:
+        domain = resolve_collection(collection or "")
+    except ValueError as exc:
+        yield {"type": "final", "response": _response(
+            tenant=None,
+            corporate_id=corporate_id,
+            session_id=session_id,
+            question=question,
+            answer=str(exc),
             mode="error",
             intent="validation",
             matches=[],
@@ -325,11 +347,7 @@ def _answer_order_question_gen(
         return
 
     history = format_history_for_prompt(session.get("turns") or [])
-    domain = detect_domain(
-        question,
-        history_hint=str(session.get("last_domain") or ""),
-        chat_history=history,
-    )
+    checkpoint("DOMAIN", "from payload collection", collection=collection, domain=domain)
 
     with AskContext(tenant, domain):
         timer.mark("MEMORY_READY", "history loaded", turns=len(session.get("turns") or []))
@@ -814,17 +832,17 @@ def answer_order_question(
     k: int = 10,
     session_id: Optional[str] = None,
     corporate_id: Optional[str] = None,
+    collection: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Main Q&A entry for Avaal orders (conversation + accurate lists + tools).
 
     Non-streaming — drains _answer_order_question_gen() and returns only its
-    final response dict. Behavior/signature unchanged from before streaming
-    was added; existing callers (e.g. POST /api/v1/orders/ask) need no changes.
+    final response dict.
     """
     final_response: Dict[str, Any] = {}
     for event in _answer_order_question_gen(
-        question, conversational, k, session_id, corporate_id
+        question, conversational, k, session_id, corporate_id, collection
     ):
         if event.get("type") == "final":
             final_response = event["response"]
@@ -837,6 +855,7 @@ def stream_order_question(
     k: int = 10,
     session_id: Optional[str] = None,
     corporate_id: Optional[str] = None,
+    collection: Optional[str] = None,
 ):
     """
     Streaming Q&A entry — same pipeline as answer_order_question(), but yields
@@ -850,5 +869,5 @@ def stream_order_question(
     Used by the SSE endpoint (POST /api/v1/orders/ask/stream).
     """
     yield from _answer_order_question_gen(
-        question, conversational, k, session_id, corporate_id
+        question, conversational, k, session_id, corporate_id, collection
     )

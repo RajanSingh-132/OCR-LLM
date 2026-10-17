@@ -164,6 +164,28 @@ DOMAINS: Dict[str, DomainProfile] = {
 
 DEFAULT_DOMAIN = "orders"
 
+# Request payload `collection` value -> domain (which picks the Mongo
+# collection via app/tenants/mapping.py DEFAULT_COLLECTIONS):
+#   order -> Avaal_order, trip -> Avaal_trip, invoice -> Avaal_invoice.
+# Add payment / receipt here once their domains exist.
+COLLECTION_TO_DOMAIN: Dict[str, str] = {
+    "order": "orders",
+    "trip": "trips",
+    "invoice": "invoices",
+}
+
+
+def resolve_collection(collection: str) -> str:
+    """Map a payload `collection` value ("order", "Orders", ...) to its domain.
+    Raises ValueError for anything not in COLLECTION_TO_DOMAIN."""
+    key = (collection or "").strip().lower()
+    if key in COLLECTION_TO_DOMAIN:
+        return COLLECTION_TO_DOMAIN[key]
+    if key.endswith("s") and key[:-1] in COLLECTION_TO_DOMAIN:
+        return COLLECTION_TO_DOMAIN[key[:-1]]
+    allowed = ", ".join(COLLECTION_TO_DOMAIN)
+    raise ValueError(f"Invalid collection {collection!r}. Use one of: {allowed}.")
+
 
 def get_domain_profile(domain: str) -> DomainProfile:
     key = (domain or DEFAULT_DOMAIN).lower()
