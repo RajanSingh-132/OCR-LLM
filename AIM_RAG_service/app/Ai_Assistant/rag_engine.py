@@ -33,7 +33,12 @@ from app.Ai_Assistant.memory import (
     save_turn,
 )
 from app.Ai_Assistant.prompts import ORDER_FORMULA_PROMPT
-from app.domains.registry import resolve_collection
+from app.domains.detect import (
+    _STRONG_SCORE as STRONG_DOMAIN_SCORE,
+    _score_domains,
+    detect_domain_local,
+)
+from app.domains.registry import domain_to_collection, resolve_collection
 from app.domains.lookup import get_domain_prompts, get_lookup_module
 from app.Ai_Assistant.tools import execute_tools, plan_tools
 from app.tenants.context import AskContext
@@ -202,10 +207,34 @@ def _response(
 ) -> Dict[str, Any]:
     return {
         **_tenant_fields(tenant, corporate_id, domain),
+        # Which collection the answer actually came from (order / trip /
+        # invoice) — may differ from the payload `collection`, see
+        # _pick_domain(). None on validation errors (nothing was queried).
+        "related": None if fields.get("mode") == "error" else domain_to_collection(domain),
         "session_id": session_id,
         "question": question,
         **fields,
     }
+
+
+def _pick_domain(question: str, payload_domain: str) -> str:
+    """
+    Domain to answer from. The payload `collection` is the default, but a
+    question that clearly names another record type ("how many trips…" with
+    collection=order, or a trip/invoice number like ETP123 / INO4) is answered
+    from that type's collection instead. Keyword-only — no LLM call.
+
+    The payload domain is kept when the question has no strong keyword, or
+    also strongly names the payload type ("orders on trip ETP123").
+    """
+    question_domain, _reason, scores = detect_domain_local(question)
+    if question_domain == payload_domain:
+        return payload_domain
+    if scores.get(question_domain, 0.0) < STRONG_DOMAIN_SCORE:
+        return payload_domain
+    if _score_domains(question.lower()).get(payload_domain, 0.0) >= STRONG_DOMAIN_SCORE:
+        return payload_domain
+    return question_domain
 
 
 def _answer_order_question_gen(
@@ -313,6 +342,7 @@ def _answer_order_question_gen(
             corporate_id=corporate_id,
             session_id=session_id,
             question=question,
+            domain=domain,
             answer="Please ask a question about Avaal orders.",
             mode="empty",
             intent="empty",
@@ -347,7 +377,15 @@ def _answer_order_question_gen(
         return
 
     history = format_history_for_prompt(session.get("turns") or [])
-    checkpoint("DOMAIN", "from payload collection", collection=collection, domain=domain)
+    payload_domain = domain
+    domain = _pick_domain(question, payload_domain)
+    checkpoint(
+        "DOMAIN",
+        "from payload collection" if domain == payload_domain
+        else "question names another collection — switched",
+        collection=collection,
+        domain=domain,
+    )
 
     with AskContext(tenant, domain):
         timer.mark("MEMORY_READY", "history loaded", turns=len(session.get("turns") or []))

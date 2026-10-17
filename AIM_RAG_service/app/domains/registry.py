@@ -187,6 +187,14 @@ def resolve_collection(collection: str) -> str:
     raise ValueError(f"Invalid collection {collection!r}. Use one of: {allowed}.")
 
 
+def domain_to_collection(domain: str) -> str | None:
+    """Inverse of resolve_collection: "trips" -> "trip" (the response `related`)."""
+    for key, value in COLLECTION_TO_DOMAIN.items():
+        if value == domain:
+            return key
+    return None
+
+
 def get_domain_profile(domain: str) -> DomainProfile:
     key = (domain or DEFAULT_DOMAIN).lower()
     if key not in DOMAINS:
