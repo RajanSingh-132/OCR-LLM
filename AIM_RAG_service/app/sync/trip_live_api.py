@@ -5,10 +5,12 @@ keeps MongoDB in sync with the latest PAGE_SIZE trip records.
   python -m app.sync.trip_live_api
   (or)  python app/sync/trip_live_api.py
 
-Runs forever until Ctrl+C. Single tenant: only CORPORATE_IDS (AFMQA) is
-sent as the `corporateid` header, and its records are stored in the Mongo
-database "chatbot_db" (DB_NAME_OVERRIDES). The Postgres tenant list
-(app/tenants/tenant_provisioning.py) is no longer used.
+Runs forever until Ctrl+C. Tenants: CORPORATE_IDS (AFMQA, AFN01800), each
+sent as the `corporateid` header and synced in parallel (one thread per
+tenant). AFMQA's records are stored in the Mongo database "chatbot_db"
+(DB_NAME_OVERRIDES); any other tenant goes to the database named after its
+corporate_id. The Postgres tenant list (app/tenants/tenant_provisioning.py)
+is no longer used.
 Same design as app/sync/order_live_api.py — see that file's docstring for
 the full rationale (crash-safety, 30s cadence, daily purge, parallel
 embedding).
@@ -96,7 +98,7 @@ API_BASE = "https://beta.afmsuite.ai"
 LISTTRIP_PATH = "/api/Trip/gettriplist"
 API_VERSION = "1.0"
 # Only these tenants are synced — sent as the `corporateid` header.
-CORPORATE_IDS: List[str] = ["AFMQA"]
+CORPORATE_IDS: List[str] = ["AFMQA", "AFN01800"]
 EXTRA_HEADERS: Dict[str, str] = {}
 
 # Body wrapper key is lowercase "filter" for this endpoint (confirmed from a
@@ -747,7 +749,7 @@ def main() -> int:
 
     logger.info(
         "Starting live trip sync: corporateids=%s every %ss (%s records/cycle "
-        "per tenant, tenants one by one), daily purge of records older than "
+        "per tenant, tenants in parallel), daily purge of records older than "
         "%s month(s) every %sh",
         corporate_ids,
         SLEEP_SECONDS,
@@ -762,8 +764,15 @@ def main() -> int:
             cycle_no += 1
             cycle_start = time.perf_counter()
 
-            for corp_id in corporate_ids:
-                _process_one_tenant(corp_id, cycle_no)
+            # One thread per tenant; the `with` block waits for ALL of them,
+            # so the next cycle never starts while a tenant is still running.
+            with ThreadPoolExecutor(max_workers=len(corporate_ids)) as pool:
+                futures = [
+                    pool.submit(_process_one_tenant, corp_id, cycle_no)
+                    for corp_id in corporate_ids
+                ]
+                for future in as_completed(futures):
+                    future.result()
 
             elapsed = time.perf_counter() - cycle_start
             logger.info(
