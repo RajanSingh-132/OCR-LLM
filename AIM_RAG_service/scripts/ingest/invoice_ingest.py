@@ -27,7 +27,7 @@ logger = logging.getLogger("scripts.ingest.invoice")
 
 # ===================== CONFIG — edit these =====================
 FILE_PATH = r"D:\Desktop\OCR-LLM\today32 invoice.txt"
-DB_NAME = "AFN01800"
+DB_NAME = "AFN01818"
 COLLECTION_NAME = "Avaal_invoice"
 NAMESPACE = "avaal_invoices"
 METADATA_TYPE = "avaal_invoice"

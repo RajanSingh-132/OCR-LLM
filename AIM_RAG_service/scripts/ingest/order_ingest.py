@@ -26,7 +26,7 @@ logger = logging.getLogger("scripts.ingest.order")
 
 # ===================== CONFIG — edit these =====================
 FILE_PATH = r"D:\Desktop\OCR-LLM\today32 invoice.txt"
-DB_NAME = "AFN01800"
+DB_NAME = "AFN01807"
 COLLECTION_NAME = "Avaal_order"
 NAMESPACE = "avaal_orders"
 DUPLICATE_FIELD = "ordernumber"
