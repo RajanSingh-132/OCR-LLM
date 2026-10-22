@@ -98,7 +98,7 @@ API_BASE = "https://beta.afmsuite.ai"
 LISTTRIP_PATH = "/api/Trip/gettriplist"
 API_VERSION = "1.0"
 # Only these tenants are synced — sent as the `corporateid` header.
-CORPORATE_IDS: List[str] = ["AFMQA", "AFN01800"]
+CORPORATE_IDS: List[str] = ["AFN01709", "AFN01800", "AFN01807", "AFN01808", "AFN01809", "AFN01812", "AFN01813", "AFN01817", "AFN01818", "AFN01823"]
 EXTRA_HEADERS: Dict[str, str] = {}
 
 # Body wrapper key is lowercase "filter" for this endpoint (confirmed from a
@@ -162,8 +162,10 @@ REQUEST_TIMEOUT = 60      # seconds — must stay well under SLEEP_SECONDS
 USE_API_DATE_FILTER = False
 API_DATE_TYPE = "CD"
 
-# Mongo database each tenant's records are stored in (AFMQA -> chatbot_db).
-DB_NAME_OVERRIDES: Dict[str, str] = {"AFMQA": "chatbot_db"}
+# Mongo database each tenant's records are stored in — no overrides, so
+# every corporate_id uses the database of the same name.
+# DB_NAME_OVERRIDES: Dict[str, str] = {"AFMQA": "chatbot_db"}
+DB_NAME_OVERRIDES: Dict[str, str] = {}
 COLLECTION_NAME = "Avaal_trip"
 NAMESPACE = "avaal_trips"
 METADATA_TYPE = "avaal_trip"
