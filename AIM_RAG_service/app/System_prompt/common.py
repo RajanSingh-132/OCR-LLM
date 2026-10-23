@@ -48,6 +48,27 @@ RESPONSE FORMAT (strict — lists and details):
 - Include only useful fields from context (number, status, customer, amount/currency).
 """.strip()
 
+OUT_OF_SCOPE_POLICY = """
+OUT OF SCOPE (strict — takes priority over every "must answer" rule above/below):
+- You ONLY answer questions about the user's Avaal transport business data:
+  orders, trips, invoices, drivers, customers, carriers, loads, shipments,
+  freight amounts, statuses, locations of those records.
+- NEVER answer general knowledge or anything unrelated to that data — e.g.
+  capitals, geography facts, history, science, math homework, news, sports,
+  weather, celebrities, coding, recipes, jokes, translations, opinions —
+  even if you know the answer and even if CONTEXT contains records.
+- For such a question reply with ONLY this sentence, nothing else:
+  "I can only help with questions about your orders, trips and invoices. Please ask me something related to those."
+- A place name alone does NOT make a question in scope: "orders in Canada" is in
+  scope, "what is the capital of Canada" is NOT.
+""".strip()
+
+# Fixed reply used by rag_engine for intent=out_of_scope (no LLM call).
+OUT_OF_SCOPE_REPLY = (
+    "I can only help with questions about your orders, trips and invoices. "
+    "Please ask me something related to those."
+)
+
 AVAAL_GREETING_PROMPT = """
 You are Avaal AI assistant.
 
@@ -65,6 +86,9 @@ Task: Reply to a greeting, thanks, or light chitchat ONLY.
 - Do NOT ask for database details. Do NOT mention MongoDB, tools, or embeddings.
 - Do NOT mention or ask for an order id / trip id / invoice id (internal only).
 - If the user said thanks/ok: acknowledge warmly, then still offer the same kinds of help.
+- NEVER answer a general knowledge or unrelated question (capitals, facts, news, math,
+  coding, jokes, etc.), even a one-word one. Do not state the fact. Just say you can only
+  help with orders, trips and invoices, then offer that help.
 
 Write the reply now.
 """.strip()

@@ -33,6 +33,7 @@ from app.Ai_Assistant.memory import (
     save_turn,
 )
 from app.Ai_Assistant.prompts import ORDER_FORMULA_PROMPT
+from app.System_prompt.common import OUT_OF_SCOPE_REPLY
 from app.domains.detect import (
     _STRONG_SCORE as STRONG_DOMAIN_SCORE,
     _score_domains,
@@ -605,16 +606,22 @@ def _answer_order_question_gen(
                 token=sticky_token,
             )
 
-        # Greeting / thanks / ask-for-id: quick reply, no tools
+        # Greeting / thanks / ask-for-id / out-of-scope: quick reply, no tools
         domain_prompts = get_domain_prompts(domain)
         if precomputed_tool_result is None and intent in (
             "greeting",
             "thanks",
             "chitchat",
             "ask_for_record_id",
+            "out_of_scope",
         ):
             checkpoint("ROUTE", f"{intent} — skip tools/RAG")
-            if intent == "ask_for_record_id":
+            if intent == "out_of_scope":
+                # Fixed reply — never let the LLM answer general knowledge
+                # (see OUT_OF_SCOPE_POLICY in app/System_prompt/common.py).
+                answer = OUT_OF_SCOPE_REPLY
+                yield {"type": "chunk", "text": answer}
+            elif intent == "ask_for_record_id":
                 # Fixed sweet ask — never leak MRP/TORD/ETP examples via LLM,
                 # and never ask for the internal id (business number only —
                 # see ID PROTECTION policy in app/System_prompt/common.py).

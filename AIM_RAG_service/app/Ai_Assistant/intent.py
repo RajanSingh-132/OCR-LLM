@@ -176,6 +176,7 @@ def classify_intent_with_anthropic(
         "greeting",
         "chitchat",
         "thanks",
+        "out_of_scope",
         "list_filter",
         "list_recent",
         "calculation",
@@ -189,7 +190,9 @@ def classify_intent_with_anthropic(
 
     result = {
         "intent": intent,
-        "needs_rag": (bool(data.get("needs_rag")) or intent == "open_qa") and not needs_analytics,
+        "needs_rag": (bool(data.get("needs_rag")) or intent == "open_qa")
+        and not needs_analytics
+        and intent != "out_of_scope",
         "needs_calculation": bool(data.get("needs_calculation")) or intent == "calculation",
         "needs_exact_order": bool(data.get("needs_exact_order")) or intent in lookup_intents,
         "needs_analytics": needs_analytics,
@@ -202,8 +205,9 @@ def classify_intent_with_anthropic(
         result["order_token"] = data["order_token"]
 
     # Structured filters from intent LLM → merged into entities in rag_engine
+    # (none for out_of_scope — "capital of Canada" must not become country=Canada).
     raw_filters = data.get("filters")
-    if isinstance(raw_filters, dict):
+    if isinstance(raw_filters, dict) and intent != "out_of_scope":
         cleaned: Dict[str, Any] = {}
         for key, value in raw_filters.items():
             if value in (None, "", [], {}):

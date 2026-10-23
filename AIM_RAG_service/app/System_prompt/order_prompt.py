@@ -10,6 +10,7 @@ from app.System_prompt.common import (
     ID_PROTECTION_POLICY,
     NATURAL_LIST_FORMAT_POLICY,
     NUMBER_REQUEST_POLICY,
+    OUT_OF_SCOPE_POLICY,
 )
 from app.System_prompt.intent_prompt import FILTER_CONTEXT_ANSWER_POLICY
 
@@ -46,7 +47,7 @@ OUTSOURCE (outstatus): Open, Planned, Assigned, Quoted, Delivered
 ACCOUNTING (accountingstatus): Invoiced, PartiallyPaid, Paid, Restricted
   (Invoiced/Paid/PartiallyPaid/Restricted are accountingstatus, not orderstatus.)
 
-""".strip() + "\n\n" + ID_PROTECTION_POLICY + "\n\n" + NUMBER_REQUEST_POLICY + "\n\n" + NATURAL_LIST_FORMAT_POLICY + "\n\n" + FILTER_CONTEXT_ANSWER_POLICY
+""".strip() + "\n\n" + OUT_OF_SCOPE_POLICY + "\n\n" + ID_PROTECTION_POLICY + "\n\n" + NUMBER_REQUEST_POLICY + "\n\n" + NATURAL_LIST_FORMAT_POLICY + "\n\n" + FILTER_CONTEXT_ANSWER_POLICY
 
 ORDER_CONVERSATION_PROMPT = """
 """ + ORDER_SYSTEM_PROMPT + """

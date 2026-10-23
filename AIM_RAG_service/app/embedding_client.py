@@ -17,7 +17,7 @@ _planner_llm_cache = None
 _xai_llm_cache = None
 
 XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
-XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4")
+XAI_MODEL = os.environ.get("XAI_MODEL", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_LLM_MODEL = os.environ.get("LLM_MODEL", "claude-sonnet-4-5")
 PLANNER_LLM_MODEL = os.environ.get("PLANNER_LLM_MODEL", "claude-haiku-4-5-20251001")
