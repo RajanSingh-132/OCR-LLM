@@ -101,7 +101,8 @@ from app.mongo_client import _to_python_types, get_mongo_collection
 logger = logging.getLogger("app.sync.invoice_live_api")
 
 # ===================== CONFIG — edit these =====================
-API_BASE = "https://beta.afmsuite.ai"
+# Base URL comes from AFM_API_BASE_URL in .env (loaded by the app.* imports above).
+API_BASE = os.getenv("AFM_API_BASE_URL")
 LISTINVOICE_PATH = "/api/Invoice/getinvoicelistdata"
 API_VERSION = "1.0"
 # Only these tenants are synced — sent as the `corporateid` header.
