@@ -487,19 +487,29 @@ def build_document(
     return doc
 
 
-# A stored invoice counts as unchanged only when InvoiceNumber, createdon AND
+# A stored invoice counts as unchanged only when InvoiceID, createdon AND
 # modifiedon all match the API record. Source casing is inconsistent, so each
 # date is read from the first present spelling.
 MATCH_DATE_FIELDS = {
     "createdon": ("createdon", "CreatedOn"),
     "modifiedon": ("modifiedon", "ModifiedOn"),
 }
-# Stored docs keep the raw InvoiceNumber/invoicenumber AND metadata.invoicenumber.
-_NUMBER_QUERY_FIELDS = ("metadata.invoicenumber",) + DUPLICATE_FIELDS
+# Stored docs keep the raw InvoiceID/invoiceid AND metadata.invoiceid. The
+# generic "id" fallback in ID_FIELDS is left out of the query on purpose — it
+# could collide with an unrelated field on another invoice.
+_ID_QUERY_FIELDS = ("metadata.invoiceid", "InvoiceID", "invoiceid")
 
 
-def _invoice_number(invoice: Dict[str, Any]) -> str:
-    return str(_first_present(invoice, DUPLICATE_FIELDS) or "").strip()
+def _invoice_id(invoice: Dict[str, Any]) -> str:
+    return str(_first_present(invoice, ID_FIELDS) or "").strip()
+
+
+def _id_query_values(ids: List[str]) -> List[Any]:
+    """The API sends InvoiceID as an int (stored as-is in Mongo), but ids are
+    keyed as strings here — query both forms so either storage type matches."""
+    values: List[Any] = list(ids)
+    values.extend(int(i) for i in ids if i.lstrip("-").isdigit())
+    return values
 
 
 def _same_timestamp(a: Any, b: Any) -> bool:
@@ -513,31 +523,32 @@ def _same_timestamp(a: Any, b: Any) -> bool:
     return str(a).strip() == str(b).strip()
 
 
-def _number_filter(numbers: List[str]) -> Dict[str, Any]:
+def _id_filter(ids: List[str]) -> Dict[str, Any]:
+    values = _id_query_values(ids)
     return {
         "namespace": NAMESPACE,
-        "$or": [{field: {"$in": numbers}} for field in _NUMBER_QUERY_FIELDS],
+        "$or": [{field: {"$in": values}} for field in _ID_QUERY_FIELDS],
     }
 
 
-def load_existing_by_number(collection, numbers: List[str]) -> Dict[str, Dict[str, Any]]:
-    """{InvoiceNumber: {createdon, modifiedon}} for the stored invoices among
-    `numbers` only (the current API page), not the whole collection."""
+def load_existing_by_id(collection, ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """{InvoiceID: {createdon, modifiedon}} for the stored invoices among
+    `ids` only (the current API page), not the whole collection."""
     existing: Dict[str, Dict[str, Any]] = {}
-    if not numbers:
+    if not ids:
         return existing
-    projection: Dict[str, int] = {"metadata.invoicenumber": 1}
-    for field in DUPLICATE_FIELDS:
+    projection: Dict[str, int] = {"metadata.invoiceid": 1}
+    for field in ID_FIELDS:
         projection[field] = 1
     for spellings in MATCH_DATE_FIELDS.values():
         for field in spellings:
             projection[field] = 1
-    for doc in collection.find(_number_filter(numbers), projection):
-        number = _invoice_number(doc) or str(
-            (doc.get("metadata") or {}).get("invoicenumber") or ""
+    for doc in collection.find(_id_filter(ids), projection):
+        record_id = _invoice_id(doc) or str(
+            (doc.get("metadata") or {}).get("invoiceid") or ""
         ).strip()
-        if number:
-            existing[number] = {
+        if record_id:
+            existing[record_id] = {
                 name: _first_present(doc, spellings)
                 for name, spellings in MATCH_DATE_FIELDS.items()
             }
@@ -581,7 +592,7 @@ def run_one_cycle(corporate_id: str) -> Dict[str, Any]:
             "timing_seconds": {"fetch": round(t_fetch, 2), "total": round(t_fetch, 2)},
         }
 
-    # --- transform / filter: match on InvoiceNumber + createdon + modifiedon --
+    # --- transform / filter: match on InvoiceID + createdon + modifiedon ---
     #   not in Mongo                       -> new: embed + insert
     #   in Mongo, createdon & modifiedon
     #   both equal                         -> unchanged: skip (no embedding)
@@ -591,31 +602,31 @@ def run_one_cycle(corporate_id: str) -> Dict[str, Any]:
 
     recent: List[Dict[str, Any]] = []
     skipped_old = 0
-    skipped_no_number = 0
-    seen_numbers: Set[str] = set()
+    skipped_no_id = 0
+    seen_ids: Set[str] = set()
     for invoice in records:
         if recent_cutoff is not None and not is_recent_record(invoice, recent_cutoff):
             skipped_old += 1
             continue
-        number = _invoice_number(invoice)
-        if not number:
-            skipped_no_number += 1  # can't be matched, would duplicate every cycle
+        record_id = _invoice_id(invoice)
+        if not record_id:
+            skipped_no_id += 1  # can't be matched, would duplicate every cycle
             continue
-        if number in seen_numbers:
+        if record_id in seen_ids:
             continue  # same invoice twice in one API page — keep the first
-        seen_numbers.add(number)
+        seen_ids.add(record_id)
         recent.append(invoice)
 
-    existing = load_existing_by_number(collection, sorted(seen_numbers))
+    existing = load_existing_by_id(collection, sorted(seen_ids))
 
     pending: List[Dict[str, Any]] = []
-    numbers_to_update: List[str] = []
+    ids_to_update: List[str] = []
     new_count = 0
     updated_count = 0
     unchanged_count = 0
     for invoice in recent:
-        number = _invoice_number(invoice)
-        stored_doc = existing.get(number)
+        record_id = _invoice_id(invoice)
+        stored_doc = existing.get(record_id)
         if stored_doc is None:
             new_count += 1
         elif all(
@@ -625,7 +636,7 @@ def run_one_cycle(corporate_id: str) -> Dict[str, Any]:
             unchanged_count += 1
             continue
         else:
-            numbers_to_update.append(number)
+            ids_to_update.append(record_id)
             updated_count += 1
         pending.append(invoice)
     t_transform = time.perf_counter() - t1
@@ -635,8 +646,8 @@ def run_one_cycle(corporate_id: str) -> Dict[str, Any]:
     # --- delete changed docs, then embed (optional) + insert new/changed --
     t2 = time.perf_counter()
     deleted = 0
-    if numbers_to_update:
-        del_result = collection.delete_many(_number_filter(numbers_to_update))
+    if ids_to_update:
+        del_result = collection.delete_many(_id_filter(ids_to_update))
         deleted = del_result.deleted_count
 
     inserted = 0
@@ -684,7 +695,7 @@ def run_one_cycle(corporate_id: str) -> Dict[str, Any]:
         "with_embeddings": WITH_EMBEDDINGS,
         **fetch_stats,
         "documents_skipped_old": skipped_old,
-        "documents_skipped_no_invoicenumber": skipped_no_number,
+        "documents_skipped_no_invoiceid": skipped_no_id,
         "documents_unchanged_skipped": unchanged_count,
         "documents_new": new_count,
         "documents_updated": updated_count,

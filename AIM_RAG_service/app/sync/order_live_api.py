@@ -441,9 +441,17 @@ def build_document(
     return doc
 
 
-# A stored order counts as unchanged only when ordernumber, createdon AND
+# A stored order counts as unchanged only when orderid, createdon AND
 # modifiedon all match the API record.
 MATCH_DATE_FIELDS = ("createdon", "modifiedon")
+
+
+def _id_query_values(ids: List[str]) -> List[Any]:
+    """The API sends orderid as an int (stored as-is in Mongo), but ids are
+    keyed as strings here — query both forms so either storage type matches."""
+    values: List[Any] = list(ids)
+    values.extend(int(i) for i in ids if i.lstrip("-").isdigit())
+    return values
 
 
 def _same_timestamp(a: Any, b: Any) -> bool:
@@ -457,19 +465,19 @@ def _same_timestamp(a: Any, b: Any) -> bool:
     return str(a).strip() == str(b).strip()
 
 
-def load_existing_by_number(collection, numbers: List[str]) -> Dict[str, Dict[str, Any]]:
-    """{ordernumber: {createdon, modifiedon}} for the stored orders among
-    `numbers` only (the current API page), not the whole collection."""
+def load_existing_by_id(collection, ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """{orderid: {createdon, modifiedon}} for the stored orders among
+    `ids` only (the current API page), not the whole collection."""
     existing: Dict[str, Dict[str, Any]] = {}
-    if not numbers:
+    if not ids:
         return existing
-    projection = {DUPLICATE_FIELD: 1, **{f: 1 for f in MATCH_DATE_FIELDS}}
+    projection = {ID_FIELD: 1, **{f: 1 for f in MATCH_DATE_FIELDS}}
     for doc in collection.find(
-        {"namespace": NAMESPACE, DUPLICATE_FIELD: {"$in": numbers}}, projection
+        {"namespace": NAMESPACE, ID_FIELD: {"$in": _id_query_values(ids)}}, projection
     ):
-        number = str(doc.get(DUPLICATE_FIELD) or "").strip()
-        if number:
-            existing[number] = {f: doc.get(f) for f in MATCH_DATE_FIELDS}
+        record_id = str(doc.get(ID_FIELD) or "").strip()
+        if record_id:
+            existing[record_id] = {f: doc.get(f) for f in MATCH_DATE_FIELDS}
     return existing
 
 
@@ -510,7 +518,7 @@ def run_one_cycle(corporate_id: str) -> Dict[str, Any]:
             "timing_seconds": {"fetch": round(t_fetch, 2), "total": round(t_fetch, 2)},
         }
 
-    # --- transform / filter: match on ordernumber + createdon + modifiedon --
+    # --- transform / filter: match on orderid + createdon + modifiedon -----
     #   not in Mongo                       -> new: embed + insert
     #   in Mongo, createdon & modifiedon
     #   both equal                         -> unchanged: skip (no embedding)
@@ -520,38 +528,38 @@ def run_one_cycle(corporate_id: str) -> Dict[str, Any]:
 
     recent: List[Dict[str, Any]] = []
     skipped_old = 0
-    skipped_no_number = 0
-    seen_numbers: Set[str] = set()
+    skipped_no_id = 0
+    seen_ids: Set[str] = set()
     for order in records:
         if recent_cutoff is not None and not is_recent_record(order, recent_cutoff):
             skipped_old += 1
             continue
-        number = str(order.get(DUPLICATE_FIELD) or "").strip()
-        if not number:
-            skipped_no_number += 1  # can't be matched, would duplicate every cycle
+        record_id = str(order.get(ID_FIELD) or "").strip()
+        if not record_id:
+            skipped_no_id += 1  # can't be matched, would duplicate every cycle
             continue
-        if number in seen_numbers:
+        if record_id in seen_ids:
             continue  # same order twice in one API page — keep the first
-        seen_numbers.add(number)
+        seen_ids.add(record_id)
         recent.append(order)
 
-    existing = load_existing_by_number(collection, sorted(seen_numbers))
+    existing = load_existing_by_id(collection, sorted(seen_ids))
 
     pending: List[Dict[str, Any]] = []
-    numbers_to_update: List[str] = []
+    ids_to_update: List[str] = []
     new_count = 0
     updated_count = 0
     unchanged_count = 0
     for order in recent:
-        number = str(order.get(DUPLICATE_FIELD)).strip()
-        stored_doc = existing.get(number)
+        record_id = str(order.get(ID_FIELD)).strip()
+        stored_doc = existing.get(record_id)
         if stored_doc is None:
             new_count += 1
         elif all(_same_timestamp(order.get(f), stored_doc.get(f)) for f in MATCH_DATE_FIELDS):
             unchanged_count += 1
             continue
         else:
-            numbers_to_update.append(number)
+            ids_to_update.append(record_id)
             updated_count += 1
         pending.append(order)
     t_transform = time.perf_counter() - t1
@@ -561,9 +569,9 @@ def run_one_cycle(corporate_id: str) -> Dict[str, Any]:
     # --- delete changed docs, then embed (optional) + insert new/changed --
     t2 = time.perf_counter()
     deleted = 0
-    if numbers_to_update:
+    if ids_to_update:
         del_result = collection.delete_many(
-            {"namespace": NAMESPACE, DUPLICATE_FIELD: {"$in": numbers_to_update}}
+            {"namespace": NAMESPACE, ID_FIELD: {"$in": _id_query_values(ids_to_update)}}
         )
         deleted = del_result.deleted_count
 
@@ -612,7 +620,7 @@ def run_one_cycle(corporate_id: str) -> Dict[str, Any]:
         "with_embeddings": WITH_EMBEDDINGS,
         **fetch_stats,
         "documents_skipped_old": skipped_old,
-        "documents_skipped_no_ordernumber": skipped_no_number,
+        "documents_skipped_no_orderid": skipped_no_id,
         "documents_unchanged_skipped": unchanged_count,
         "documents_new": new_count,
         "documents_updated": updated_count,
