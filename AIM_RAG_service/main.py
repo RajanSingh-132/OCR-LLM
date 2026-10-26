@@ -3,7 +3,7 @@ import os
 
 from app.fast_api_actions_session_rag import app
 
-HOST = os.getenv("HOST", "0.0.0.0")
+HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", 8090))
 
 if __name__ == "__main__":
