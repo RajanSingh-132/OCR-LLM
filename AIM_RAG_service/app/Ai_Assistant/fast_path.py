@@ -53,7 +53,9 @@ _HAS_OTHER_FILTERS_RE = re.compile(
     r"\b(status|city|state|country|customer|carrier|driver|truck|trailer|"
     r"salesman|company|currency|equipment|amount|greater|less|more\s+than|"
     r"less\s+than|above|below|between|percent|percentage|average|avg|"
-    r"\bsum\b|revenue|freight|compare|versus|\bvs\b)\b",
+    r"\bsum\b|revenue|freight|compare|versus|\bvs\b|"
+    # "total miles / distance / weight / value this month" is a metric, not a count
+    r"miles?|mileage|distance|km|kilomet\w*|weight|value|tax(?:es)?|profit)\b",
     re.IGNORECASE,
 )
 

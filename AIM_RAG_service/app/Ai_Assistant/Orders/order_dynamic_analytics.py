@@ -59,7 +59,15 @@ _ISO_DATE_VALUE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}|$)")
 _US_DATE_VALUE_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}\b")
 
 _SKIP_FIELDS = frozenset(
-    {"_id", "embedding", "page_content", "metadata", "namespace"}
+    {
+        "_id", "embedding", "page_content", "metadata", "namespace",
+        # Full master records copied into each driver/truck/trailer/carrier
+        # array item (addresses, DOB, bank codes — 400+ fields). They used up
+        # the _MAX_FIELDS budget so driverarray.driverName etc. randomly went
+        # missing from the schema. The flat fields (drivernames, trucknumbers,
+        # carriernames) and the array items' own names/codes cover analytics.
+        "driverDetails", "truckDetails", "trailerDetails", "carrierDetails",
+    }
 )
 _ID_LIKE_FIELDS = frozenset(
     {"orderid", "ordernumber", "tempordernumber", "tripno"}
@@ -90,7 +98,10 @@ _NUM_STR_RE = re.compile(r"^-?\$?\s?[\d,]+(\.\d+)?%?$")
 # Nested-object walk depth (0 = top level). commoditydetails[]/outsourcedetails{}/
 # compliancedetails{}/accountingtypebreakdown{} all live one level down.
 _MAX_DEPTH = int(os.environ.get("AVAAL_ANALYTICS_SCHEMA_DEPTH", "2"))
-_MAX_FIELDS = int(os.environ.get("AVAAL_ANALYTICS_MAX_FIELDS", "260"))
+# Orders have ~270 top-level fields; nested walks stop once this is hit, so it
+# must sit well above that or array fields (driverarray.driverName) randomly
+# vanish depending on $sample order. The prompt has its own cap (max_fields).
+_MAX_FIELDS = int(os.environ.get("AVAAL_ANALYTICS_MAX_FIELDS", "600"))
 
 # Common business phrasings → real field (keys are _norm()'d). Only used when a
 # planner-named field is not found exactly / fuzzily.
@@ -105,7 +116,11 @@ _FIELD_ALIASES: Dict[str, str] = {
     "status": "orderstatus", "orderstate": "orderstatus", "state": "orderstatus",
     "accountstatus": "accountingstatus", "billingstatus": "accountingstatus",
     "invoicestatus": "accountingstatus",
-    "carrier": "outcarriername", "carriername": "outcarriername",
+    "carrier": "carriernames", "carriername": "carriernames",
+    "driver": "drivernames", "drivers": "drivernames", "drivername": "drivernames",
+    "drivercode": "drivercodes", "driverid": "drivercodes",
+    "truck": "trucknumbers", "trucknumber": "trucknumbers",
+    "trailer": "trailernumbers", "trailernumber": "trailernumbers",
     "trip": "tripno", "tripnumber": "tripno", "tripid": "tripno",
     "miles": "distance", "km": "distance", "kilometers": "distance", "mileage": "distance",
     "po": "pono", "ponumber": "pono", "purchaseorder": "pono", "ordernoexternal": "customerorderno",
@@ -113,7 +128,7 @@ _FIELD_ALIASES: Dict[str, str] = {
     "salesman": "salesmanname", "salesrep": "salesmanname", "agent": "salesmanname",
     "commodity": "commodityname", "product": "commodityname", "goods": "commodityname",
     "material": "commodityname",
-    "company": "companycode", "branch": "companycode",
+    "company": "companyname", "branch": "companyname",
     "origin": "pickupfulladdress", "shipper": "pickuplocationname",
     "pickup": "pickuplocationname", "pickupcity": "pickupfulladdress",
     "destination": "deliveryfulladdress", "consignee": "deliverylocationname",
@@ -445,7 +460,8 @@ Field notes:
 - outstatus = outsourcing (Open, Planned, Assigned, ...).
 
 Common phrasings (map to the real field): revenue/gross -> grosstotalfreight; amount/price/cost/freight -> totalfreight;
-rate -> freightratevalue; client/buyer -> customername; carrier -> outcarriername; trip -> tripno;
+rate -> freightratevalue; client/buyer -> customername; carrier -> carriernames; trip -> tripno;
+driver -> driverarray.driverName (one row per driver); company -> companyname; currency -> currencycode;
 miles/km/mileage -> distance; PO -> pono / customerorderno; reference -> referno; salesman/agent -> salesmanname;
 commodity/product/goods -> commodityname; tax -> totaltaxamount; fuel -> fuelcharges; created -> createdon.
 If the user's word is a near-miss for a field name, the closest real field is used automatically — still, prefer exact names.

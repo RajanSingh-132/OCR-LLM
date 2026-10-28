@@ -43,8 +43,8 @@ def detect_domain_local(question: str, *, history_hint: str = "") -> Tuple[str, 
     if not text:
         return DEFAULT_DOMAIN, "empty_question_default_orders", {}
 
-    # Avaal trip number prefixes are definitive (ETP4455, TRO4725, …).
-    if re.search(r"\b(?:etp|tro|trip)[a-z0-9-]{2,}\b", text, re.I):
+    # Avaal trip number prefixes are definitive (ETP4455, TRO4725, TRP5071, …).
+    if re.search(r"\b(?:etp|tro|trp|trip)[a-z0-9-]{2,}\b", text, re.I):
         return "trips", "trip_number_prefix", {"trips": _STRONG_SCORE + 1.0}
 
     # Invoice numbers like MR3932 / INO4 / AIN12225 (not MRP/TORD/"invoice").

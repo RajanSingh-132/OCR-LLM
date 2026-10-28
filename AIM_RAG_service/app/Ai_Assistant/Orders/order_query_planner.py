@@ -71,7 +71,7 @@ MAX_FILTERS = 14
 _TASKS = frozenset(
     {
         "lookup", "list", "aggregate", "compare", "percentage",
-        "conversation", "greeting", "unsupported",
+        "conversation", "greeting", "unsupported", "not_in_data",
     }
 )
 
@@ -120,6 +120,12 @@ _VIRTUAL_GEO = frozenset(
 
 _DATE_FIELD_RE = re.compile(r"date$", re.I)
 
+# Comma-joined driver text fields -> the per-driver array field to group on.
+_PER_DRIVER_FIELD = {
+    "drivernames": "driverarray.driverName",
+    "drivercodes": "driverarray.driverCode",
+}
+
 
 # ------------------------------------------------------------------- plan
 @dataclass
@@ -145,6 +151,7 @@ class QueryPlan:
             "aggregate": "analytics",
             "compare": "compare" if self.record_tokens else "analytics",
             "percentage": "analytics",
+            "not_in_data": "not_in_data",
         }.get(self.task, "open_qa")
         max_tokens = {"short": 150, "medium": 500, "detailed": 1200}.get(
             self.response_style, 500
@@ -195,7 +202,7 @@ Conversation so far:
 
 PLAN SHAPE (include only the keys the task needs):
 {{
-  "task": "lookup" | "list" | "aggregate" | "compare" | "percentage" | "conversation" | "greeting" | "unsupported",
+  "task": "lookup" | "list" | "aggregate" | "compare" | "percentage" | "conversation" | "greeting" | "unsupported" | "not_in_data",
   "record_tokens": ["MRP12345", ...],
   "filters": [ {{"field": "<field>", "op": "<op>", "value": <scalar|list>}} ],
   "aggregate": {{
@@ -226,7 +233,9 @@ TASKS
 - percentage : "what % of ..." -> numerator (the subset) + pct_of ("orders" or a numeric field).
                 filters = the population; numerator = the extra condition.
 - conversation: needs document text ("why delayed") - leave the rest empty.
-- greeting / unsupported.
+- not_in_data: a business question whose answer is NOT stored in the order data at all
+  (see "NOT stored" below) - leave the rest empty.
+- greeting / unsupported (the data exists but the question can't be expressed as a plan).
 
 FILTER OPS
   eq, ne, in, nin           any field         contains, starts_with   text only
@@ -252,7 +261,30 @@ VOCAB (map the user's word to the real field/value)
 - flags: "active" = isactive eq true; "archived" = isarchived eq true; "FTL" = loadtypelucode eq "FTL"; "LTL" = "LTL".
 - money: revenue/gross -> grosstotalfreight; amount/price/value/cost -> totalfreight; freight -> totalfreight;
   rate -> freightratevalue; tax -> totaltaxamount; fuel -> fuelcharges. "C$50,000" -> 50000.
-- other: client/buyer -> customername; carrier -> outcarriername; trip -> tripno; miles/km -> distance;
+  Keep these mappings for currency questions too ("total order value in CAD" -> sum totalfreight).
+- drivers / equipment on an order (comma-joined text — ALWAYS op "contains", never eq):
+  driver name -> drivernames; driver code / driver ID (DRV...) -> drivercodes;
+  number of drivers -> drivercount (numeric); truck -> trucknumbers; trailer -> trailernumbers;
+  trip number -> tripnumbers. "orders for driver X" -> drivernames contains X.
+  "no driver assigned" -> drivercount eq 0; "has a driver" -> drivercount gt 0;
+  "more than one driver" -> drivercount gt 1.
+  Per-driver analytics ("orders per driver", "which driver handled the most orders") ->
+  group_by ["driverarray.driverName"] (one row per driver, an order with 2 drivers counts for both).
+  "driver names for <some orders>" / "which drivers work for / on <some orders>" -> the same group_by
+  with metrics [count] + those filters, so every driver NAME is returned (never distinct_count).
+- company = the user's own operating company / branch that owns the order -> companyname
+  (companycode is its code). Company is NOT the customer: client/buyer -> customername.
+  "which company does order X belong to" -> lookup. "order count per company" -> group_by ["companyname"].
+- currency: currencycode ("USD" / "CAD"). "CAD-based / in CAD / Canadian dollar orders" ->
+  currencycode eq "CAD"; same for USD. A company's currency = the currencycode of its orders:
+  "which currency does company X use" / "companies using USD" / "companies grouped by currency" /
+  "company name and currency for all companies" -> task aggregate, group_by ["companyname","currencycode"],
+  metrics [count] (+ companyname filter when one company is named). "USD vs CAD companies" ->
+  compare segments on currencycode.
+- NOT stored -> task "not_in_data": payroll, a company's operational status / settings, and
+  companies or drivers with NO orders (only those that appear on orders exist in the data).
+- other: client/buyer -> customername; carrier -> carriernames (outsourced carrier -> outcarriername);
+  trip -> tripnumbers; miles/km -> distance;
   PO -> pono; reference -> referno; salesman/agent -> salesmanname; commodity/product -> commodityname;
   "route" -> group_by ["pickuplocationname","deliverylocationname"]; "freight per mile" -> not directly supported,
   use metric avg on totalfreight and note distance separately, or mark unsupported.
@@ -408,7 +440,11 @@ def _validate_plan(
             tokens = [tok]
 
     filters: List[Dict[str, Any]] = []
-    for f in (raw.get("filters") or [])[:MAX_FILTERS]:
+    # The LLM sometimes nests "filters" inside "aggregate" — dropping them
+    # would silently count every order.
+    agg_raw_filters = raw.get("aggregate") if isinstance(raw.get("aggregate"), dict) else {}
+    raw_filters = raw.get("filters") or agg_raw_filters.get("filters") or []
+    for f in raw_filters[:MAX_FILTERS]:
         clean = _valid_filter(f, schema)
         if clean is not None:
             filters.append(clean)
@@ -428,6 +464,14 @@ def _validate_plan(
     aggregate = None
     if task == "aggregate":
         agg_raw = dict(raw.get("aggregate") or {})
+        # drivernames / drivercodes are comma-joined ("DRV BAXY, Saurabh") —
+        # grouping on them yields driver pairs and a big "Unknown" bucket.
+        for key in ("group_by", "distinct_field"):
+            val = agg_raw.get(key)
+            if isinstance(val, list):
+                agg_raw[key] = [_PER_DRIVER_FIELD.get(g, g) for g in val]
+            elif isinstance(val, str):
+                agg_raw[key] = _PER_DRIVER_FIELD.get(val, val)
         agg_raw.setdefault("limit", limit)
         agg_raw.setdefault("sort", sort)
         aggregate = _validate_spec(agg_raw, schema)

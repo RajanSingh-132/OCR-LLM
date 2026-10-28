@@ -300,8 +300,12 @@ def search_orders(
                 "pickupdate": doc.get("pickupdate"),
                 "deliverydate": doc.get("deliverydate"),
                 "companycode": doc.get("companycode"),
+                "companyname": doc.get("companyname"),
                 "salesmanname": doc.get("salesmanname"),
                 "commodityname": doc.get("commodityname"),
+                "drivernames": doc.get("drivernames"),
+                "trucknumbers": doc.get("trucknumbers"),
+                "tripnumbers": doc.get("tripnumbers"),
             }
         )
     checkpoint(
@@ -352,7 +356,9 @@ def format_order_list_for_context(payload: Dict[str, Any]) -> str:
             f"currency={row.get('currencycode')} freight={row.get('totalfreight')} "
             f"taxes={row.get('taxes')} "
             f"pickup_loc={row.get('pickuplocationname')} "
-            f"delivery_loc={row.get('deliverylocationname')}"
+            f"delivery_loc={row.get('deliverylocationname')} "
+            f"company={row.get('companyname')} drivers={row.get('drivernames')} "
+            f"truck={row.get('trucknumbers')} trip={row.get('tripnumbers')}"
         )
         if show_geo:
             line += (
@@ -478,9 +484,17 @@ _ORDER_DETAIL_PRIORITY = [
     "orderdate",
     "customername",
     "customercode",
+    "companyname",
     "companycode",
     "salesmanname",
     "currencycode",
+    "drivernames",
+    "drivercodes",
+    "drivercount",
+    "trucknumbers",
+    "trailernumbers",
+    "tripnumbers",
+    "carriernames",
     "totalfreight",
     "grosstotalfreight",
     "freightcharges",

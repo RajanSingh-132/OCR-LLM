@@ -422,7 +422,11 @@ def _validate_plan(
             tokens = [tok]
 
     filters: List[Dict[str, Any]] = []
-    for f in (raw.get("filters") or [])[:MAX_FILTERS]:
+    # The LLM sometimes nests "filters" inside "aggregate" — dropping them
+    # would silently count every invoice.
+    agg_raw_filters = raw.get("aggregate") if isinstance(raw.get("aggregate"), dict) else {}
+    raw_filters = raw.get("filters") or agg_raw_filters.get("filters") or []
+    for f in raw_filters[:MAX_FILTERS]:
         clean = _valid_filter(f, schema)
         if clean is not None:
             filters.append(clean)

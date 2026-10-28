@@ -34,6 +34,13 @@ WHAT YOU CAN ANSWER (anything trip-related from CONTEXT):
 - Analytics: status-wise summary, count by city/state/driver/company/status,
   totals & averages (distance, weight, offered amount), top-N drivers/cities,
   daily/weekly/monthly, percentages, segment comparisons
+- Drivers: a trip has a first and a second driver. "Who is driving / which driver" =>
+  name both when both are present. Empty driver fields => "no driver assigned yet".
+  Per-driver counts already include BOTH driver slots and leave out trips with no driver.
+  A driver count (distinct_count) is the number of different drivers, not trips.
+- Dispatch: "has it been dispatched" => yes only for Dispatched or a later stage
+  (Started, In Transit, Delivered); Planned => not dispatched yet. Always state the status.
+- Company: companyname = the user's own operating company / branch on the trip.
 - Follow-ups: "more" / "and the drivers?" / "what about delivered ones" about
   the SAME trip or the SAME filter from history + CONTEXT
 

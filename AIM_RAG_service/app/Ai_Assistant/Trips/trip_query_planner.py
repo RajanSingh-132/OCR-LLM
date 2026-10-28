@@ -76,7 +76,7 @@ MAX_FILTERS = 14
 _TASKS = frozenset(
     {
         "lookup", "list", "aggregate", "compare", "percentage",
-        "conversation", "greeting", "unsupported",
+        "conversation", "greeting", "unsupported", "not_in_data",
     }
 )
 
@@ -148,6 +148,7 @@ class TripQueryPlan:
             "aggregate": "analytics",
             "compare": "compare" if self.record_tokens else "analytics",
             "percentage": "analytics",
+            "not_in_data": "not_in_data",
         }.get(self.task, "open_qa")
         max_tokens = {"short": 150, "medium": 500, "detailed": 1200}.get(
             self.response_style, 500
@@ -197,7 +198,7 @@ Conversation so far:
 
 PLAN SHAPE (include only the keys the task needs):
 {{
-  "task": "lookup" | "list" | "aggregate" | "compare" | "percentage" | "conversation" | "greeting" | "unsupported",
+  "task": "lookup" | "list" | "aggregate" | "compare" | "percentage" | "conversation" | "greeting" | "unsupported" | "not_in_data",
   "record_tokens": ["ETP4455", ...],
   "filters": [ {{"field": "<field>", "op": "<op>", "value": <scalar|list>}} ],
   "aggregate": {{
@@ -237,7 +238,9 @@ TASKS
                highest total distance" -> group + sort desc + limit 1.
                "which trip has the highest offered amount" -> task list sort by totalofferedamount desc limit 1.
 - percentage : "what % of trips ..." -> numerator (the subset) + pct_of ("trips" or a numeric field).
-- conversation / greeting / unsupported.
+- not_in_data: a business question whose answer is NOT stored in the trip data at all
+  (see "NOT in trip data" below) - leave the rest empty.
+- conversation / greeting / unsupported (the data exists but can't be expressed as a plan).
 
 FILTER OPS
   eq, ne, in, nin           any field         contains, starts_with   text only
@@ -254,8 +257,11 @@ date_bucket (daily/weekly/monthly series) uses "createdon".
 VOCAB (map the user's word to the real field/value)
 - status: tripstatus is one of Planned, Dispatched, Started, In-Transit, Delivered, Rejected
   (DB may also store "In Transit" / "Enroute" / "Cancelled").
+  Lifecycle order: Planned -> Dispatched -> Started -> In Transit -> Delivered.
   "dispatched" = tripstatus eq "Dispatched"; same for planned / started / delivered / rejected.
-  "in transit" / "en route" -> tripstatus eq "In-Transit".
+  "not dispatched (yet)" / "pending dispatch" / "awaiting dispatch" / "still to dispatch" ->
+  tripstatus eq "Planned" (NOT the "pending" list below).
+  "in transit" / "en route" -> tripstatus op "in" value ["In-Transit","In Transit"].
   "active" / "on road" / "running" / "not delivered yet" / "open" / "pending" =
   tripstatus op "nin" value ["Delivered","Rejected","Cancelled"].
   "completed" / "closed" -> tripstatus eq "Delivered".
@@ -275,6 +281,23 @@ VOCAB (map the user's word to the real field/value)
   also checks seconddrivername automatically); driver code like DRV00895 -> firstdrivercode
   (checked against seconddrivercode too); truck -> trucknumber; trailer -> firsttrailernumber;
   salesman / agent (EMP codes) -> salesmancodes, salesman name -> salesmannames.
+- driver assignment (empty driver fields are null — NEVER filter on "-", "None" or ""):
+  "no driver" / "unassigned" / "without a driver" -> {{"field":"firstdrivername","op":"exists","value":false}};
+  "has a driver" / "driver assigned" -> {{"field":"firstdrivername","op":"exists","value":true}};
+  "multiple / two / team drivers" -> {{"field":"seconddrivername","op":"exists","value":true}};
+  "dispatched but no driver" -> tripstatus eq "Dispatched" + firstdrivername exists false.
+- per-driver analytics: group_by ["firstdrivername"] counts BOTH driver slots automatically and
+  skips trips with no driver ("trips per driver", "which driver handled the most / fewest trips",
+  "assignment count by driver"). Driver + status ("completed vs pending for driver X") ->
+  driver filter + group_by ["tripstatus"].
+- counting drivers: "how many drivers" / "driver count per company" -> operation "distinct_count",
+  distinct_field "firstdrivername" (+ group_by ["companyname"] when per company).
+  distinct_count is an OPERATION — never put it inside metrics.
+- "assignment history of driver X" -> task list, driver filter, sort createdon desc.
+- "driver assignment count by X" -> group_by [X] + firstdrivername exists true (trips that have a driver).
+- NOT in trip data -> task "not_in_data": currency (trips have no currency field), payroll,
+  a company's own settings / operational status, drivers who have NO trips (only drivers that
+  appear on trips are stored).
 - customer / client -> customername (comma-joined — use contains). company / branch -> companyname
   ("belongs to Avaal Group" -> companyname eq "Avaal Group"). carrier -> carriername.
 - linked docs: order number (MRP...) -> ordernumber (contains); order id (digits) -> orderids (contains).
@@ -470,7 +493,11 @@ def _validate_plan(
             tokens = [tok]
 
     filters: List[Dict[str, Any]] = []
-    for f in (raw.get("filters") or [])[:MAX_FILTERS]:
+    # The LLM sometimes nests "filters" inside "aggregate" — dropping them
+    # would silently count every trip.
+    agg_raw_filters = raw.get("aggregate") if isinstance(raw.get("aggregate"), dict) else {}
+    raw_filters = raw.get("filters") or agg_raw_filters.get("filters") or []
+    for f in raw_filters[:MAX_FILTERS]:
         clean = _valid_filter(f, schema)
         if clean is not None:
             filters.append(clean)
@@ -634,10 +661,14 @@ def _geo_clause(field: str, value: Any, side: str) -> Optional[Dict[str, Any]]:
 
 
 def _driver_clause(op: str, value: Any) -> Dict[str, Any]:
-    """A plain driver filter matches first OR second driver (name or code)."""
-    v = str(value).strip()
-    rx = {"$regex": re.escape(v), "$options": "i"} if op == "contains" else {
-        "$regex": f"^{re.escape(v)}$", "$options": "i"
+    """A plain driver filter matches first OR second driver (name or code).
+
+    Stored names carry stray whitespace ("Saurabh ", "Amanjot  SINGH"), so
+    words match across any run of spaces and eq ignores leading/trailing ones.
+    """
+    body = r"\s+".join(re.escape(w) for w in str(value).split())
+    rx = {"$regex": body, "$options": "i"} if op == "contains" else {
+        "$regex": rf"^\s*{body}\s*$", "$options": "i"
     }
     return {
         "$or": [
@@ -647,6 +678,37 @@ def _driver_clause(op: str, value: Any) -> Dict[str, Any]:
             {"seconddrivercode": rx},
         ]
     }
+
+
+# A trip has two driver slots. Grouping / distinct-counting "by driver" must
+# count both, so the first-slot field is rebuilt as the list of non-empty
+# (trimmed) names from both slots and unwound — trips with no driver drop out
+# instead of showing up as one big "Unknown" group.
+_DRIVER_SLOTS = {
+    "firstdrivername": "seconddrivername",
+    "firstdrivercode": "seconddrivercode",
+}
+
+
+def _driver_unwind_stages(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    keys = list(spec.get("group_by") or [])
+    if spec.get("distinct_field"):
+        keys.append(spec["distinct_field"])
+    stages: List[Dict[str, Any]] = []
+    for first, second in _DRIVER_SLOTS.items():
+        if first not in keys:
+            continue
+        both = [
+            {"$trim": {"input": {"$toString": {"$ifNull": [f"${f}", ""]}}}}
+            for f in (first, second)
+        ]
+        stages += [
+            {"$addFields": {first: {"$filter": {
+                "input": both, "cond": {"$ne": ["$$this", ""]},
+            }}}},
+            {"$unwind": f"${first}"},
+        ]
+    return stages
 
 
 def _build_trip_match(
@@ -916,6 +978,9 @@ def execute_trip_query_plan(
     elif plan.task == "aggregate" and plan.aggregate is not None:
         match = _build_trip_match(plan.filters, schema)
         pipeline = _build_pipeline(plan.aggregate, match)
+        if plan.aggregate.get("operation") != "count":
+            # pipeline[0] is the $match — flatten driver slots right after it.
+            pipeline[1:1] = _driver_unwind_stages(plan.aggregate)
         rows = list(
             get_domain_collection("trips").aggregate(
                 pipeline, maxTimeMS=AGG_TIMEOUT_MS, allowDiskUse=False

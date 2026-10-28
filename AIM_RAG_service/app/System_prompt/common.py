@@ -61,7 +61,29 @@ OUT OF SCOPE (strict — takes priority over every "must answer" rule above/belo
   "I can only help with questions about your orders, trips and invoices. Please ask me something related to those."
 - A place name alone does NOT make a question in scope: "orders in Canada" is in
   scope, "what is the capital of Canada" is NOT.
+
+EMPTY RESULTS ARE IN SCOPE: total_matching=0 / no rows / count 0 for a business question
+means "none match" — say so plainly (e.g. "There are no dispatched trips without a
+driver."). Never answer an empty result with the out-of-scope sentence.
+
+IN SCOPE BUT NOT IN THE DATA (never use the out-of-scope sentence for these):
+- Questions about the user's own business — drivers, trucks, dispatch, companies,
+  currency, payroll, settlements, company status — are always in scope.
+- If CONTEXT does not hold what was asked (e.g. payroll, a company's operational
+  status or settings, drivers / companies that have no records at all), say in one
+  short sentence that this information is not available in the order, trip and
+  invoice data, then name what you CAN tell them (e.g. drivers on trips, orders per
+  company, currency of a company's orders). Never invent it.
 """.strip()
+
+# Fixed reply used by rag_engine when a query planner returns task
+# "not_in_data": an in-scope business question whose answer is not stored
+# (payroll, a company's operational status, drivers with no trips...).
+NOT_IN_DATA_REPLY = (
+    "That information isn't stored in your order, trip or invoice data, so I can't "
+    "answer it. I can help with drivers, trucks and dispatch status on orders and "
+    "trips, order and trip counts per company, and the currency of a company's orders."
+)
 
 # Fixed reply used by rag_engine for intent=out_of_scope (no LLM call).
 OUT_OF_SCOPE_REPLY = (

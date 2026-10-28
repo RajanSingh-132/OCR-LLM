@@ -33,13 +33,17 @@ from app.Ai_Assistant.memory import (
     save_turn,
 )
 from app.Ai_Assistant.prompts import ORDER_FORMULA_PROMPT
-from app.System_prompt.common import OUT_OF_SCOPE_REPLY
+from app.System_prompt.common import NOT_IN_DATA_REPLY, OUT_OF_SCOPE_REPLY
 from app.domains.detect import (
     _STRONG_SCORE as STRONG_DOMAIN_SCORE,
     _score_domains,
     detect_domain_local,
 )
-from app.domains.registry import domain_to_collection, resolve_collection
+from app.domains.registry import (
+    ROUTING_HINTS,
+    domain_to_collection,
+    resolve_collection,
+)
 from app.domains.lookup import get_domain_prompts, get_lookup_module
 from app.Ai_Assistant.tools import execute_tools, plan_tools
 from app.tenants.context import AskContext
@@ -225,10 +229,17 @@ def _pick_domain(question: str, payload_domain: str) -> str:
     collection=order, or a trip/invoice number like ETP123 / INO4) is answered
     from that type's collection instead. Keyword-only — no LLM call.
 
-    The payload domain is kept when the question has no strong keyword, or
-    also strongly names the payload type ("orders on trip ETP123").
+    The payload domain is kept when the question also strongly names the
+    payload type ("orders on trip ETP123"). A question that names no record
+    type at all falls back to ROUTING_HINTS ("driver count per company" ->
+    trips, "which currency does X use" -> orders), else the payload domain.
     """
     question_domain, _reason, scores = detect_domain_local(question)
+    if max(scores.values(), default=0.0) < STRONG_DOMAIN_SCORE:
+        for hint_domains, pattern in ROUTING_HINTS:
+            if re.search(pattern, question or "", re.I):
+                return payload_domain if payload_domain in hint_domains else hint_domains[0]
+        return payload_domain
     if question_domain == payload_domain:
         return payload_domain
     if scores.get(question_domain, 0.0) < STRONG_DOMAIN_SCORE:
@@ -490,22 +501,28 @@ def _answer_order_question_gen(
             max_tokens = int(intent_info["max_tokens_hint"])
             retrieve_k = 0
             entities = planner_plan.to_entities()
-            try:
-                precomputed_tool_result = execute_query_plan(
-                    planner_plan, question=effective_question
-                )
-                checkpoint(
-                    "ROUTE",
-                    "LLM query planner",
-                    task=planner_plan.task,
-                    intent=intent,
-                    reason=planner_plan.reason,
-                )
-            except Exception as exc:
-                logger.warning("Query plan execution failed: %s", exc, exc_info=True)
-                checkpoint("PLANNER", "execute error — regex fallback", error=str(exc))
-                planner_plan = None
-                precomputed_tool_result = None
+            if planner_plan.task == "not_in_data":
+                # In-scope question whose answer isn't stored (payroll, company
+                # status, drivers with no trips) — fixed reply below; never
+                # hand it to the regex fallback, which runs unrelated tools.
+                checkpoint("ROUTE", "planner: not in data", reason=planner_plan.reason)
+            else:
+                try:
+                    precomputed_tool_result = execute_query_plan(
+                        planner_plan, question=effective_question
+                    )
+                    checkpoint(
+                        "ROUTE",
+                        "LLM query planner",
+                        task=planner_plan.task,
+                        intent=intent,
+                        reason=planner_plan.reason,
+                    )
+                except Exception as exc:
+                    logger.warning("Query plan execution failed: %s", exc, exc_info=True)
+                    checkpoint("PLANNER", "execute error — regex fallback", error=str(exc))
+                    planner_plan = None
+                    precomputed_tool_result = None
 
         if planner_plan is None and not fast_path_hit:
             # 2b) Understand intent (regex + Claude fallback)
@@ -614,12 +631,16 @@ def _answer_order_question_gen(
             "chitchat",
             "ask_for_record_id",
             "out_of_scope",
+            "not_in_data",
         ):
             checkpoint("ROUTE", f"{intent} — skip tools/RAG")
             if intent == "out_of_scope":
                 # Fixed reply — never let the LLM answer general knowledge
                 # (see OUT_OF_SCOPE_POLICY in app/System_prompt/common.py).
                 answer = OUT_OF_SCOPE_REPLY
+                yield {"type": "chunk", "text": answer}
+            elif intent == "not_in_data":
+                answer = NOT_IN_DATA_REPLY
                 yield {"type": "chunk", "text": answer}
             elif intent == "ask_for_record_id":
                 # Fixed sweet ask — never leak MRP/TORD/ETP examples via LLM,

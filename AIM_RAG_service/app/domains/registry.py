@@ -114,13 +114,13 @@ DOMAINS: Dict[str, DomainProfile] = {
             r"\btruck\b",
             r"\btrailer\b",
             r"\btotalloaddistance\b",
-            r"\b(?:ETP|TRO|TRIP)[A-Za-z0-9-]{2,}\b",
+            r"\b(?:ETP|TRO|TRP|TRIP)[A-Za-z0-9-]{2,}\b",
         ),
         strong_keywords=(
             r"\btrips?\b",
             r"\btripnumber\b",
             r"\btripno\b",
-            r"\b(?:ETP|TRO|TRIP)[A-Za-z0-9-]{2,}\b",
+            r"\b(?:ETP|TRO|TRP|TRIP)[A-Za-z0-9-]{2,}\b",
         ),
         id_fields=("tripid", "TripID", "id"),
         number_fields=("tripnumber", "TripNumber", "tripno", "TripNo"),
@@ -145,6 +145,7 @@ DOMAINS: Dict[str, DomainProfile] = {
             "seconddriverphone",
             "trucknumber",
             "customername",
+            "companyname",
             "commodity",
             "salesmannames",
             "pickuplocationname",
@@ -163,6 +164,18 @@ DOMAINS: Dict[str, DomainProfile] = {
 }
 
 DEFAULT_DOMAIN = "orders"
+
+# Words that don't name a record type but point at the domains that hold the
+# data: (domains that can answer, pattern). rag_engine._pick_domain uses these
+# ONLY when the question names no record type at all ("driver count per
+# company", "which currency does X use") — an explicit "order" / "trip" /
+# "invoice" always decides first. On a match the payload domain is kept when
+# it is listed, else the first listed domain is used. First match wins:
+# currency outranks drivers because trips have no currency field.
+ROUTING_HINTS = (
+    (("orders", "invoices"), r"\b(?:usd|cad|currency|currencies)\b"),
+    (("trips",), r"\b(?:drivers?|trucks?|trailers?|miles?|mileage|distance)\b"),
+)
 
 # Request payload `collection` value -> domain (which picks the Mongo
 # collection via app/tenants/mapping.py DEFAULT_COLLECTIONS):

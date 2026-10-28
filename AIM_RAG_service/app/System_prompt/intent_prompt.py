@@ -60,6 +60,10 @@ INTENT RULES:
    "write a python script". Set needs_rag=false, retrieve_k=0, filters={{}}.
    A place name alone does NOT make it in scope: "orders in Canada" is list_filter,
    "capital of Canada" is out_of_scope. Never use open_qa for these.
+   IN SCOPE (never out_of_scope, never greeting): anything about the user's own business —
+   drivers, trucks, trailers, dispatch, companies / branches, currency (USD / CAD),
+   customers, carriers, payroll, settlements, company status — even when the data may not
+   hold the answer. Use open_qa (or list_filter / analytics) for those.
 1) greeting/thanks/chitchat — whole message is hi/hello/thanks/ok only.
 2) order_lookup / invoice_lookup / trip_lookup — user gave a specific number/id OR asks full details of one record (set order_token, needs_exact_order=true, response_style=detailed, max_tokens_hint>=900).
 3) ask_for_record_id — wants one record details but NO number/id (and not a list/filter/recent question).
