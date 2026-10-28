@@ -1,7 +1,7 @@
 """
 Avaal Orders Ask API — Mongo collection config + terminal checkpoints.
 
-DB: same as .env DB_NAME (chatbot_db)
+DB: same as .env DB_NAME (AFMQA)
 Collection (ask-only): Avaal_order
 
 checkpoint() / CheckpointTimer live here because this module imports nothing

@@ -7,7 +7,7 @@ keeps MongoDB in sync with the latest PAGE_SIZE invoice records.
 
 Runs forever until Ctrl+C. Tenants: CORPORATE_IDS (AFMQA, AFN01800), each
 sent as the `corporateid` header and synced in parallel (one thread per
-tenant). AFMQA's records are stored in the Mongo database "chatbot_db"
+tenant). AFMQA's records are stored in the Mongo database "AFMQA"
 (DB_NAME_OVERRIDES); any other tenant goes to the database named after its
 corporate_id. The Postgres tenant list (app/tenants/tenant_provisioning.py)
 is no longer used.
@@ -155,7 +155,7 @@ USE_API_DATE_FILTER = False
 
 # Mongo database each tenant's records are stored in — no overrides, so
 # every corporate_id uses the database of the same name.
-# DB_NAME_OVERRIDES: Dict[str, str] = {"AFMQA": "chatbot_db"}
+# DB_NAME_OVERRIDES: Dict[str, str] = {"AFMQA": "AFMQA"}
 DB_NAME_OVERRIDES: Dict[str, str] = {}
 COLLECTION_NAME = "Avaal_invoice"
 NAMESPACE = "avaal_invoices"

@@ -88,7 +88,7 @@ def validate_corporate_id(raw: str) -> str:
 # Every corporate_id reads from the Mongo database of the same name, except
 # the overrides below — must match DB_NAME_OVERRIDES in app/sync/*_live_api.py
 # (currently none).
-# _CORPORATE_DB_OVERRIDES: Dict[str, str] = {"AFMQA": "chatbot_db"}
+# _CORPORATE_DB_OVERRIDES: Dict[str, str] = {"AFMQA": "AFMQA"}
 _CORPORATE_DB_OVERRIDES: Dict[str, str] = {}
 
 

@@ -10,7 +10,7 @@ Safe to run again: an existing database / collection / index is left as it
 is (nothing is dropped or emptied). MONGO_URI is read from .env.
 
 Note: the database is created with EXACTLY the name given. The sync daemons
-and /ask map AFMQA to "chatbot_db" (DB_NAME_OVERRIDES / _CORPORATE_DB_OVERRIDES),
+and /ask map AFMQA to "AFMQA" (DB_NAME_OVERRIDES / _CORPORATE_DB_OVERRIDES),
 so a database named "AFMQA" is not used by them unless that override is removed.
 """
 import os
