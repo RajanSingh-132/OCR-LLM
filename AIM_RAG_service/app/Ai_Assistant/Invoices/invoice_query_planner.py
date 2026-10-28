@@ -71,7 +71,7 @@ MAX_FILTERS = 14
 _TASKS = frozenset(
     {
         "lookup", "list", "aggregate", "compare", "percentage",
-        "conversation", "greeting", "unsupported",
+        "conversation", "greeting", "unsupported", "not_in_data", "ops_summary",
     }
 )
 
@@ -130,6 +130,8 @@ class InvoiceQueryPlan:
             "aggregate": "analytics",
             "compare": "compare" if self.record_tokens else "analytics",
             "percentage": "analytics",
+            "not_in_data": "not_in_data",
+            "ops_summary": "analytics",
         }.get(self.task, "open_qa")
         max_tokens = {"short": 150, "medium": 500, "detailed": 1200}.get(
             self.response_style, 500
@@ -179,7 +181,7 @@ Conversation so far:
 
 PLAN SHAPE (include only the keys the task needs):
 {{
-  "task": "lookup" | "list" | "aggregate" | "compare" | "percentage" | "conversation" | "greeting" | "unsupported",
+  "task": "lookup" | "list" | "aggregate" | "compare" | "percentage" | "conversation" | "greeting" | "unsupported" | "not_in_data" | "ops_summary",
   "record_tokens": ["MR3932", ...],
   "filters": [ {{"field": "<field>", "op": "<op>", "value": <scalar|list>}} ],
   "aggregate": {{
@@ -212,6 +214,14 @@ TASKS
                / daily / weekly / monthly. "highest / lowest invoice" -> operation metric
                (min/max) OR list sorted; "top N customers by X" -> group + sort + limit.
 - percentage : "what % of ..." -> numerator (the subset) + pct_of ("invoices" or a numeric field).
+- not_in_data: the answer is NOT stored at all — payment / receipt records or history, payment
+  methods, who paid / when it was paid, payment exceptions beyond overdue invoices, delivery
+  exceptions, GPS location, payroll, a company's operational status. Leave the rest empty.
+  If only PART is missing, plan the part that exists (e.g. "unpaid invoices and payment history"
+  -> plan the unpaid invoices).
+- ops_summary: a manager overview across orders + trips + invoices together ("summary of today's
+  operations", "daily status report", "pending orders, active trips, delayed deliveries and payment
+  exceptions") -> {{"task":"ops_summary"}} only.
 - conversation / greeting / unsupported.
 
 FILTER OPS
@@ -233,6 +243,12 @@ VOCAB (map the user's word to the real field/value)
   "overdue" = TWO filters: {{"field":"DueDate","op":"date_lt","value":"<today>"}} AND
   {{"field":"InvoiceStatus","op":"nin","value":["Paid"]}}.
   "overdue by more than 30 days" = DueDate date_lt <today-30d> AND InvoiceStatus nin ["Paid"].
+  "payment exceptions" / "late payments" / "customers not paying" -> the overdue filters (there
+  are no payment records — overdue unpaid invoices are the signal).
+  "delivered shipments with outstanding invoices" -> InvoiceStatus nin ["Paid"] AND
+  outstandinamount gt 0 (an invoice exists only after delivery).
+  "customers with the most outstanding" -> unpaid filter + group_by ["CustomerName"],
+  metrics [sum outstandinamount], sort desc.
 - money: amount / total / value / "after tax" -> TotalAmount; "before tax" / pretax / subtotal
   -> PreTaxAmount; freight -> freightcharges; fuel / fuel surcharge -> fuelsurcharges;
   other charges -> othercharges; discount -> DiscountAmount; outstanding / balance / "still owed"

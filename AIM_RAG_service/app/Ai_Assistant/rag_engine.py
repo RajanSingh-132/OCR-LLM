@@ -508,9 +508,15 @@ def _answer_order_question_gen(
                 checkpoint("ROUTE", "planner: not in data", reason=planner_plan.reason)
             else:
                 try:
-                    precomputed_tool_result = execute_query_plan(
-                        planner_plan, question=effective_question
-                    )
+                    if planner_plan.task == "ops_summary":
+                        # Orders + trips + invoices together — no single planner can.
+                        from app.Ai_Assistant.ops_summary import build_ops_summary
+
+                        precomputed_tool_result = build_ops_summary()
+                    else:
+                        precomputed_tool_result = execute_query_plan(
+                            planner_plan, question=effective_question
+                        )
                     checkpoint(
                         "ROUTE",
                         "LLM query planner",

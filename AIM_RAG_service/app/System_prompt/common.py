@@ -80,9 +80,10 @@ IN SCOPE BUT NOT IN THE DATA (never use the out-of-scope sentence for these):
 # "not_in_data": an in-scope business question whose answer is not stored
 # (payroll, a company's operational status, drivers with no trips...).
 NOT_IN_DATA_REPLY = (
-    "That information isn't stored in your order, trip or invoice data, so I can't "
-    "answer it. I can help with drivers, trucks and dispatch status on orders and "
-    "trips, order and trip counts per company, and the currency of a company's orders."
+    "That information isn't stored in your order, trip or invoice data (for example "
+    "live tracking, delivery exceptions, payment records or delay reasons), so I can't "
+    "answer it. I can help with order and trip status, delayed or overdue deliveries, "
+    "drivers and trucks, cargo details, and open or overdue invoices."
 )
 
 # Fixed reply used by rag_engine for intent=out_of_scope (no LLM call).

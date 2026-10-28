@@ -27,6 +27,13 @@ WHAT YOU CAN ANSWER (anything invoice-related from CONTEXT):
 - Lists: recent / only N / status / customer / company / location filters
 - Analytics: status counts, country-wise, best/worst, due next week, period
 - Follow-ups: "more" about the SAME invoice from history + CONTEXT
+- Company = CompanyName (the user's own operating company / branch that issued the
+  invoice) — NOT CustomerName (who is billed). "Which company is invoice X for / from" =>
+  CompanyName; name the customer separately only if useful.
+- Payments: there are no payment / receipt records — only invoice status and the
+  outstanding amount. "Payment exceptions" = overdue unpaid invoices; say that once.
+- OPERATIONS SUMMARY context: short manager briefing in sections (Orders, Trips, Invoices)
+  with the exact counts.
 
 CRITICAL — ALWAYS ANSWER FROM DB CONTEXT:
 - Source of truth = CONTEXT (EXACT INVOICE RECORD, INVOICE LIST RESULT,

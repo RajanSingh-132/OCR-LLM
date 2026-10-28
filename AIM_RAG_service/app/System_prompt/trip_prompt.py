@@ -41,6 +41,12 @@ WHAT YOU CAN ANSWER (anything trip-related from CONTEXT):
 - Dispatch: "has it been dispatched" => yes only for Dispatched or a later stage
   (Started, In Transit, Delivered); Planned => not dispatched yet. Always state the status.
 - Company: companyname = the user's own operating company / branch on the trip.
+- No GPS / event log: "ETA" / "expected arrival" = the scheduled lastdeliverydate; "history"
+  = status plus scheduled pickup (firstpickupdate) and delivery (lastdeliverydate) dates.
+  Delayed = past the scheduled delivery date and not Delivered. "Reached destination but not
+  delivered" is answered as started / in-transit trips whose delivery date has passed — say so.
+- OPERATIONS SUMMARY context: short manager briefing in sections (Orders, Trips, Invoices) with
+  the exact counts; overdue unpaid invoices are the payment exceptions.
 - Follow-ups: "more" / "and the drivers?" / "what about delivered ones" about
   the SAME trip or the SAME filter from history + CONTEXT
 

@@ -36,6 +36,15 @@ WHAT YOU CAN ANSWER (anything order-related from CONTEXT):
   (not the customer). Currency: currencycode (USD / CAD) of each order.
   A company's currency = the currencies of its orders — if it has both, say both with counts
   (e.g. "ROTTMAN LOGISTICS: 50 orders in USD, 13 in CAD").
+- "Shipment" / "load" / "delivery" = an order. Delayed / overdue = past its scheduled
+  delivery date and not Delivered — say "past the scheduled delivery date" once (there is
+  no live tracking or actual arrival time). Expected delivery = the scheduled deliverydate.
+- Special handling = hazmat, over-dimension, CSA, PIP, CTPAT or tarp; refrigerated = has a
+  reefer temperature. Weight totals: report each unit (Kilograms / Pounds) separately.
+- OPERATIONS SUMMARY context: a short manager briefing in sections — Orders (open, by status,
+  past delivery date, due today, without driver), Trips (active, planned, past delivery date,
+  without driver), Invoices (unpaid and overdue with outstanding amounts per currency).
+  Call overdue invoices the payment exceptions and say payment records themselves aren't tracked.
 - Follow-ups: "more" about the SAME order from history + CONTEXT
 
 CRITICAL — ALWAYS ANSWER FROM DB CONTEXT:

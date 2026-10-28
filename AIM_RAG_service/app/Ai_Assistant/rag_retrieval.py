@@ -306,6 +306,12 @@ def search_orders(
                 "drivernames": doc.get("drivernames"),
                 "trucknumbers": doc.get("trucknumbers"),
                 "tripnumbers": doc.get("tripnumbers"),
+                "weight": doc.get("weight"),
+                "weightunit": doc.get("weightunit"),
+                "reefertemp": doc.get("reefertemp"),
+                "hazmat": doc.get("hazmat"),
+                "overdimension": doc.get("overdimension"),
+                "podcount": doc.get("podcount"),
             }
         )
     checkpoint(
@@ -332,6 +338,9 @@ def format_order_list_for_context(payload: Dict[str, Any]) -> str:
     lines = [
         "ORDER LIST RESULT (exact Mongo filters — do not invent rows):",
         f"filters={payload.get('filters')}",
+        "Every row below ALREADY matches all filters — total_matching is the answer count "
+        "(date_lt = before, date_lte = on/before, date_gt = after, date_gte = on/after, "
+        "nin = not one of, in = one of).",
         f"total_matching={payload.get('total_matching')}",
         f"returned={payload.get('returned')}",
     ]
@@ -358,8 +367,19 @@ def format_order_list_for_context(payload: Dict[str, Any]) -> str:
             f"pickup_loc={row.get('pickuplocationname')} "
             f"delivery_loc={row.get('deliverylocationname')} "
             f"company={row.get('companyname')} drivers={row.get('drivernames')} "
-            f"truck={row.get('trucknumbers')} trip={row.get('tripnumbers')}"
+            f"truck={row.get('trucknumbers')} trip={row.get('tripnumbers')} "
+            # Dates are what delay / overdue / "due soon" answers are judged on.
+            f"pickup_date={row.get('pickupdate')} delivery_date={row.get('deliverydate')}"
         )
+        # Cargo attributes only when set — keeps the common row short.
+        if row.get("weight"):
+            line += f" weight={row.get('weight')} {row.get('weightunit') or ''}".rstrip()
+        if str(row.get("reefertemp") or "").strip():
+            line += f" reefer_temp={row.get('reefertemp')}"
+        if row.get("hazmat") is True:
+            line += " hazmat=yes"
+        if row.get("overdimension") is True:
+            line += " over_dimension=yes"
         if show_geo:
             line += (
                 f" | pickup_address={row.get('pickupfulladdress')} "
@@ -515,6 +535,13 @@ _ORDER_DETAIL_PRIORITY = [
     "deliveryfulladdress",
     "deliverydate",
     "commodityname",
+    "hazmat",
+    "overdimension",
+    "reefertemp",
+    "reefertempunit",
+    "quantity",
+    "podcount",
+    "bolcount",
     "ordernotes",
     "allcarriersname",
 ]

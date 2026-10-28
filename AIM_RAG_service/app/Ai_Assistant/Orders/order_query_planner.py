@@ -71,7 +71,7 @@ MAX_FILTERS = 14
 _TASKS = frozenset(
     {
         "lookup", "list", "aggregate", "compare", "percentage",
-        "conversation", "greeting", "unsupported", "not_in_data",
+        "conversation", "greeting", "unsupported", "not_in_data", "ops_summary",
     }
 )
 
@@ -120,6 +120,16 @@ _VIRTUAL_GEO = frozenset(
 
 _DATE_FIELD_RE = re.compile(r"date$", re.I)
 
+# Virtual filter "special_handling": an order needing ANY of these (the
+# filter DSL only ANDs, so the OR lives here). Tarp is only recorded in the
+# per-item compliance list.
+_SPECIAL_HANDLING_FLAGS = ("hazmat", "overdimension", "csa", "pip", "ctpat")
+_TARP_CLAUSE = {
+    "compliancedetails.orderItems.complianceArray": {
+        "$elemMatch": {"complianceName": "Tarp", "value": True}
+    }
+}
+
 # Comma-joined driver text fields -> the per-driver array field to group on.
 _PER_DRIVER_FIELD = {
     "drivernames": "driverarray.driverName",
@@ -152,6 +162,7 @@ class QueryPlan:
             "compare": "compare" if self.record_tokens else "analytics",
             "percentage": "analytics",
             "not_in_data": "not_in_data",
+            "ops_summary": "analytics",
         }.get(self.task, "open_qa")
         max_tokens = {"short": 150, "medium": 500, "detailed": 1200}.get(
             self.response_style, 500
@@ -202,7 +213,7 @@ Conversation so far:
 
 PLAN SHAPE (include only the keys the task needs):
 {{
-  "task": "lookup" | "list" | "aggregate" | "compare" | "percentage" | "conversation" | "greeting" | "unsupported" | "not_in_data",
+  "task": "lookup" | "list" | "aggregate" | "compare" | "percentage" | "conversation" | "greeting" | "unsupported" | "not_in_data" | "ops_summary",
   "record_tokens": ["MRP12345", ...],
   "filters": [ {{"field": "<field>", "op": "<op>", "value": <scalar|list>}} ],
   "aggregate": {{
@@ -234,7 +245,9 @@ TASKS
                 filters = the population; numerator = the extra condition.
 - conversation: needs document text ("why delayed") - leave the rest empty.
 - not_in_data: a business question whose answer is NOT stored in the order data at all
-  (see "NOT stored" below) - leave the rest empty.
+  (see "NOT stored" below) - leave the rest empty. If only PART is missing (e.g. "delayed orders and
+  their delay reasons"), plan the part that exists instead.
+- ops_summary: cross-domain manager overview (see "ops_summary" below).
 - greeting / unsupported (the data exists but the question can't be expressed as a plan).
 
 FILTER OPS
@@ -252,10 +265,39 @@ Date ops work on ANY field tagged date(...) in the schema above. Pick the one th
 A month name like "August" with no year -> date_range for that whole month in the current year.
 
 VOCAB (map the user's word to the real field/value)
-- status words: pending = orderstatus in ["Quoted","Confirmed","Dispatched","Started","In-Transit","Partially Delivered"]
-  (use op "nin" value ["Delivered","Cancelled","Rejected"]); "in transit" = orderstatus eq "In-Transit";
+- "shipment" / "load" / "consignment" / "cargo" / "delivery" / "job" all mean an ORDER here.
+- status words: pending / open / active = orderstatus op "nin" value ["Delivered","Cancelled","Rejected"];
+  "in transit" = orderstatus in ["In-Transit","In Transit"];
   delivered / cancelled / confirmed / quoted / dispatched = orderstatus eq that exact word.
-  "delayed" / "late" = deliverydate date_lt Today AND orderstatus ne "Delivered".
+  "awaiting pickup" = orderstatus in ["Quoted","Confirmed","Dispatched"]; "awaiting pickup / in transit /
+  awaiting unloading" breakdown -> aggregate group_by ["orderstatus"] with the open filter.
+- DELAYS (scheduled date in the past, not finished — there is no actual-arrival timestamp):
+  "delayed" / "late" / "overdue" / "behind schedule" / "running late" / "missed delivery date" =
+  TWO filters: deliverydate date_lt <today> AND orderstatus nin ["Delivered","Cancelled","Rejected"].
+  "delayed more than 48 hours / 2 days" -> deliverydate date_lt <today minus 2 days> (+ the status filter).
+  "at risk of missing the deadline" / "due soon" -> deliverydate date_range [<today>, <today+2 days>]
+  + the status filter. "most delayed customers / routes / drivers" -> the delay filters +
+  group_by ["customername"] / ["pickuplocationname","deliverylocationname"] / ["driverarray.driverName"],
+  metrics [count], sort desc. "which driver is on each delayed shipment" -> task list with the delay filters
+  (rows show drivers). "latest tracking status / expected delivery date of order X" -> lookup.
+- SPECIAL CARGO: "special handling" / "special-handling cargo" / "requires special handling" ->
+  {{"field":"special_handling","op":"eq","value":true}} (virtual: hazmat OR over-dimension OR CSA OR PIP
+  OR CTPAT OR tarp). "hazardous" / "hazmat" / "dangerous goods" -> hazmat eq true; "oversize" /
+  "over-dimension" -> overdimension eq true; csa / pip / ctpat eq true for those programs.
+  "refrigerated" / "reefer" / "temperature-controlled" / "temperature-sensitive" / "cold chain" ->
+  reefertemp exists true. Combine with "or" questions ("hazardous or special handling") -> special_handling.
+- WEIGHT / QUANTITY / CARGO TYPE: weight -> weight, quantity -> quantity, packages -> quantity,
+  cargo type / goods -> commodityname. Units are mixed (Kilograms / Pounds) — for a total ALWAYS
+  group_by ["weightunit"] ("total weight of today's orders" -> metric sum weight, group_by ["weightunit"],
+  orderdate period today). "shipments by cargo type, weight and quantity" -> group_by ["commodityname"],
+  metrics [count, sum weight, sum quantity].
+- DOCUMENTS: "no proof of delivery" / "POD missing" / "missing delivery confirmation" -> podcount eq 0;
+  "no bill of lading" / "BOL missing" -> bolcount eq 0; "incomplete shipping documents" -> podcount eq 0
+  (+ bolcount eq 0 if they say all documents). Add orderstatus filters when they say delivered/dispatched.
+- INVOICING (order side): "delivered shipments with outstanding invoices / unpaid" -> orderstatus eq
+  "Delivered" AND accountingstatus eq "Invoiced" (invoiced but not yet paid). "not invoiced yet" -> see accounting.
+- VOLUME: "this month's volume vs last month" -> compare segments on orderdate period this_month / last_month.
+- "no trip or driver assigned" -> drivercount eq 0.
 - accounting: "not invoiced" = accountingstatus in [null,"NotInvoiced"] OR accountingtypebreakdown.notInvoiced gt 0
   (prefer: field "accountingstatus" op "in" value [null]); invoiced / paid = accountingstatus eq that.
 - flags: "active" = isactive eq true; "archived" = isarchived eq true; "FTL" = loadtypelucode eq "FTL"; "LTL" = "LTL".
@@ -281,8 +323,14 @@ VOCAB (map the user's word to the real field/value)
   "company name and currency for all companies" -> task aggregate, group_by ["companyname","currencycode"],
   metrics [count] (+ companyname filter when one company is named). "USD vs CAD companies" ->
   compare segments on currencycode.
-- NOT stored -> task "not_in_data": payroll, a company's operational status / settings, and
-  companies or drivers with NO orders (only those that appear on orders exist in the data).
+- NOT stored -> task "not_in_data": payroll, payments / receipts / payment history, a company's
+  operational status / settings, companies or drivers with NO orders, live GPS / last reported
+  location, delivery exceptions / incidents / damage / claims / missing-cargo reports, delay or
+  failure REASONS / causes, delivery attempts, weight discrepancies, driver credentials / licence
+  expiry, check-in / check-out events, on-time delivery rate (no actual delivery timestamps).
+- ops_summary: a manager overview across orders + trips + invoices together ("summary of today's
+  operations / cargo operations", "daily status report", "how are things today", "pending orders,
+  active trips, delayed deliveries and payment exceptions") -> {{"task":"ops_summary"}} only.
 - other: client/buyer -> customername; carrier -> carriernames (outsourced carrier -> outcarriername);
   trip -> tripnumbers; miles/km -> distance;
   PO -> pono; reference -> referno; salesman/agent -> salesmanname; commodity/product -> commodityname;
@@ -292,7 +340,7 @@ VOCAB (map the user's word to the real field/value)
   ("from X" -> pickup side, "to / going to X" -> delivery side). "Canadian" -> country eq "Canada".
 
 RULES
-- Use ONLY fields shown above (dotted nested allowed) or the geo virtual fields. Never invent one.
+- Use ONLY fields shown above (dotted nested allowed), the geo virtual fields, or special_handling. Never invent one.
 - Numeric fn/ops only on numeric fields. group_by only on groupable fields (max 2).
 - date_bucket: for "daily / weekly / monthly" series. operation stays "group"; group_by may be [] (pure time series)
   or hold ONE other field. "field" may be any field tagged date(...) above.
@@ -354,6 +402,8 @@ def _valid_filter(f: Any, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     value = f.get("value")
     if not isinstance(name, str) or op not in _ALL_OPS:
         return None
+    if name == "special_handling":
+        return {"field": name, "op": "eq", "value": value not in (False, "false", 0)}
 
     # Fuzzy / alias resolution for misspelled or business-term field names
     if name not in _VIRTUAL_GEO and name not in schema.get("fields", {}):
@@ -752,6 +802,10 @@ def _build_match(
     for f in filters:
         name, op, value = f["field"], f["op"], f.get("value")
         if name in _VIRTUAL_GEO:
+            continue
+        if name == "special_handling":
+            ors = [{flag: True} for flag in _SPECIAL_HANDLING_FLAGS] + [_TARP_CLAUSE]
+            and_parts.append({"$or": ors} if value else {"$nor": ors})
             continue
         kind = _field_kind(name, schema)
         if kind is None:

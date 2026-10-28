@@ -76,7 +76,7 @@ MAX_FILTERS = 14
 _TASKS = frozenset(
     {
         "lookup", "list", "aggregate", "compare", "percentage",
-        "conversation", "greeting", "unsupported", "not_in_data",
+        "conversation", "greeting", "unsupported", "not_in_data", "ops_summary",
     }
 )
 
@@ -149,6 +149,7 @@ class TripQueryPlan:
             "compare": "compare" if self.record_tokens else "analytics",
             "percentage": "analytics",
             "not_in_data": "not_in_data",
+            "ops_summary": "analytics",
         }.get(self.task, "open_qa")
         max_tokens = {"short": 150, "medium": 500, "detailed": 1200}.get(
             self.response_style, 500
@@ -198,7 +199,7 @@ Conversation so far:
 
 PLAN SHAPE (include only the keys the task needs):
 {{
-  "task": "lookup" | "list" | "aggregate" | "compare" | "percentage" | "conversation" | "greeting" | "unsupported" | "not_in_data",
+  "task": "lookup" | "list" | "aggregate" | "compare" | "percentage" | "conversation" | "greeting" | "unsupported" | "not_in_data" | "ops_summary",
   "record_tokens": ["ETP4455", ...],
   "filters": [ {{"field": "<field>", "op": "<op>", "value": <scalar|list>}} ],
   "aggregate": {{
@@ -239,7 +240,10 @@ TASKS
                "which trip has the highest offered amount" -> task list sort by totalofferedamount desc limit 1.
 - percentage : "what % of trips ..." -> numerator (the subset) + pct_of ("trips" or a numeric field).
 - not_in_data: a business question whose answer is NOT stored in the trip data at all
-  (see "NOT in trip data" below) - leave the rest empty.
+  (see "NOT in trip data" below) - leave the rest empty. If only PART is missing, plan the part that exists.
+- ops_summary: a manager overview across orders + trips + invoices together ("summary of today's
+  operations", "daily status report", "pending orders, active trips, delayed deliveries and payment
+  exceptions") -> {{"task":"ops_summary"}} only.
 - conversation / greeting / unsupported (the data exists but can't be expressed as a plan).
 
 FILTER OPS
@@ -295,9 +299,30 @@ VOCAB (map the user's word to the real field/value)
   distinct_count is an OPERATION — never put it inside metrics.
 - "assignment history of driver X" -> task list, driver filter, sort createdon desc.
 - "driver assignment count by X" -> group_by [X] + firstdrivername exists true (trips that have a driver).
+- "shipment" / "load" / "delivery" / "vehicle" questions asked here mean trips; vehicle -> trucknumber.
+- MOVEMENT (no GPS or event log — only status + scheduled dates exist):
+  "not departed / not left pickup / still at pickup / not started" -> tripstatus in ["Planned","Dispatched"].
+  "reached destination but not marked delivered" (closest proxy) -> tripstatus in ["Started","In-Transit",
+  "In Transit"] AND lastdeliverydate date_lte <today>.
+  "ETA" / "estimated / expected arrival" / "when will it arrive" -> lookup (lastdeliverydate is the
+  scheduled delivery). "pickup / transit / delivery history of trip X" -> lookup (status + scheduled dates).
+- DELAYS: "delayed" / "late" / "overdue" / "behind schedule" / "at risk" past due = lastdeliverydate
+  date_lt <today> AND tripstatus nin ["Delivered","Rejected","Cancelled"]. "> 48 hours late" ->
+  lastdeliverydate date_lt <today minus 2 days>. "drivers with the most delayed deliveries" -> those
+  filters + group_by ["firstdrivername"], metrics [count], sort desc.
+- DRIVER WORKLOAD: "pending deliveries per driver" / "drivers with pending deliveries" -> tripstatus nin
+  ["Delivered","Rejected","Cancelled"] + group_by ["firstdrivername"]. "deliveries per driver this week"
+  -> tripstatus eq "Delivered" + lastdeliverydate period this_week + group_by ["firstdrivername"].
+  "driver and vehicle details for each shipment" -> task list (rows carry drivers, truck, trailer).
+- CARGO: reefer / refrigerated / temperature-controlled -> reefertemp exists true; weight -> totalweight;
+  quantity -> totalquantity. Hazmat / special-handling flags are on ORDERS, not trips -> task "not_in_data".
+- DOCUMENTS: "no documents / missing POD or BOL" -> documentcount eq 0.
 - NOT in trip data -> task "not_in_data": currency (trips have no currency field), payroll,
   a company's own settings / operational status, drivers who have NO trips (only drivers that
-  appear on trips are stored).
+  appear on trips are stored), live GPS / last reported location, check-in / check-out events,
+  driver credentials / licence expiry, incidents / exceptions / damage reports, delivery attempts,
+  delay or failure REASONS, on-time delivery rate / on-time performance / punctuality of drivers
+  (no actual arrival timestamps — "compare on-time delivery performance of drivers" is not_in_data).
 - customer / client -> customername (comma-joined — use contains). company / branch -> companyname
   ("belongs to Avaal Group" -> companyname eq "Avaal Group"). carrier -> carriername.
 - linked docs: order number (MRP...) -> ordernumber (contains); order id (digits) -> orderids (contains).

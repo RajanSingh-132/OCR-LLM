@@ -159,6 +159,9 @@ DOMAINS: Dict[str, DomainProfile] = {
             "totalloaddistance",
             "triptotaldistance",
             "distanceunit",
+            "totalweight",
+            "reefertemp",
+            "documentcount",
         ),
     ),
 }
