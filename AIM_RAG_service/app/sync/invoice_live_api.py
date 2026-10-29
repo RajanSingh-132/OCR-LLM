@@ -106,8 +106,8 @@ API_BASE = os.getenv("AFM_API_BASE_URL")
 LISTINVOICE_PATH = "/api/Invoice/getinvoicelistdata"
 API_VERSION = "1.0"
 # Only these tenants are synced — sent as the `corporateid` header.
-# CORPORATE_IDS: List[str] = ["AFMDEMO", "AFN01709", "AFN01800", "AFN01807", "AFN01808", "AFN01809", "AFN01812", "AFN01813", "AFN01817", "AFN01818", "AFN01823"]
-CORPORATE_IDS: List[str] = ["AFMQA", "AFMDEMO", "AFN01800"]
+CORPORATE_IDS: List[str] = ["AFMDEMO", "AFN01709", "AFN01800", "AFN01807", "AFN01808", "AFN01809", "AFN01812", "AFN01813", "AFN01817", "AFN01818", "AFN01823"]
+# CORPORATE_IDS: List[str] = ["AFMQA", "AFMDEMO", "AFN01800"]
 EXTRA_HEADERS: Dict[str, str] = {}
 
 BASE_FILTER: Dict[str, Any] = {
