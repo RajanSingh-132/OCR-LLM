@@ -138,6 +138,7 @@ DOMAINS: Dict[str, DomainProfile] = {
             "tripid",
             "tripnumber",
             "tripstatus",
+            "settlementsummary",
             "triptype",
             "firstdrivername",
             "firstdriverphone",

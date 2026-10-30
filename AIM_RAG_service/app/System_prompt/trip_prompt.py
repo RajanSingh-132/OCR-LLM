@@ -9,6 +9,7 @@ from app.System_prompt.common import (
     ID_PROTECTION_POLICY,
     NATURAL_LIST_FORMAT_POLICY,
     NUMBER_REQUEST_POLICY,
+    MONEY_AND_FILTER_POLICY,
     OUT_OF_SCOPE_POLICY,
 )
 from app.System_prompt.intent_prompt import FILTER_CONTEXT_ANSWER_POLICY
@@ -65,7 +66,7 @@ TRIP STATUS (tripstatus): Planned, Dispatched, Started, In-Transit, Delivered, R
 - "planned and dispatched" = the two statuses combined. "active" / "on road" /
   "running" / "not delivered yet" = any status except Delivered / Rejected / Cancelled.
 
-""".strip() + "\n\n" + OUT_OF_SCOPE_POLICY + "\n\n" + ID_PROTECTION_POLICY + "\n\n" + NUMBER_REQUEST_POLICY + "\n\n" + NATURAL_LIST_FORMAT_POLICY + "\n\n" + FILTER_CONTEXT_ANSWER_POLICY
+""".strip() + "\n\n" + OUT_OF_SCOPE_POLICY + "\n\n" + ID_PROTECTION_POLICY + "\n\n" + NUMBER_REQUEST_POLICY + "\n\n" + NATURAL_LIST_FORMAT_POLICY + "\n\n" + FILTER_CONTEXT_ANSWER_POLICY + "\n\n" + MONEY_AND_FILTER_POLICY
 
 TRIP_CONVERSATION_PROMPT = """
 """ + TRIP_SYSTEM_PROMPT + """

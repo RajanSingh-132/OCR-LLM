@@ -9,6 +9,7 @@ from app.System_prompt.common import (
     ID_PROTECTION_POLICY,
     NATURAL_LIST_FORMAT_POLICY,
     NUMBER_REQUEST_POLICY,
+    MONEY_AND_FILTER_POLICY,
     OUT_OF_SCOPE_POLICY,
 )
 from app.System_prompt.intent_prompt import FILTER_CONTEXT_ANSWER_POLICY
@@ -46,7 +47,7 @@ CRITICAL — ALWAYS ANSWER FROM DB CONTEXT:
 INVOICE STATUS: Paid, Open, PartiallyPaid, BadDebt, OverDue
 (Do NOT suggest order statuses like Quoted/Confirmed/Dispatched.)
 
-""".strip() + "\n\n" + OUT_OF_SCOPE_POLICY + "\n\n" + ID_PROTECTION_POLICY + "\n\n" + NUMBER_REQUEST_POLICY + "\n\n" + NATURAL_LIST_FORMAT_POLICY + "\n\n" + FILTER_CONTEXT_ANSWER_POLICY
+""".strip() + "\n\n" + OUT_OF_SCOPE_POLICY + "\n\n" + ID_PROTECTION_POLICY + "\n\n" + NUMBER_REQUEST_POLICY + "\n\n" + NATURAL_LIST_FORMAT_POLICY + "\n\n" + FILTER_CONTEXT_ANSWER_POLICY + "\n\n" + MONEY_AND_FILTER_POLICY
 
 INVOICE_CONVERSATION_PROMPT = """
 """ + INVOICE_SYSTEM_PROMPT + """

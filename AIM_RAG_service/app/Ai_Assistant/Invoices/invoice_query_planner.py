@@ -38,6 +38,15 @@ from langchain_core.prompts import PromptTemplate
 
 from app.embedding_client import get_planner_llm, get_xai_llm
 from app.Ai_Assistant.config import checkpoint
+from app.Ai_Assistant.guards import (
+    PERIOD_NAMES,
+    apply_period_guard,
+    currency_totals,
+    currency_totals_context,
+    period_bounds,
+    period_guard_context,
+    split_spec_by_currency,
+)
 from app.Ai_Assistant.Orders.order_dynamic_analytics import (
     AGG_TIMEOUT_MS,
     _build_pipeline,
@@ -85,12 +94,16 @@ _DATE_OPS = frozenset(
 )
 _ALL_OPS = _STRING_OPS | _NUMERIC_OPS | _DATE_OPS
 
-_PERIODS = frozenset(
-    {
-        "today", "yesterday", "this_week", "last_week",
-        "this_month", "last_month", "this_year", "last_year",
-    }
-)
+_PERIODS = PERIOD_NAMES
+
+# Money columns — a sum/avg over these is always split by CurrencyCode so CAD
+# and USD are never added together.
+_MONEY_FIELD_RE = re.compile(r"amount|charge|freight|tax|discount|surcharge", re.I)
+_CURRENCY_FIELD = "CurrencyCode"
+
+
+def _is_money_field(name: str) -> bool:
+    return bool(_MONEY_FIELD_RE.search(name or "")) and "exchangerate" not in name.lower()
 
 # Virtual fields resolved through address-string regex (not real Mongo fields).
 _VIRTUAL_GEO = frozenset(
@@ -122,6 +135,8 @@ class InvoiceQueryPlan:
     numerator: List[Dict[str, Any]] = dc_field(default_factory=list)
     pct_of: str = "invoices"
     metric: Optional[Dict[str, Any]] = None
+    # Period-guard notes passed to the answer model as ground truth.
+    notes: List[str] = dc_field(default_factory=list)
 
     def to_intent_info(self) -> Dict[str, Any]:
         intent = {
@@ -229,7 +244,7 @@ FILTER OPS
   gt, gte, lt, lte          numeric only      exists                  value true/false
   date_gte/date_lte/date_gt/date_lt/date_eq   date field, value "YYYY-MM-DD"
   date_range                date field, value ["YYYY-MM-DD","YYYY-MM-DD"] (inclusive) — "between Feb 1 and Feb 15"
-  period                    date field, value: today, yesterday, this_week, last_week, this_month, last_month, this_year, last_year
+  period                    date field, value: today, yesterday, this_week, last_week, this_month, last_month, this_quarter, last_quarter, this_year, last_year
   last_days                 date field, value integer N — "last 7 days", "past 30 days"
 Date fields: "created ..." -> "createdon"; "invoice date / billed ..." -> "InvoiceDate";
 "due ..." -> "DueDate". A month name like "August" with no year -> date_range for that
@@ -558,6 +573,12 @@ def run_invoice_query_planner(
     )
     if plan is None or plan.task in ("greeting", "conversation", "unsupported"):
         return None
+    if plan.task in ("list", "aggregate", "percentage", "compare") and not plan.record_tokens:
+        plan.filters, plan.notes = apply_period_guard(
+            q, plan.filters, plan.segments, "InvoiceDate"
+        )
+        if plan.notes:
+            checkpoint("INV_PLANNER", "period guard", notes=plan.notes)
     return plan
 
 
@@ -568,30 +589,8 @@ def _month_add(d: date, n: int) -> date:
 
 
 def _period_bounds(name: str) -> Optional[tuple]:
-    today = datetime.now(timezone.utc).date()
-    if name == "today":
-        s, e = today, today + timedelta(days=1)
-    elif name == "yesterday":
-        s, e = today - timedelta(days=1), today
-    elif name == "this_week":
-        s = today - timedelta(days=today.weekday())
-        e = s + timedelta(days=7)
-    elif name == "last_week":
-        e = today - timedelta(days=today.weekday())
-        s = e - timedelta(days=7)
-    elif name == "this_month":
-        s = today.replace(day=1)
-        e = _month_add(s, 1)
-    elif name == "last_month":
-        e = today.replace(day=1)
-        s = _month_add(e, -1)
-    elif name == "this_year":
-        s, e = date(today.year, 1, 1), date(today.year + 1, 1, 1)
-    elif name == "last_year":
-        s, e = date(today.year - 1, 1, 1), date(today.year, 1, 1)
-    else:
-        return None
-    return s.isoformat(), e.isoformat()
+    """(start_inclusive, end_exclusive) ISO dates — shared with the trip planner."""
+    return period_bounds(name)
 
 
 def _plus_one_day(iso: str) -> str:
@@ -875,6 +874,19 @@ def _list_invoices(plan: InvoiceQueryPlan, schema: Dict[str, Any]) -> Dict[str, 
     total = collection.count_documents(match)
     rows = list(collection.aggregate(pipeline, maxTimeMS=AGG_TIMEOUT_MS))
     records = [{k: r.get(k) for k in _LIST_FIELDS if r.get(k) not in (None, "")} for r in rows]
+    # Grand totals over ALL matching invoices, one per currency — the answer
+    # quotes these instead of adding up rows (and never mixes CAD with USD).
+    totals = currency_totals(
+        collection,
+        match,
+        {"metrics": [
+            {"fn": "sum", "field": "TotalAmount", "key": "sum_totalamount"},
+            {"fn": "sum", "field": "outstandinamount", "key": "sum_outstandinamount"},
+        ]},
+        _CURRENCY_FIELD,
+        _numeric_expr,
+        AGG_TIMEOUT_MS,
+    )
 
     checkpoint(
         "INV_PLANNER", "list executed", total=total, returned=len(records)
@@ -887,6 +899,7 @@ def _list_invoices(plan: InvoiceQueryPlan, schema: Dict[str, Any]) -> Dict[str, 
         "total_matching": total,
         "returned": len(records),
         "records": records,
+        "totals_by_currency": totals,
     }
 
 
@@ -908,6 +921,27 @@ def _metric_value(match: Dict[str, Any], metric: Dict[str, Any]) -> float:
         )
     )
     return float(rows[0]["v"]) if rows and rows[0].get("v") is not None else 0.0
+
+
+def _metric_by_currency(match: Dict[str, Any], metric: Dict[str, Any]) -> Dict[str, float]:
+    """A money metric per currency — {"CAD": 123.0, "USD": 45.0}."""
+    rows = get_domain_collection("invoices").aggregate(
+        [
+            {"$match": match},
+            {
+                "$group": {
+                    "_id": f"${_CURRENCY_FIELD}",
+                    "v": {f"${metric['fn']}": _numeric_expr(metric["field"])},
+                }
+            },
+        ],
+        maxTimeMS=AGG_TIMEOUT_MS,
+    )
+    return {
+        str(r["_id"] or "UNKNOWN"): round(float(r["v"]), 4)
+        for r in rows
+        if r.get("v") is not None
+    }
 
 
 def _metric_label(metric: Dict[str, Any]) -> str:
@@ -971,12 +1005,19 @@ def execute_invoice_query_plan(
     elif plan.task == "compare" and plan.segments:
         metric = plan.metric or {"fn": "count", "field": None}
         label = _metric_label(metric)
+        money = bool(metric.get("field")) and _is_money_field(metric["field"])
         seg_rows = []
         for seg in plan.segments:
             m = _build_invoice_match(plan.filters + seg["filters"], schema)
-            seg_rows.append(
-                {"segment": seg["label"], label: round(_metric_value(m, metric), 4)}
-            )
+            if money:
+                # never add CAD and USD — one value per currency
+                seg_rows.append(
+                    {"segment": seg["label"], f"{label}_by_currency": _metric_by_currency(m, metric)}
+                )
+            else:
+                seg_rows.append(
+                    {"segment": seg["label"], label: round(_metric_value(m, metric), 4)}
+                )
         analytics_payload = {
             "analytics_type": "dynamic",
             "engine": "invoice_dynamic_planner",
@@ -1037,6 +1078,7 @@ def execute_invoice_query_plan(
 
     elif plan.task == "aggregate" and plan.aggregate is not None:
         match = _build_invoice_match(plan.filters, schema)
+        split = split_spec_by_currency(plan.aggregate, _CURRENCY_FIELD, _is_money_field)
         pipeline = _build_pipeline(plan.aggregate, match)
         rows = list(
             get_domain_collection("invoices").aggregate(
@@ -1049,6 +1091,13 @@ def execute_invoice_query_plan(
         context_blocks.append(
             format_invoice_dynamic_analytics_for_context(analytics_payload)
         )
+        if split:
+            totals = currency_totals(
+                get_domain_collection("invoices"), match, plan.aggregate,
+                _CURRENCY_FIELD, _numeric_expr, AGG_TIMEOUT_MS,
+            )
+            analytics_payload["totals_by_currency"] = totals
+            context_blocks.append(currency_totals_context(totals, "invoices"))
         checkpoint(
             "INV_PLANNER",
             "aggregate executed",
@@ -1060,6 +1109,9 @@ def execute_invoice_query_plan(
     else:  # list (default)
         list_payload = _list_invoices(plan, schema)
         context_blocks.append(format_record_list_for_context(list_payload))
+        context_blocks.append(
+            currency_totals_context(list_payload.get("totals_by_currency") or [], "invoices")
+        )
         for row in list_payload.get("records") or []:
             matches.append(
                 {
@@ -1069,6 +1121,10 @@ def execute_invoice_query_plan(
                 }
             )
         tools_run.append("search_records")
+
+    notes_block = period_guard_context(plan.notes)
+    if notes_block:
+        context_blocks.append(notes_block)
 
     return {
         "context_blocks": context_blocks,

@@ -235,6 +235,14 @@ def _pick_domain(question: str, payload_domain: str) -> str:
     trips, "which currency does X use" -> orders), else the payload domain.
     """
     question_domain, _reason, scores = detect_domain_local(question)
+    from app.Ai_Assistant.Orders.profitability import is_profitability_or_lane_question
+
+    if is_profitability_or_lane_question(question) and max(
+        scores.get("trips", 0.0), scores.get("invoices", 0.0)
+    ) < STRONG_DOMAIN_SCORE:
+        # Profit / margin / lane questions are computed from order revenue and
+        # carrier cost — only the orders domain holds both.
+        return "orders"
     if max(scores.values(), default=0.0) < STRONG_DOMAIN_SCORE:
         for hint_domains, pattern in ROUTING_HINTS:
             if re.search(pattern, question or "", re.I):
@@ -434,11 +442,41 @@ def _answer_order_question_gen(
             except Exception as exc:
                 logger.warning("Fast-path count check failed: %s", exc, exc_info=True)
                 precomputed_tool_result = None
+            if precomputed_tool_result is None and domain == "orders":
+                # Profit / margin / lane questions — deterministic engine,
+                # no planner LLM call.
+                from app.Ai_Assistant.Orders.profitability import (
+                    format_profitability_for_context,
+                    is_profitability_or_lane_question,
+                    profitability,
+                )
+
+                if is_profitability_or_lane_question(effective_question):
+                    try:
+                        payload = profitability(effective_question)
+                        precomputed_tool_result = {
+                            "context_blocks": [format_profitability_for_context(payload)],
+                            "matches": [],
+                            "calculation": None,
+                            "analytics": payload,
+                            "list_result": None,
+                            "tools_run": ["run_analytics"],
+                            "active_order_token": "",
+                            "domain": "orders",
+                        }
+                    except Exception as exc:
+                        logger.warning("Profitability engine failed: %s", exc, exc_info=True)
+                        precomputed_tool_result = None
             if precomputed_tool_result is not None:
                 fast_path_hit = True
                 intent = "analytics"
                 style = "short"
                 max_tokens = 150
+                if (precomputed_tool_result.get("analytics") or {}).get(
+                    "analytics_type"
+                ) == "profitability":
+                    style = "medium"
+                    max_tokens = 900
                 retrieve_k = 0
                 entities = {"analytics": "dynamic"}
                 # Defensive: nothing downstream should read this for the
@@ -898,6 +936,24 @@ def _answer_order_question_gen(
         )}
 
 
+def _keep_in_asked_chat(response: Dict[str, Any], collection: Optional[str]) -> Dict[str, Any]:
+    """The answer belongs to the chat the question was typed in.
+
+    `related` is set to the payload collection (the client shows the answer in
+    that chat); `answered_from` says which collection the data actually came
+    from (e.g. a trucks question asked in the Orders chat is answered from
+    trips but stays in the Orders chat).
+    """
+    try:
+        asked_in = domain_to_collection(resolve_collection(collection or ""))
+    except ValueError:
+        return response
+    if response.get("related") is not None:
+        response["answered_from"] = response["related"]
+        response["related"] = asked_in
+    return response
+
+
 def answer_order_question(
     question: str,
     conversational: bool = True,
@@ -917,7 +973,7 @@ def answer_order_question(
         question, conversational, k, session_id, corporate_id, collection
     ):
         if event.get("type") == "final":
-            final_response = event["response"]
+            final_response = _keep_in_asked_chat(event["response"], collection)
     return final_response
 
 
@@ -940,6 +996,12 @@ def stream_order_question(
 
     Used by the SSE endpoint (POST /api/v1/orders/ask/stream).
     """
-    yield from _answer_order_question_gen(
+    for event in _answer_order_question_gen(
         question, conversational, k, session_id, corporate_id, collection
-    )
+    ):
+        if event.get("type") == "final":
+            event = {
+                **event,
+                "response": _keep_in_asked_chat(event["response"], collection),
+            }
+        yield event

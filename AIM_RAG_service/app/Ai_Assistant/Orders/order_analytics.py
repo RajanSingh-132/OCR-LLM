@@ -1831,7 +1831,10 @@ def run_analytics(
     # branches below (neither computes profit), since they also match on
     # "last month" / "customer" + a ranking word.
     if is_profitability_question(q) or entities.get("analytics") == "customer_profitability":
-        return customer_profitability(q, entities=entities)
+        # Revenue - carrier cost, per currency, period applied — see profitability.py
+        from app.Ai_Assistant.Orders.profitability import profitability
+
+        return profitability(q, entities=entities)
 
     side = entities.get("location_side") or detect_location_side(q)
 
@@ -2038,8 +2041,12 @@ def run_analytics(
 
 def format_analytics_for_context(payload: Dict[str, Any]) -> str:
     """Plain-text block for LLM — ground truth, do not invent."""
-    lines = ["ANALYTICS RESULT (exact engine — do not recalculate or invent):"]
     atype = payload.get("analytics_type")
+    if atype == "profitability":
+        from app.Ai_Assistant.Orders.profitability import format_profitability_for_context
+
+        return format_profitability_for_context(payload)
+    lines = ["ANALYTICS RESULT (exact engine — do not recalculate or invent):"]
     if payload.get("definition"):
         lines.append(f"Definition: {payload['definition']}")
     if payload.get("response_format"):

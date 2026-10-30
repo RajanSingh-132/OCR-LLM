@@ -37,6 +37,13 @@ from langchain_core.prompts import PromptTemplate
 
 from app.embedding_client import get_planner_llm, get_xai_llm
 from app.Ai_Assistant.config import checkpoint
+from app.Ai_Assistant.guards import PERIOD_NAMES, apply_period_guard, period_guard_context
+from app.Ai_Assistant.Trips.trip_productivity import (
+    DIMENSIONS as _PRODUCTIVITY_DIMENSIONS,
+    RANK_KEYS as _PRODUCTIVITY_RANK_KEYS,
+    fleet_productivity,
+    format_productivity_for_context,
+)
 from app.Ai_Assistant.Orders.order_dynamic_analytics import (
     AGG_TIMEOUT_MS,
     _build_pipeline,
@@ -75,10 +82,15 @@ MAX_FILTERS = 14
 
 _TASKS = frozenset(
     {
-        "lookup", "list", "aggregate", "compare", "percentage",
+        "lookup", "list", "aggregate", "compare", "percentage", "productivity",
         "conversation", "greeting", "unsupported", "not_in_data", "ops_summary",
     }
 )
+
+# Virtual filter: settlement not (fully) done. settlementstatus is "Paid" on
+# every trip (a system default), so the real signal is settlementcount /
+# settlementsummary ("settled/total", e.g. "0/1").
+_SETTLEMENT_PENDING = "settlement_pending"
 
 _STRING_OPS = frozenset({"eq", "ne", "in", "nin", "contains", "starts_with", "exists"})
 _NUMERIC_OPS = frozenset({"eq", "ne", "in", "nin", "gt", "gte", "lt", "lte", "exists"})
@@ -90,12 +102,7 @@ _DATE_OPS = frozenset(
 )
 _ALL_OPS = _STRING_OPS | _NUMERIC_OPS | _DATE_OPS
 
-_PERIODS = frozenset(
-    {
-        "today", "yesterday", "this_week", "last_week",
-        "this_month", "last_month", "this_year", "last_year",
-    }
-)
+_PERIODS = PERIOD_NAMES
 
 # Virtual geo fields — resolved to real Avaal_trip pickup/delivery fields
 # (not passed to Mongo verbatim).
@@ -140,12 +147,18 @@ class TripQueryPlan:
     numerator: List[Dict[str, Any]] = dc_field(default_factory=list)
     pct_of: str = "trips"
     metric: Optional[Dict[str, Any]] = None
+    # task=productivity
+    dimensions: List[str] = dc_field(default_factory=list)
+    rank_by: str = "completed_trips"
+    # Period-guard notes passed to the answer model as ground truth.
+    notes: List[str] = dc_field(default_factory=list)
 
     def to_intent_info(self) -> Dict[str, Any]:
         intent = {
             "lookup": "trip_lookup",
             "list": "list_filter",
             "aggregate": "analytics",
+            "productivity": "analytics",
             "compare": "compare" if self.record_tokens else "analytics",
             "percentage": "analytics",
             "not_in_data": "not_in_data",
@@ -154,7 +167,7 @@ class TripQueryPlan:
         max_tokens = {"short": 150, "medium": 500, "detailed": 1200}.get(
             self.response_style, 500
         )
-        if self.task == "list":
+        if self.task in ("list", "productivity"):
             max_tokens = max(max_tokens, 700)
         return {
             "intent": intent,
@@ -163,7 +176,7 @@ class TripQueryPlan:
             "retrieve_k": 0,
             "needs_exact_order": self.task == "lookup"
             or (self.task == "compare" and bool(self.record_tokens)),
-            "needs_analytics": self.task in ("aggregate", "percentage")
+            "needs_analytics": self.task in ("aggregate", "percentage", "productivity")
             or (self.task == "compare" and not self.record_tokens),
             "reason": f"trip_planner:{self.reason or self.task}",
         }
@@ -199,8 +212,10 @@ Conversation so far:
 
 PLAN SHAPE (include only the keys the task needs):
 {{
-  "task": "lookup" | "list" | "aggregate" | "compare" | "percentage" | "conversation" | "greeting" | "unsupported" | "not_in_data" | "ops_summary",
+  "task": "lookup" | "list" | "aggregate" | "compare" | "percentage" | "productivity" | "conversation" | "greeting" | "unsupported" | "not_in_data" | "ops_summary",
   "record_tokens": ["ETP4455", ...],
+  "dimensions": ["driver" | "truck" | "driver_truck", ...],
+  "rank_by": "completed_trips" | "trips" | "miles" | "completed_miles" | "avg_miles_per_trip",
   "filters": [ {{"field": "<field>", "op": "<op>", "value": <scalar|list>}} ],
   "aggregate": {{
     "operation": "count" | "metric" | "group" | "distinct_count",
@@ -239,6 +254,22 @@ TASKS
                highest total distance" -> group + sort desc + limit 1.
                "which trip has the highest offered amount" -> task list sort by totalofferedamount desc limit 1.
 - percentage : "what % of trips ..." -> numerator (the subset) + pct_of ("trips" or a numeric field).
+- productivity: ANY driver / truck productivity, performance, utilization, ranking or mileage
+               question: "most productive driver / truck", "top 10 drivers by completed trips",
+               "which truck travelled the most miles", "trips completed per truck", "driver-wise
+               total mileage", "average mileage per driver", "least utilized trucks", "compare
+               productivity across trucks", "fleet and driver performance report".
+               dimensions: ["driver"] for driver questions, ["truck"] for truck / vehicle questions,
+               ["driver","truck"] when BOTH are asked separately ("most productive truck and driver",
+               "top 5 drivers and top 5 trucks", "driver-wise and truck-wise"),
+               ["driver_truck"] for a combination / pair ("which driver-truck combination", "which
+               driver used which truck", "trucks assigned to the most productive drivers").
+               rank_by: completed_trips (default, "productive" / "completed" / "deliveries"),
+               trips ("assigned" / "total trips"), miles ("most miles / distance / mileage" /
+               "utilization"), completed_miles, avg_miles_per_trip ("average distance per trip").
+               dir "asc" for least / lowest / bottom. Put a period or a named driver / truck in
+               filters ("this month" -> lastdeliverydate period this_month; "driver 111 1111" ->
+               firstdrivername contains "111 1111"). Use limit for "top N".
 - not_in_data: a business question whose answer is NOT stored in the trip data at all
   (see "NOT in trip data" below) - leave the rest empty. If only PART is missing, plan the part that exists.
 - ops_summary: a manager overview across orders + trips + invoices together ("summary of today's
@@ -251,10 +282,11 @@ FILTER OPS
   gt, gte, lt, lte          numeric only      exists                  value true/false
   date_gte/date_lte/date_gt/date_lt/date_eq   date field, value "YYYY-MM-DD"
   date_range                date field, value ["YYYY-MM-DD","YYYY-MM-DD"] (inclusive) — "between Aug 1 and Aug 15"
-  period                    date field, value: today, yesterday, this_week, last_week, this_month, last_month, this_year, last_year
+  period                    date field, value: today, yesterday, this_week, last_week, this_month, last_month, this_quarter, last_quarter, this_year, last_year
   last_days                 date field, value integer N — "last 7 days", "past 30 days"
 Date fields: "created ..." -> "createdon"; "modified / updated ..." -> "modifiedon";
-"picked up / pickup date" -> "firstpickupdate"; "delivered / delivery date" -> "lastdeliverydate".
+"picked up / pickup date" -> "firstpickupdate"; "delivered / delivery date / completed" -> "lastdeliverydate".
+A period in the question ("this month", "this quarter") MUST become a date filter.
 A month name like "August" with no year -> date_range for that whole month in the CURRENT year.
 date_bucket (daily/weekly/monthly series) uses "createdon".
 
@@ -327,7 +359,14 @@ VOCAB (map the user's word to the real field/value)
   ("belongs to Avaal Group" -> companyname eq "Avaal Group"). carrier -> carriername.
 - linked docs: order number (MRP...) -> ordernumber (contains); order id (digits) -> orderids (contains).
 - type: triptype ("REGULAR - Loaded" ...) ; triptypemain ("REGULAR" / "OUTSOURCING"); variant -> tripvariant.
-- settlement: "settlement status is Paid" -> settlementstatus eq "Paid".
+- SETTLEMENT: settlementstatus is "Paid" on EVERY trip (a system default) — NEVER filter on it.
+  "not settled" / "unsettled" / "pending settlement" / "awaiting settlement" / "settlement not
+  processed" / "no settlement record" / "outstanding settlements" / "pending payment settlement" /
+  "awaiting financial closure" / "not financially settled" ->
+  {{"field":"settlement_pending","op":"eq","value":true}}; "settled" -> same field value false.
+  "delivered / completed but not settled" -> tripstatus eq "Delivered" + settlement_pending eq true.
+  "oldest pending settlements" -> task list, those filters, sort lastdeliverydate asc.
+  "which drivers have unsettled delivered trips" -> those filters + group_by ["firstdrivername"].
 - geo VIRTUAL fields (map the user's place to these; the planner expands each to the real
   pickup*/delivery* Avaal_trip fields): city, state, country, pickup_city, delivery_city,
   pickup_state, delivery_state, pickup_country, delivery_country, pickup_location,
@@ -341,15 +380,16 @@ VOCAB (map the user's word to the real field/value)
   "US" / "United States" / "American" -> country/…_country eq "United States"; "Canadian" -> "Canada".
 
 RULES
-- Use ONLY fields shown in the schema above (dotted nested allowed) or the geo virtual fields. Never invent one.
+- Use ONLY fields shown in the schema above (dotted nested allowed), the geo virtual fields or
+  settlement_pending. Never invent one.
 - Numeric fn/ops only on numeric fields. group_by only on groupable fields (max 2).
 - "trip count city wise" / "give me trip count by driver" / "count by company" ->
   operation group, group_by [that field], metrics [count], sort desc.
   city wise -> group_by ["pickupcity"]; state wise -> ["pickupstate"]; driver -> ["firstdrivername"];
   company -> ["companyname"]; trip status -> ["tripstatus"].
 - "trip count by pickup city and trip status" -> group_by ["pickupcity","tripstatus"].
-- "top 10 drivers by number of trips" -> group_by ["firstdrivername"], metrics [count], sort desc, limit 10.
-- "total distance by driver" -> group_by ["firstdrivername"], metrics [sum triptotaldistance].
+- "top 10 drivers by number of trips" -> task productivity, dimensions ["driver"], rank_by trips, limit 10.
+- "total distance by driver" / "by truck" -> task productivity, rank_by miles.
 - "average trip distance" -> operation metric, metrics [avg triptotaldistance] (NO group_by).
 - "which pickup city has the highest number of trips" / "which driver traveled the highest total
   distance" -> operation group, group_by [that field], sort desc, limit 1.
@@ -418,10 +458,20 @@ def _valid_filter(f: Any, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(name, str) or op not in _ALL_OPS:
         return None
 
+    if name == _SETTLEMENT_PENDING:
+        return {"field": name, "op": "eq", "value": value not in (False, "false", 0)}
+
     if name not in _VIRTUAL_GEO and name not in schema.get("fields", {}):
         resolved = resolve_field(name, schema, aliases=_TRIP_FIELD_ALIASES)
         if resolved:
             name = resolved
+
+    if name == "settlementstatus" and op != "exists":
+        # Always "Paid" in the data — translate to the real settlement signal.
+        vals = value if isinstance(value, list) else [value]
+        says_paid = any(str(v).strip().lower() in ("paid", "settled") for v in vals)
+        pending = says_paid != (op in ("eq", "in"))
+        return {"field": _SETTLEMENT_PENDING, "op": "eq", "value": pending}
 
     kind = _field_kind(name, schema)
     if kind is None:
@@ -598,6 +648,25 @@ def _validate_plan(
             r = resolve_field(of, schema, aliases=_TRIP_FIELD_ALIASES)
             pct_of = r if (r and schema["fields"].get(r, {}).get("numeric")) else "trips"
 
+    dimensions: List[str] = []
+    rank_by = "completed_trips"
+    if task == "productivity":
+        raw_dims = raw.get("dimensions") or []
+        if isinstance(raw_dims, str):
+            raw_dims = [raw_dims]
+        dimensions = [
+            d for d in (str(x).strip().lower() for x in raw_dims)
+            if d in _PRODUCTIVITY_DIMENSIONS
+        ]
+        if not dimensions:
+            q = question.lower()
+            if re.search(r"\b(truck|vehicle|fleet|unit|tractor)s?\b", q):
+                dimensions.append("truck")
+            if re.search(r"\bdrivers?\b", q) or not dimensions:
+                dimensions.insert(0, "driver")
+        rb = str(raw.get("rank_by") or (sort or {}).get("key") or "").lower()
+        rank_by = rb if rb in _PRODUCTIVITY_RANK_KEYS else "completed_trips"
+
     return TripQueryPlan(
         task=task,
         record_tokens=tokens[:2],
@@ -611,6 +680,8 @@ def _validate_plan(
         numerator=numerator,
         pct_of=pct_of,
         metric=metric,
+        dimensions=dimensions,
+        rank_by=rank_by,
     )
 
 
@@ -637,6 +708,22 @@ def run_trip_query_planner(
     )
     if plan is None or plan.task in ("greeting", "conversation", "unsupported"):
         return None
+    if (
+        plan.task in ("list", "aggregate", "percentage", "compare", "productivity")
+        and not plan.record_tokens
+    ):
+        # Delivery / completion questions are about the delivery date.
+        date_field = (
+            "lastdeliverydate"
+            if plan.task == "productivity"
+            or re.search(r"\b(deliver|complet|settle)", q, re.I)
+            else "createdon"
+        )
+        plan.filters, plan.notes = apply_period_guard(
+            q, plan.filters, plan.segments, date_field
+        )
+        if plan.notes:
+            checkpoint("TRIP_PLANNER", "period guard", notes=plan.notes)
     return plan
 
 
@@ -736,6 +823,52 @@ def _driver_unwind_stages(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
     return stages
 
 
+def _settlement_clause(pending: bool) -> Dict[str, Any]:
+    """Settled = settlementsummary "x/y" with x >= y > 0, else settlementcount > 0.
+
+    settlementsummary is "settled/total" ("0/1", "1/2") when the trip has
+    settlement lines, or 0 when it has none; settlementcount is the number of
+    settlements recorded.
+    """
+    parts = {"$split": [{"$toString": {"$ifNull": ["$settlementsummary", ""]}}, "/"]}
+
+    def _num(i: int) -> Dict[str, Any]:
+        return {
+            "$convert": {
+                "input": {"$arrayElemAt": ["$$p", i]},
+                "to": "double",
+                "onError": 0,
+                "onNull": 0,
+            }
+        }
+
+    settled = {
+        "$let": {
+            "vars": {"p": parts},
+            "in": {
+                "$cond": [
+                    {"$eq": [{"$size": "$$p"}, 2]},
+                    {"$and": [{"$gt": [_num(1), 0]}, {"$gte": [_num(0), _num(1)]}]},
+                    {
+                        "$gt": [
+                            {
+                                "$convert": {
+                                    "input": "$settlementcount",
+                                    "to": "double",
+                                    "onError": 0,
+                                    "onNull": 0,
+                                }
+                            },
+                            0,
+                        ]
+                    },
+                ]
+            },
+        }
+    }
+    return {"$expr": {"$not": [settled]} if pending else settled}
+
+
 def _build_trip_match(
     filters: List[Dict[str, Any]], schema: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -751,6 +884,9 @@ def _build_trip_match(
     for f in filters:
         name, op, value = f["field"], f["op"], f.get("value")
         if name == "location_side":
+            continue
+        if name == _SETTLEMENT_PENDING:
+            and_parts.append(_settlement_clause(bool(value)))
             continue
         if name in _VIRTUAL_GEO:
             clause = _geo_clause(name, value, side)
@@ -1000,6 +1136,24 @@ def execute_trip_query_plan(
         )
         tools_run.append("run_analytics")
 
+    elif plan.task == "productivity":
+        analytics_payload = fleet_productivity(
+            _build_trip_match(plan.filters, schema),
+            dimensions=plan.dimensions,
+            rank_by=plan.rank_by,
+            direction=(plan.sort or {}).get("dir") or "desc",
+            limit=plan.limit,
+            filters_summary=_filters_summary(plan.filters),
+        )
+        context_blocks.append(format_productivity_for_context(analytics_payload))
+        checkpoint(
+            "TRIP_PLANNER",
+            "productivity executed",
+            dimensions=plan.dimensions,
+            rank_by=plan.rank_by,
+        )
+        tools_run.append("run_analytics")
+
     elif plan.task == "aggregate" and plan.aggregate is not None:
         match = _build_trip_match(plan.filters, schema)
         pipeline = _build_pipeline(plan.aggregate, match)
@@ -1037,6 +1191,10 @@ def execute_trip_query_plan(
                 }
             )
         tools_run.append("search_records")
+
+    notes_block = period_guard_context(plan.notes)
+    if notes_block:
+        context_blocks.append(notes_block)
 
     return {
         "context_blocks": context_blocks,

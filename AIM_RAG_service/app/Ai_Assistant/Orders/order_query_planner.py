@@ -33,6 +33,15 @@ from langchain_core.prompts import PromptTemplate
 
 from app.embedding_client import get_planner_llm, get_xai_llm
 from app.Ai_Assistant.config import checkpoint
+from app.Ai_Assistant.guards import (
+    PERIOD_NAMES,
+    apply_period_guard,
+    currency_totals,
+    currency_totals_context,
+    period_bounds,
+    period_guard_context,
+    split_spec_by_currency,
+)
 from app.Ai_Assistant.Orders.order_dynamic_analytics import (
     AGG_TIMEOUT_MS,
     _build_pipeline,
@@ -95,12 +104,20 @@ _DATE_OPS = frozenset(
 )
 _ALL_OPS = _STRING_OPS | _NUMERIC_OPS | _DATE_OPS
 
-_PERIODS = frozenset(
-    {
-        "today", "yesterday", "this_week", "last_week",
-        "this_month", "last_month", "this_year", "last_year",
-    }
+_PERIODS = PERIOD_NAMES
+
+# Money columns — a sum/avg over these is always split by currencycode so CAD
+# and USD are never added together.
+_MONEY_FIELD_RE = re.compile(
+    r"freight|charge|amount|tax|price|cost|revenue|valueofgoods|^outvalue$|^outrate$|"
+    r"addition|deduction",
+    re.I,
 )
+_CURRENCY_FIELD = "currencycode"
+
+
+def _is_money_field(name: str) -> bool:
+    return bool(_MONEY_FIELD_RE.search(name or "")) and "exchangerate" not in name.lower()
 
 # Virtual fields resolved through the address-string regex helpers in
 # rag_retrieval._base_order_match (not real top-level Mongo fields).
@@ -153,6 +170,8 @@ class QueryPlan:
     numerator: List[Dict[str, Any]] = dc_field(default_factory=list)
     pct_of: str = "orders"
     metric: Optional[Dict[str, Any]] = None
+    # Period-guard / currency notes passed to the answer model as ground truth.
+    notes: List[str] = dc_field(default_factory=list)
 
     def to_intent_info(self) -> Dict[str, Any]:
         intent = {
@@ -255,7 +274,7 @@ FILTER OPS
   gt, gte, lt, lte          numeric only      exists                  value true/false
   date_gte/date_lte/date_gt/date_lt/date_eq   date field, value "YYYY-MM-DD"
   date_range                date field, value ["YYYY-MM-DD","YYYY-MM-DD"] (inclusive) - use for "between Aug 1 and Aug 15"
-  period                    date field, value one of: today, yesterday, this_week, last_week, this_month, last_month, this_year, last_year
+  period                    date field, value one of: today, yesterday, this_week, last_week, this_month, last_month, this_quarter, last_quarter, this_year, last_year
   last_days                 date field, value integer N - "last 7 days", "past 30 days"
 Date ops work on ANY field tagged date(...) in the schema above. Pick the one the user means:
 "ordered / placed / order date" -> orderdate (this is the default when none is named);
@@ -621,9 +640,9 @@ def run_query_planner(
     # tie-breaks, date-phrase parsing, and NULL-revenue exclusion; asking
     # this planner's LLM to reinvent that from scratch on every question is
     # slower (schema build + LLM call) and not guaranteed to match the rule.
-    from app.Ai_Assistant.Orders.order_analytics import is_profitability_question
+    from app.Ai_Assistant.Orders.profitability import is_profitability_or_lane_question
 
-    if is_profitability_question(q):
+    if is_profitability_or_lane_question(q):
         checkpoint("PLANNER", "defer to profitability engine", reason="pattern_match")
         return None
 
@@ -642,6 +661,12 @@ def run_query_planner(
     )
     if plan is None or plan.task in ("greeting", "conversation", "unsupported"):
         return None
+    if plan.task in ("list", "aggregate", "percentage", "compare") and not plan.record_tokens:
+        plan.filters, plan.notes = apply_period_guard(
+            q, plan.filters, plan.segments, "orderdate"
+        )
+        if plan.notes:
+            checkpoint("PLANNER", "period guard", notes=plan.notes)
     return plan
 
 
@@ -653,30 +678,7 @@ def _month_add(d: date, n: int) -> date:
 
 def _period_bounds(name: str) -> Optional[tuple]:
     """(start_inclusive, end_exclusive) ISO dates for a named period."""
-    today = datetime.now(timezone.utc).date()
-    if name == "today":
-        s, e = today, today + timedelta(days=1)
-    elif name == "yesterday":
-        s, e = today - timedelta(days=1), today
-    elif name == "this_week":
-        s = today - timedelta(days=today.weekday())
-        e = s + timedelta(days=7)
-    elif name == "last_week":
-        e = today - timedelta(days=today.weekday())
-        s = e - timedelta(days=7)
-    elif name == "this_month":
-        s = today.replace(day=1)
-        e = _month_add(s, 1)
-    elif name == "last_month":
-        e = today.replace(day=1)
-        s = _month_add(e, -1)
-    elif name == "this_year":
-        s, e = date(today.year, 1, 1), date(today.year + 1, 1, 1)
-    elif name == "last_year":
-        s, e = date(today.year - 1, 1, 1), date(today.year, 1, 1)
-    else:
-        return None
-    return s.isoformat(), e.isoformat()
+    return period_bounds(name)
 
 
 def _plus_one_day(iso: str) -> str:
@@ -925,6 +927,27 @@ def _metric_value(match: Dict[str, Any], metric: Dict[str, Any]) -> float:
     return float(rows[0]["v"]) if rows and rows[0].get("v") is not None else 0.0
 
 
+def _metric_by_currency(match: Dict[str, Any], metric: Dict[str, Any]) -> Dict[str, float]:
+    """A money metric per currency — {"CAD": 123.0, "USD": 45.0}."""
+    rows = get_orders_collection().aggregate(
+        [
+            {"$match": match},
+            {
+                "$group": {
+                    "_id": f"${_CURRENCY_FIELD}",
+                    "v": {f"${metric['fn']}": _numeric_expr(metric["field"])},
+                }
+            },
+        ],
+        maxTimeMS=AGG_TIMEOUT_MS,
+    )
+    return {
+        str(r["_id"] or "UNKNOWN"): round(float(r["v"]), 4)
+        for r in rows
+        if r.get("v") is not None
+    }
+
+
 def _metric_label(metric: Dict[str, Any]) -> str:
     fn = metric.get("fn") or "count"
     return "order_count" if fn == "count" else f"{fn}_{metric.get('field')}"
@@ -966,12 +989,19 @@ def execute_query_plan(plan: QueryPlan, *, question: str) -> Dict[str, Any]:
     elif plan.task == "compare" and plan.segments:
         metric = plan.metric or {"fn": "count", "field": None}
         label = _metric_label(metric)
+        money = bool(metric.get("field")) and _is_money_field(metric["field"])
         seg_rows = []
         for seg in plan.segments:
             m = _build_match(plan.filters + seg["filters"], schema)
-            seg_rows.append(
-                {"segment": seg["label"], label: round(_metric_value(m, metric), 4)}
-            )
+            if money:
+                # never add CAD and USD — one value per currency
+                seg_rows.append(
+                    {"segment": seg["label"], f"{label}_by_currency": _metric_by_currency(m, metric)}
+                )
+            else:
+                seg_rows.append(
+                    {"segment": seg["label"], label: round(_metric_value(m, metric), 4)}
+                )
         analytics_payload = {
             "analytics_type": "dynamic",
             "engine": "dynamic_planner",
@@ -1031,6 +1061,7 @@ def execute_query_plan(plan: QueryPlan, *, question: str) -> Dict[str, Any]:
 
     elif plan.task == "aggregate" and plan.aggregate is not None:
         match = _build_match(plan.filters, schema)
+        split = split_spec_by_currency(plan.aggregate, _CURRENCY_FIELD, _is_money_field)
         pipeline = _build_pipeline(plan.aggregate, match)
         rows = list(
             get_orders_collection().aggregate(
@@ -1043,6 +1074,13 @@ def execute_query_plan(plan: QueryPlan, *, question: str) -> Dict[str, Any]:
         context_blocks.append(
             format_dynamic_analytics_for_context(analytics_payload)
         )
+        if split:
+            totals = currency_totals(
+                get_orders_collection(), match, plan.aggregate,
+                _CURRENCY_FIELD, _numeric_expr, AGG_TIMEOUT_MS,
+            )
+            analytics_payload["totals_by_currency"] = totals
+            context_blocks.append(currency_totals_context(totals, "orders"))
         checkpoint(
             "PLANNER",
             "aggregate executed",
@@ -1063,6 +1101,10 @@ def execute_query_plan(plan: QueryPlan, *, question: str) -> Dict[str, Any]:
                 }
             )
         tools_run.append("search_records")
+
+    notes_block = period_guard_context(plan.notes)
+    if notes_block:
+        context_blocks.append(notes_block)
 
     return {
         "context_blocks": context_blocks,

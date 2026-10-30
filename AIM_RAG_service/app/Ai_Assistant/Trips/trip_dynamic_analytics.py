@@ -61,8 +61,9 @@ _TRIP_ID_LIKE = frozenset(
         "ordernumber",
         "ordernumbers",
         "customerorderrefno",
-        "truckcode",
-        "trucknumber",
+        # truckcode / trucknumber are NOT id-like: they are a dimension like
+        # drivers ("trips per truck", "most productive truck") and must stay
+        # groupable.
         "platenumber",
         "trlfplatenumber",
         "trlsplatenumber",

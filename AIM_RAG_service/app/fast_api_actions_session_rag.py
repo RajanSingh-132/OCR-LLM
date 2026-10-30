@@ -293,7 +293,10 @@ async def ask_order_question_stream(query: OrderQuery):
                         "type": "final",
                         "data": {
                             "answer": response.get("answer", ""),
+                            # chat the question was asked in (answer stays there)
                             "related": response.get("related"),
+                            # collection the data came from
+                            "answered_from": response.get("answered_from"),
                             "session_id": response.get("session_id"),
                         },
                     }

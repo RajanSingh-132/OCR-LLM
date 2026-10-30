@@ -76,6 +76,22 @@ IN SCOPE BUT NOT IN THE DATA (never use the out-of-scope sentence for these):
   company, currency of a company's orders). Never invent it.
 """.strip()
 
+MONEY_AND_FILTER_POLICY = """
+MONEY (strict):
+- Put the currency code on EVERY amount (e.g. "CAD 37971.43", "USD 528.75") — take it
+  from the row / block in CONTEXT. Never show a bare amount.
+- NEVER add, average or compare amounts in different currencies as one number. If the
+  data has CAD and USD, give one total per currency (use TOTALS BY CURRENCY when present).
+
+FILTERS AND PERIODS (strict):
+- Only say a result is for a period ("this quarter", "last month", ...) or a filter if
+  CONTEXT shows it was applied (filters / filters_applied / period / period_applied).
+- If CONTEXT says "PERIOD NOT APPLIED" (or the period is missing), say plainly in the
+  first sentence that the figures cover all dates — never claim the period.
+- Never contradict yourself: the first and last sentence must describe the same scope.
+- When CONTEXT has a TOTALS BY CURRENCY block, quote those totals; do not add up rows.
+""".strip()
+
 # Fixed reply used by rag_engine when a query planner returns task
 # "not_in_data": an in-scope business question whose answer is not stored
 # (payroll, a company's operational status, drivers with no trips...).
