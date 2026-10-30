@@ -5,7 +5,7 @@ Manual trip ingest — edit CONFIG, then run:
 
 Uses Bedrock Titan embeddings only (no LLM).
 Skips records when tripnumber already exists in the target collection.
-Only ingests records whose `createdon` is within the last calendar month.
+Only ingests records whose `createdon` is within the last RECENT_MONTHS months.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ SKIP_DUPLICATES = True
 
 FILTER_RECENT_ONLY = True
 DATE_FIELD = "createdon"
-RECENT_MONTHS = 1
+RECENT_MONTHS = 3
 EMBED_BATCH_SIZE = 25
 INSERT_BATCH_SIZE = 100
 

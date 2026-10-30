@@ -44,7 +44,7 @@ Each cycle, PER TENANT (in parallel):
      {"filter": {...}}, PageNo/pageno=1, PageSize/pagesize=PAGE_SIZE) -> the
      PAGE_SIZE most recent records.
   2. Keep only records whose date field (DATE_FIELDS, first present wins) is
-     within the last calendar month (RECENT_MONTHS) — checked client-side.
+     within the last RECENT_MONTHS months — checked client-side.
   3. For each record, look it up by InvoiceNumber (DUPLICATE_FIELDS, first
      present wins) in that tenant's collection and compare `createdon` +
      `modifiedon`:
@@ -169,10 +169,11 @@ DETAIL_KEYS = ("details", "Details", "detailsinvoices")
 
 WITH_EMBEDDINGS = True
 
-# Only keep records whose `createdon` is within the last calendar month.
+# Only keep records whose `createdon` is within the last RECENT_MONTHS months;
+# the daily purge deletes anything older.
 FILTER_RECENT_ONLY = True
 DATE_FIELDS = ("createdon", "CreatedOn", "InvoiceDate")
-RECENT_MONTHS = 1
+RECENT_MONTHS = 3
 
 INSERT_BATCH_SIZE = 200
 EMBED_BATCH_SIZE = 25
@@ -188,15 +189,15 @@ EMBED_MAX_WORKERS = 10
 # Gap AFTER each cycle finishes, before the next one starts.
 SLEEP_SECONDS = 30
 
-# --- Daily purge: delete anything older than RECENT_MONTHS -----------------
+# --- Purge: delete anything older than RECENT_MONTHS, every 6 hours --------
 # Runs independently of the 30-second ingest cycle. "Independent" here means:
 # a separate function, checked once per cycle but only ACTUALLY executing
-# when >= CLEANUP_INTERVAL_HOURS have passed since it last ran. The cutoff is
-# computed fresh from datetime.now() every time it runs, so it rolls forward
-# on its own each day — no hardcoded date anywhere.
-CLEANUP_INTERVAL_HOURS = 24
+# when >= CLEANUP_INTERVAL_HOURS have passed since it last ran (4 times a
+# day). The cutoff is computed fresh from datetime.now() every time it runs,
+# so it rolls forward on its own — no hardcoded date anywhere.
+CLEANUP_INTERVAL_HOURS = 6
 # Last-run timestamp is persisted in Mongo (not just kept in memory) so a
-# restart of this process doesn't forget it and purge more than once a day.
+# restart of this process doesn't forget it and purge more often than that.
 SYNC_STATE_COLLECTION = "sync_state"
 SYNC_STATE_DOC_ID = "invoice_live_api_cleanup"
 
@@ -816,7 +817,7 @@ def main() -> int:
 
     logger.info(
         "Starting live invoice sync: corporateids=%s every %ss (%s records/cycle "
-        "per tenant, tenants in parallel), daily purge of records older than "
+        "per tenant, tenants in parallel), purge of records older than "
         "%s month(s) every %sh",
         corporate_ids,
         SLEEP_SECONDS,
