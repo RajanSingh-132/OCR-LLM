@@ -26,8 +26,7 @@ from app.mongo_client import get_mongo_client
 
 # ===================== CONFIG — edit these =====================
 # Add a new tenant here, then run this script.
-DB_NAMES: List[str] = ["AFN01800", "AFN01807", "AFN01808", "AFN01809", "AFN01812", "AFN01813", "AFN01817", "AFN01818", "AFN01823"]
-
+DB_NAMES: List[str] = ["AFN01819", "AFN01822", "AFN01825", "AFN01827", "AFN01834", "AFN01839", "AFN01841", "AFN01843", "AFN01845", "AFN01847", "AFN01848", "AFN01042", "AFN01076", "AFN01078", "AFN01079", "AFN01080", "AFN01084", "AFN01090", "AFN01091"]
 # collection -> (namespace, id field, duplicate field), matching the sync daemons.
 COLLECTIONS: Dict[str, Tuple[str, str, str]] = {
     "Avaal_order": ("avaal_orders", "orderid", "ordernumber"),
